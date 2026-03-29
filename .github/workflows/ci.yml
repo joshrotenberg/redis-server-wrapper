@@ -31,13 +31,23 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest]
         rust: [stable]
         include:
           - os: ubuntu-latest
             rust: 1.87.0
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Redis (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y redis-server
+
+      - name: Install Redis (macOS)
+        if: runner.os == 'macOS'
+        run: brew install redis
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -93,6 +103,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Redis
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y redis-server
 
       - name: Install Rust MSRV
         uses: dtolnay/rust-toolchain@master
