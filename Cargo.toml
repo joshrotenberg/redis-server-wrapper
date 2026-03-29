@@ -16,4 +16,12 @@ rust-version = "1.87"
 thiserror = "2"
 which = "7"
 
+[dev-dependencies]
+clap = { version = "4", features = ["derive"] }
+ctrlc = "3"
+
+[[example]]
+name = "redis-run"
+path = "examples/redis-run.rs"
+
 [workspace]
