@@ -19,6 +19,9 @@ just `redis-server` and `redis-cli` on PATH.
 
 ## Usage
 
+The API is async-first and requires [tokio](https://tokio.rs). Enable the `blocking` feature
+for synchronous wrappers; see the [Blocking API](#blocking-api) section below.
+
 ### Single Server
 
 ```rust
@@ -28,9 +31,10 @@ let server = RedisServer::new()
     .port(6400)
     .bind("127.0.0.1")
     .start()
+    .await
     .unwrap();
 
-assert!(server.is_alive());
+assert!(server.is_alive().await);
 // Stopped automatically on drop.
 ```
 
@@ -44,15 +48,65 @@ let cluster = RedisCluster::builder()
     .replicas_per_master(1)
     .base_port(7000)
     .start()
+    .await
     .unwrap();
 
-assert!(cluster.is_healthy());
+assert!(cluster.is_healthy().await);
 ```
 
 ### Sentinel
 
 ```rust
 use redis_server_wrapper::RedisSentinel;
+
+let sentinel = RedisSentinel::builder()
+    .master_port(6390)
+    .replicas(2)
+    .sentinels(3)
+    .start()
+    .await
+    .unwrap();
+
+assert!(sentinel.is_healthy().await);
+```
+
+## Blocking API
+
+Enable the `blocking` feature for synchronous wrappers that require no async runtime:
+
+```toml
+[dev-dependencies]
+redis-server-wrapper = { version = "...", features = ["blocking"] }
+```
+
+The `blocking` module mirrors the async API. Every operation blocks the calling thread
+until it completes:
+
+```rust
+use redis_server_wrapper::blocking::RedisServer;
+
+let server = RedisServer::new()
+    .port(6400)
+    .bind("127.0.0.1")
+    .start()
+    .unwrap();
+
+assert!(server.is_alive());
+// Stopped automatically on drop.
+```
+
+Cluster and Sentinel work the same way:
+
+```rust
+use redis_server_wrapper::blocking::{RedisCluster, RedisSentinel};
+
+let cluster = RedisCluster::builder()
+    .masters(3)
+    .base_port(7000)
+    .start()
+    .unwrap();
+
+assert!(cluster.is_healthy());
 
 let sentinel = RedisSentinel::builder()
     .master_port(6390)
