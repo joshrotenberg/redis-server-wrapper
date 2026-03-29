@@ -98,13 +98,14 @@ fn wait_for_ctrl_c() {
     println!("Shutting down...");
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
         Command::Standalone { port, bind } => {
-            let server = RedisServer::new().port(port).bind(&bind).start()?;
-            server.wait_for_ready(Duration::from_secs(10))?;
+            let server = RedisServer::new().port(port).bind(&bind).start().await?;
+            server.wait_for_ready(Duration::from_secs(10)).await?;
             println!("Standalone Redis server running at {}", server.addr());
             wait_for_ctrl_c();
             drop(server);
@@ -121,8 +122,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .replicas_per_master(replicas_per_master)
                 .base_port(base_port)
                 .bind(&bind)
-                .start()?;
-            cluster.wait_for_healthy(Duration::from_secs(30))?;
+                .start()
+                .await?;
+            cluster.wait_for_healthy(Duration::from_secs(30)).await?;
             println!("Redis Cluster running:");
             for addr in cluster.node_addrs() {
                 println!("  - {addr}");
@@ -150,8 +152,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .sentinel_base_port(sentinel_base_port)
                 .quorum(quorum)
                 .bind(&bind)
-                .start()?;
-            sentinel.wait_for_healthy(Duration::from_secs(30))?;
+                .start()
+                .await?;
+            sentinel.wait_for_healthy(Duration::from_secs(30)).await?;
             println!(
                 "Redis Sentinel topology running (master: {} at {})",
                 master_name,

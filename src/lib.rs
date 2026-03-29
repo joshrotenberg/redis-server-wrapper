@@ -27,14 +27,17 @@
 //! ```no_run
 //! use redis_server_wrapper::RedisServer;
 //!
+//! # async fn example() {
 //! let server = RedisServer::new()
 //!     .port(6400)
 //!     .bind("127.0.0.1")
 //!     .start()
+//!     .await
 //!     .unwrap();
 //!
-//! assert!(server.is_alive());
+//! assert!(server.is_alive().await);
 //! // Stopped automatically on Drop.
+//! # }
 //! ```
 //!
 //! # Configuration
@@ -46,6 +49,7 @@
 //! ```no_run
 //! use redis_server_wrapper::{LogLevel, RedisServer};
 //!
+//! # async fn example() {
 //! let server = RedisServer::new()
 //!     .port(6400)
 //!     .bind("127.0.0.1")
@@ -55,7 +59,9 @@
 //!     .extra("maxmemory", "256mb")
 //!     .extra("maxmemory-policy", "allkeys-lru")
 //!     .start()
+//!     .await
 //!     .unwrap();
+//! # }
 //! ```
 //!
 //! # Running Commands
@@ -66,11 +72,13 @@
 //! ```no_run
 //! use redis_server_wrapper::RedisServer;
 //!
-//! let server = RedisServer::new().port(6400).start().unwrap();
+//! # async fn example() {
+//! let server = RedisServer::new().port(6400).start().await.unwrap();
 //!
-//! server.run(&["SET", "key", "value"]).unwrap();
-//! let val = server.run(&["GET", "key"]).unwrap();
+//! server.run(&["SET", "key", "value"]).await.unwrap();
+//! let val = server.run(&["GET", "key"]).await.unwrap();
 //! assert_eq!(val.trim(), "value");
+//! # }
 //! ```
 //!
 //! # Cluster
@@ -81,15 +89,18 @@
 //! ```no_run
 //! use redis_server_wrapper::RedisCluster;
 //!
+//! # async fn example() {
 //! let cluster = RedisCluster::builder()
 //!     .masters(3)
 //!     .replicas_per_master(1)
 //!     .base_port(7000)
 //!     .start()
+//!     .await
 //!     .unwrap();
 //!
-//! assert!(cluster.is_healthy());
+//! assert!(cluster.is_healthy().await);
 //! assert_eq!(cluster.node_addrs().len(), 6);
+//! # }
 //! ```
 //!
 //! # Sentinel
@@ -99,16 +110,19 @@
 //! ```no_run
 //! use redis_server_wrapper::RedisSentinel;
 //!
+//! # async fn example() {
 //! let sentinel = RedisSentinel::builder()
 //!     .master_port(6390)
 //!     .replicas(2)
 //!     .sentinels(3)
 //!     .quorum(2)
 //!     .start()
+//!     .await
 //!     .unwrap();
 //!
-//! assert!(sentinel.is_healthy());
+//! assert!(sentinel.is_healthy().await);
 //! assert_eq!(sentinel.master_name(), "mymaster");
+//! # }
 //! ```
 //!
 //! # Error Handling
@@ -120,11 +134,13 @@
 //! ```no_run
 //! use redis_server_wrapper::{Error, RedisServer};
 //!
-//! match RedisServer::new().port(6400).start() {
+//! # async fn example() {
+//! match RedisServer::new().port(6400).start().await {
 //!     Ok(server) => println!("running on {}", server.addr()),
 //!     Err(Error::ServerStart { port }) => eprintln!("could not start on {port}"),
 //!     Err(e) => eprintln!("unexpected: {e}"),
 //! }
+//! # }
 //! ```
 //!
 //! # Lifecycle

@@ -2,8 +2,9 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::process::{Command, Stdio};
 use std::time::Duration;
+
+use tokio::process::Command;
 
 use crate::cli::RedisCli;
 use crate::error::{Error, Result};
@@ -16,15 +17,18 @@ use crate::server::{RedisServer, RedisServerHandle};
 /// ```no_run
 /// use redis_server_wrapper::RedisSentinel;
 ///
+/// # async fn example() {
 /// let sentinel = RedisSentinel::builder()
 ///     .master_name("mymaster")
 ///     .master_port(6390)
 ///     .replicas(2)
 ///     .sentinels(3)
 ///     .start()
+///     .await
 ///     .unwrap();
 ///
-/// assert!(sentinel.is_healthy());
+/// assert!(sentinel.is_healthy().await);
+/// # }
 /// ```
 pub struct RedisSentinelBuilder {
     master_name: String,
@@ -115,7 +119,7 @@ impl RedisSentinelBuilder {
     }
 
     /// Start the full topology: master, replicas, sentinels.
-    pub fn start(self) -> Result<RedisSentinelHandle> {
+    pub async fn start(self) -> Result<RedisSentinelHandle> {
         // Kill leftover processes.
         let cli_for_shutdown = |port: u16| {
             RedisCli::new()
@@ -131,7 +135,7 @@ impl RedisSentinelBuilder {
         for port in self.sentinel_ports() {
             cli_for_shutdown(port);
         }
-        std::thread::sleep(Duration::from_millis(500));
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
         let base_dir = std::env::temp_dir().join("redis-sentinel-wrapper");
         if base_dir.exists() {
@@ -146,7 +150,8 @@ impl RedisSentinelBuilder {
             .appendonly(true)
             .redis_server_bin(&self.redis_server_bin)
             .redis_cli_bin(&self.redis_cli_bin)
-            .start()?;
+            .start()
+            .await?;
 
         // 2. Start replicas.
         let mut replicas = Vec::new();
@@ -159,12 +164,13 @@ impl RedisSentinelBuilder {
                 .extra("replicaof", format!("{} {}", self.bind, self.master_port))
                 .redis_server_bin(&self.redis_server_bin)
                 .redis_cli_bin(&self.redis_cli_bin)
-                .start()?;
+                .start()
+                .await?;
             replicas.push(replica);
         }
 
         // Let replication link up.
-        std::thread::sleep(Duration::from_secs(1));
+        tokio::time::sleep(Duration::from_secs(1)).await;
 
         // 3. Start sentinels.
         let mut sentinel_handles = Vec::new();
@@ -198,9 +204,10 @@ impl RedisSentinelBuilder {
             let status = Command::new(&self.redis_server_bin)
                 .arg(&conf_path)
                 .arg("--sentinel")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()?;
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await?;
 
             if !status.success() {
                 return Err(Error::SentinelStart { port });
@@ -210,12 +217,12 @@ impl RedisSentinelBuilder {
                 .bin(&self.redis_cli_bin)
                 .host(&self.bind)
                 .port(port);
-            cli.wait_for_ready(Duration::from_secs(10))?;
+            cli.wait_for_ready(Duration::from_secs(10)).await?;
             sentinel_handles.push((port, cli));
         }
 
         // Wait for sentinels to discover each other.
-        std::thread::sleep(Duration::from_secs(2));
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
         Ok(RedisSentinelHandle {
             master,
@@ -286,13 +293,13 @@ impl RedisSentinelHandle {
     }
 
     /// Query a sentinel for the current master status.
-    pub fn poke(&self) -> Result<HashMap<String, String>> {
+    pub async fn poke(&self) -> Result<HashMap<String, String>> {
         for port in &self.sentinel_ports {
             let cli = RedisCli::new()
                 .bin(&self.redis_cli_bin)
                 .host(&self.bind)
                 .port(*port);
-            if let Ok(raw) = cli.run(&["SENTINEL", "MASTER", &self.master_name]) {
+            if let Ok(raw) = cli.run(&["SENTINEL", "MASTER", &self.master_name]).await {
                 return Ok(parse_flat_kv(&raw));
             }
         }
@@ -300,8 +307,8 @@ impl RedisSentinelHandle {
     }
 
     /// Check if the topology is healthy.
-    pub fn is_healthy(&self) -> bool {
-        if let Ok(info) = self.poke() {
+    pub async fn is_healthy(&self) -> bool {
+        if let Ok(info) = self.poke().await {
             let flags = info.get("flags").map(|s| s.as_str()).unwrap_or("");
             let num_slaves: u64 = info
                 .get("num-slaves")
@@ -321,10 +328,10 @@ impl RedisSentinelHandle {
     }
 
     /// Wait until the topology is healthy or timeout.
-    pub fn wait_for_healthy(&self, timeout: Duration) -> Result<()> {
+    pub async fn wait_for_healthy(&self, timeout: Duration) -> Result<()> {
         let start = std::time::Instant::now();
         loop {
-            if self.is_healthy() {
+            if self.is_healthy().await {
                 return Ok(());
             }
             if start.elapsed() > timeout {
@@ -332,7 +339,7 @@ impl RedisSentinelHandle {
                     message: "sentinel topology did not become healthy in time".into(),
                 });
             }
-            std::thread::sleep(Duration::from_millis(500));
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 

@@ -13,15 +13,18 @@ use crate::server::{RedisServer, RedisServerHandle};
 /// ```no_run
 /// use redis_server_wrapper::RedisCluster;
 ///
+/// # async fn example() {
 /// let cluster = RedisCluster::builder()
 ///     .masters(3)
 ///     .replicas_per_master(1)
 ///     .base_port(7000)
 ///     .start()
+///     .await
 ///     .unwrap();
 ///
-/// assert!(cluster.is_healthy());
+/// assert!(cluster.is_healthy().await);
 /// // Stopped automatically on Drop.
+/// # }
 /// ```
 pub struct RedisClusterBuilder {
     masters: u16,
@@ -74,7 +77,7 @@ impl RedisClusterBuilder {
     }
 
     /// Start all nodes and form the cluster.
-    pub fn start(self) -> Result<RedisClusterHandle> {
+    pub async fn start(self) -> Result<RedisClusterHandle> {
         // Stop any leftover nodes from previous runs.
         for port in self.ports() {
             RedisCli::new()
@@ -83,7 +86,7 @@ impl RedisClusterBuilder {
                 .port(port)
                 .shutdown();
         }
-        std::thread::sleep(Duration::from_millis(500));
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Start each node.
         let mut nodes = Vec::new();
@@ -96,7 +99,8 @@ impl RedisClusterBuilder {
                 .cluster_node_timeout(5000)
                 .redis_server_bin(&self.redis_server_bin)
                 .redis_cli_bin(&self.redis_cli_bin)
-                .start()?;
+                .start()
+                .await?;
             nodes.push(handle);
         }
 
@@ -106,10 +110,11 @@ impl RedisClusterBuilder {
             .bin(&self.redis_cli_bin)
             .host(&self.bind)
             .port(self.base_port);
-        cli.cluster_create(&node_addrs, self.replicas_per_master)?;
+        cli.cluster_create(&node_addrs, self.replicas_per_master)
+            .await?;
 
         // Wait for convergence.
-        std::thread::sleep(Duration::from_secs(2));
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
         Ok(RedisClusterHandle {
             nodes,
@@ -157,14 +162,19 @@ impl RedisClusterHandle {
     }
 
     /// Check if all nodes are alive.
-    pub fn all_alive(&self) -> bool {
-        self.nodes.iter().all(|n| n.is_alive())
+    pub async fn all_alive(&self) -> bool {
+        for node in &self.nodes {
+            if !node.is_alive().await {
+                return false;
+            }
+        }
+        true
     }
 
     /// Check CLUSTER INFO for state=ok and all slots assigned.
-    pub fn is_healthy(&self) -> bool {
+    pub async fn is_healthy(&self) -> bool {
         for node in &self.nodes {
-            if let Ok(info) = node.run(&["CLUSTER", "INFO"]) {
+            if let Ok(info) = node.run(&["CLUSTER", "INFO"]).await {
                 if info.contains("cluster_state:ok") && info.contains("cluster_slots_ok:16384") {
                     return true;
                 }
@@ -174,10 +184,10 @@ impl RedisClusterHandle {
     }
 
     /// Wait until the cluster is healthy or timeout.
-    pub fn wait_for_healthy(&self, timeout: Duration) -> Result<()> {
+    pub async fn wait_for_healthy(&self, timeout: Duration) -> Result<()> {
         let start = std::time::Instant::now();
         loop {
-            if self.is_healthy() {
+            if self.is_healthy().await {
                 return Ok(());
             }
             if start.elapsed() > timeout {
@@ -185,7 +195,7 @@ impl RedisClusterHandle {
                     message: "cluster did not become healthy in time".into(),
                 });
             }
-            std::thread::sleep(Duration::from_millis(500));
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 
