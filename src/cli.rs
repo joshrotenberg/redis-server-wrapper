@@ -3,6 +3,8 @@
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
+use tokio::process::Command as TokioCommand;
+
 use crate::error::{Error, Result};
 
 /// RESP protocol version for client connections.
@@ -170,8 +172,8 @@ impl RedisCli {
     }
 
     /// Run a command and return stdout on success.
-    pub fn run(&self, args: &[&str]) -> Result<String> {
-        let output = self.raw_output(args)?;
+    pub async fn run(&self, args: &[&str]) -> Result<String> {
+        let output = self.raw_output(args).await?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).to_string())
         } else {
@@ -195,8 +197,9 @@ impl RedisCli {
     }
 
     /// Send PING and return true if PONG is received.
-    pub fn ping(&self) -> bool {
+    pub async fn ping(&self) -> bool {
         self.run(&["PING"])
+            .await
             .map(|r| r.trim() == "PONG")
             .unwrap_or(false)
     }
@@ -207,10 +210,10 @@ impl RedisCli {
     }
 
     /// Wait until the server responds to PING or timeout expires.
-    pub fn wait_for_ready(&self, timeout: std::time::Duration) -> Result<()> {
+    pub async fn wait_for_ready(&self, timeout: std::time::Duration) -> Result<()> {
         let start = std::time::Instant::now();
         loop {
-            if self.ping() {
+            if self.ping().await {
                 return Ok(());
             }
             if start.elapsed() > timeout {
@@ -221,12 +224,16 @@ impl RedisCli {
                     ),
                 });
             }
-            std::thread::sleep(std::time::Duration::from_millis(250));
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
     }
 
     /// Run `redis-cli --cluster create ...` to form a cluster.
-    pub fn cluster_create(&self, node_addrs: &[String], replicas_per_master: u16) -> Result<()> {
+    pub async fn cluster_create(
+        &self,
+        node_addrs: &[String],
+        replicas_per_master: u16,
+    ) -> Result<()> {
         let mut args: Vec<String> = vec!["--cluster".into(), "create".into()];
         args.extend(node_addrs.iter().cloned());
         if replicas_per_master > 0 {
@@ -236,7 +243,10 @@ impl RedisCli {
         args.push("--cluster-yes".into());
 
         let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let output = Command::new(&self.bin).args(&str_args).output()?;
+        let output = TokioCommand::new(&self.bin)
+            .args(&str_args)
+            .output()
+            .await?;
 
         if output.status.success() {
             Ok(())
@@ -324,11 +334,12 @@ impl RedisCli {
         args
     }
 
-    fn raw_output(&self, args: &[&str]) -> std::io::Result<Output> {
-        Command::new(&self.bin)
+    async fn raw_output(&self, args: &[&str]) -> std::io::Result<Output> {
+        TokioCommand::new(&self.bin)
             .args(self.base_args())
             .args(args)
             .output()
+            .await
     }
 }
 
