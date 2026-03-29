@@ -152,14 +152,25 @@
 //!
 //! You can also call `.stop()` explicitly on any handle to shut down early.
 
+#[cfg(feature = "tokio")]
 pub mod cli;
+#[cfg(feature = "tokio")]
 pub mod cluster;
 pub mod error;
+#[cfg(feature = "tokio")]
 pub mod sentinel;
+#[cfg(feature = "tokio")]
 pub mod server;
 
+#[cfg(feature = "blocking")]
+pub mod blocking;
+
+#[cfg(feature = "tokio")]
 pub use cli::{OutputFormat, RedisCli, RespProtocol};
+#[cfg(feature = "tokio")]
 pub use cluster::{RedisCluster, RedisClusterBuilder, RedisClusterHandle};
 pub use error::{Error, Result};
+#[cfg(feature = "tokio")]
 pub use sentinel::{RedisSentinel, RedisSentinelBuilder, RedisSentinelHandle};
+#[cfg(feature = "tokio")]
 pub use server::{LogLevel, RedisServer, RedisServerConfig, RedisServerHandle};
