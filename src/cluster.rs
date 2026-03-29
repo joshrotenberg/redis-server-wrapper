@@ -1,17 +1,17 @@
 //! Redis Cluster lifecycle management built on `RedisServer`.
 
-use std::io;
 use std::time::Duration;
 
-use super::cli::RedisCli;
-use super::server::{RedisServer, RedisServerHandle};
+use crate::cli::RedisCli;
+use crate::error::{Error, Result};
+use crate::server::{RedisServer, RedisServerHandle};
 
 /// Builder for a Redis Cluster.
 ///
 /// # Example
 ///
 /// ```no_run
-/// use redis_test_harness::wrapper::cluster::RedisCluster;
+/// use redis_server_wrapper::RedisCluster;
 ///
 /// let cluster = RedisCluster::builder()
 ///     .masters(3)
@@ -74,7 +74,7 @@ impl RedisClusterBuilder {
     }
 
     /// Start all nodes and form the cluster.
-    pub fn start(self) -> io::Result<RedisClusterHandle> {
+    pub fn start(self) -> Result<RedisClusterHandle> {
         // Stop any leftover nodes from previous runs.
         for port in self.ports() {
             RedisCli::new()
@@ -91,7 +91,7 @@ impl RedisClusterBuilder {
             let handle = RedisServer::new()
                 .port(port)
                 .bind(&self.bind)
-                .dir(format!("/tmp/redis-cluster-wrapper/node-{port}"))
+                .dir(std::env::temp_dir().join(format!("redis-cluster-wrapper/node-{port}")))
                 .cluster_enabled(true)
                 .cluster_node_timeout(5000)
                 .redis_server_bin(&self.redis_server_bin)
@@ -174,17 +174,16 @@ impl RedisClusterHandle {
     }
 
     /// Wait until the cluster is healthy or timeout.
-    pub fn wait_for_healthy(&self, timeout: Duration) -> io::Result<()> {
+    pub fn wait_for_healthy(&self, timeout: Duration) -> Result<()> {
         let start = std::time::Instant::now();
         loop {
             if self.is_healthy() {
                 return Ok(());
             }
             if start.elapsed() > timeout {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "cluster did not become healthy in time",
-                ));
+                return Err(Error::Timeout {
+                    message: "cluster did not become healthy in time".into(),
+                });
             }
             std::thread::sleep(Duration::from_millis(500));
         }

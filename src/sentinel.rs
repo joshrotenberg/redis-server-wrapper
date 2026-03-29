@@ -2,20 +2,19 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use super::cli::RedisCli;
-use super::server::{RedisServer, RedisServerHandle};
+use crate::cli::RedisCli;
+use crate::error::{Error, Result};
+use crate::server::{RedisServer, RedisServerHandle};
 
 /// Builder for a Redis Sentinel topology.
 ///
 /// # Example
 ///
 /// ```no_run
-/// use redis_test_harness::wrapper::sentinel::RedisSentinel;
+/// use redis_server_wrapper::RedisSentinel;
 ///
 /// let sentinel = RedisSentinel::builder()
 ///     .master_name("mymaster")
@@ -116,7 +115,7 @@ impl RedisSentinelBuilder {
     }
 
     /// Start the full topology: master, replicas, sentinels.
-    pub fn start(self) -> io::Result<RedisSentinelHandle> {
+    pub fn start(self) -> Result<RedisSentinelHandle> {
         // Kill leftover processes.
         let cli_for_shutdown = |port: u16| {
             RedisCli::new()
@@ -134,7 +133,7 @@ impl RedisSentinelBuilder {
         }
         std::thread::sleep(Duration::from_millis(500));
 
-        let base_dir = PathBuf::from("/tmp/redis-sentinel-wrapper");
+        let base_dir = std::env::temp_dir().join("redis-sentinel-wrapper");
         if base_dir.exists() {
             let _ = fs::remove_dir_all(&base_dir);
         }
@@ -204,9 +203,7 @@ impl RedisSentinelBuilder {
                 .status()?;
 
             if !status.success() {
-                return Err(io::Error::other(format!(
-                    "sentinel failed to start on port {port}"
-                )));
+                return Err(Error::SentinelStart { port });
             }
 
             let cli = RedisCli::new()
@@ -289,7 +286,7 @@ impl RedisSentinelHandle {
     }
 
     /// Query a sentinel for the current master status.
-    pub fn poke(&self) -> io::Result<HashMap<String, String>> {
+    pub fn poke(&self) -> Result<HashMap<String, String>> {
         for port in &self.sentinel_ports {
             let cli = RedisCli::new()
                 .bin(&self.redis_cli_bin)
@@ -299,10 +296,7 @@ impl RedisSentinelHandle {
                 return Ok(parse_flat_kv(&raw));
             }
         }
-        Err(io::Error::new(
-            io::ErrorKind::NotConnected,
-            "no reachable sentinel",
-        ))
+        Err(Error::NoReachableSentinel)
     }
 
     /// Check if the topology is healthy.
@@ -327,17 +321,16 @@ impl RedisSentinelHandle {
     }
 
     /// Wait until the topology is healthy or timeout.
-    pub fn wait_for_healthy(&self, timeout: Duration) -> io::Result<()> {
+    pub fn wait_for_healthy(&self, timeout: Duration) -> Result<()> {
         let start = std::time::Instant::now();
         loop {
             if self.is_healthy() {
                 return Ok(());
             }
             if start.elapsed() > timeout {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "sentinel topology did not become healthy in time",
-                ));
+                return Err(Error::Timeout {
+                    message: "sentinel topology did not become healthy in time".into(),
+                });
             }
             std::thread::sleep(Duration::from_millis(500));
         }

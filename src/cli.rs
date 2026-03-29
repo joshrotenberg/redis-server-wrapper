@@ -1,7 +1,33 @@
 //! Type-safe wrapper for the `redis-cli` command.
 
-use std::io;
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+
+use crate::error::{Error, Result};
+
+/// RESP protocol version for client connections.
+#[derive(Debug, Clone, Copy)]
+pub enum RespProtocol {
+    /// RESP2 (default for most Redis versions).
+    Resp2,
+    /// RESP3.
+    Resp3,
+}
+
+/// Output format for `redis-cli` commands.
+#[derive(Debug, Clone, Copy)]
+pub enum OutputFormat {
+    /// Default Redis protocol output.
+    Default,
+    /// Raw output (no formatting).
+    Raw,
+    /// CSV output.
+    Csv,
+    /// JSON output.
+    Json,
+    /// Quoted JSON output.
+    QuotedJson,
+}
 
 /// Builder for executing `redis-cli` commands.
 #[derive(Debug, Clone)]
@@ -10,6 +36,18 @@ pub struct RedisCli {
     host: String,
     port: u16,
     password: Option<String>,
+    user: Option<String>,
+    db: Option<u32>,
+    unixsocket: Option<PathBuf>,
+    tls: bool,
+    sni: Option<String>,
+    cacert: Option<PathBuf>,
+    cert: Option<PathBuf>,
+    key: Option<PathBuf>,
+    resp: Option<RespProtocol>,
+    cluster_mode: bool,
+    output_format: OutputFormat,
+    no_auth_warning: bool,
 }
 
 impl RedisCli {
@@ -20,6 +58,18 @@ impl RedisCli {
             host: "127.0.0.1".into(),
             port: 6379,
             password: None,
+            user: None,
+            db: None,
+            unixsocket: None,
+            tls: false,
+            sni: None,
+            cacert: None,
+            cert: None,
+            key: None,
+            resp: None,
+            cluster_mode: false,
+            output_format: OutputFormat::Default,
+            no_auth_warning: false,
         }
     }
 
@@ -47,17 +97,90 @@ impl RedisCli {
         self
     }
 
+    /// Set the ACL username for AUTH.
+    pub fn user(mut self, user: impl Into<String>) -> Self {
+        self.user = Some(user.into());
+        self
+    }
+
+    /// Select a database number.
+    pub fn db(mut self, db: u32) -> Self {
+        self.db = Some(db);
+        self
+    }
+
+    /// Connect via a Unix socket instead of TCP.
+    pub fn unixsocket(mut self, path: impl Into<PathBuf>) -> Self {
+        self.unixsocket = Some(path.into());
+        self
+    }
+
+    /// Enable TLS for the connection.
+    pub fn tls(mut self, enable: bool) -> Self {
+        self.tls = enable;
+        self
+    }
+
+    /// Set the SNI hostname for TLS.
+    pub fn sni(mut self, hostname: impl Into<String>) -> Self {
+        self.sni = Some(hostname.into());
+        self
+    }
+
+    /// Set the CA certificate file for TLS verification.
+    pub fn cacert(mut self, path: impl Into<PathBuf>) -> Self {
+        self.cacert = Some(path.into());
+        self
+    }
+
+    /// Set the client certificate file for TLS.
+    pub fn cert(mut self, path: impl Into<PathBuf>) -> Self {
+        self.cert = Some(path.into());
+        self
+    }
+
+    /// Set the client private key file for TLS.
+    pub fn key(mut self, path: impl Into<PathBuf>) -> Self {
+        self.key = Some(path.into());
+        self
+    }
+
+    /// Set the RESP protocol version.
+    pub fn resp(mut self, protocol: RespProtocol) -> Self {
+        self.resp = Some(protocol);
+        self
+    }
+
+    /// Enable cluster mode (`-c` flag) for following redirects.
+    pub fn cluster_mode(mut self, enable: bool) -> Self {
+        self.cluster_mode = enable;
+        self
+    }
+
+    /// Set the output format.
+    pub fn output_format(mut self, format: OutputFormat) -> Self {
+        self.output_format = format;
+        self
+    }
+
+    /// Suppress the AUTH password warning.
+    pub fn no_auth_warning(mut self, suppress: bool) -> Self {
+        self.no_auth_warning = suppress;
+        self
+    }
+
     /// Run a command and return stdout on success.
-    pub fn run(&self, args: &[&str]) -> io::Result<String> {
+    pub fn run(&self, args: &[&str]) -> Result<String> {
         let output = self.raw_output(args)?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).to_string())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(io::Error::other(format!(
-                "redis-cli {}:{} failed: {stderr}",
-                self.host, self.port
-            )))
+            Err(Error::Cli {
+                host: self.host.clone(),
+                port: self.port,
+                detail: stderr.into_owned(),
+            })
         }
     }
 
@@ -84,31 +207,26 @@ impl RedisCli {
     }
 
     /// Wait until the server responds to PING or timeout expires.
-    pub fn wait_for_ready(&self, timeout: std::time::Duration) -> io::Result<()> {
+    pub fn wait_for_ready(&self, timeout: std::time::Duration) -> Result<()> {
         let start = std::time::Instant::now();
         loop {
             if self.ping() {
                 return Ok(());
             }
             if start.elapsed() > timeout {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!(
+                return Err(Error::Timeout {
+                    message: format!(
                         "{}:{} did not respond within {timeout:?}",
                         self.host, self.port
                     ),
-                ));
+                });
             }
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
     }
 
     /// Run `redis-cli --cluster create ...` to form a cluster.
-    pub fn cluster_create(
-        &self,
-        node_addrs: &[String],
-        replicas_per_master: u16,
-    ) -> io::Result<()> {
+    pub fn cluster_create(&self, node_addrs: &[String], replicas_per_master: u16) -> Result<()> {
         let mut args: Vec<String> = vec!["--cluster".into(), "create".into()];
         args.extend(node_addrs.iter().cloned());
         if replicas_per_master > 0 {
@@ -123,29 +241,90 @@ impl RedisCli {
         if output.status.success() {
             Ok(())
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            Err(io::Error::other(format!(
-                "cluster create failed:\nstdout: {stdout}\nstderr: {stderr}"
-            )))
+            Err(Error::ClusterCreate {
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            })
         }
     }
 
     fn base_args(&self) -> Vec<String> {
-        let mut args = vec![
-            "-h".to_string(),
-            self.host.clone(),
-            "-p".to_string(),
-            self.port.to_string(),
-        ];
+        let mut args = Vec::new();
+
+        if let Some(ref path) = self.unixsocket {
+            args.push("-s".to_string());
+            args.push(path.display().to_string());
+        } else {
+            args.push("-h".to_string());
+            args.push(self.host.clone());
+            args.push("-p".to_string());
+            args.push(self.port.to_string());
+        }
+
+        if let Some(ref user) = self.user {
+            args.push("--user".to_string());
+            args.push(user.clone());
+        }
         if let Some(ref pw) = self.password {
             args.push("-a".to_string());
             args.push(pw.clone());
         }
+        if let Some(db) = self.db {
+            args.push("-n".to_string());
+            args.push(db.to_string());
+        }
+
+        // TLS
+        if self.tls {
+            args.push("--tls".to_string());
+        }
+        if let Some(ref sni) = self.sni {
+            args.push("--sni".to_string());
+            args.push(sni.clone());
+        }
+        if let Some(ref path) = self.cacert {
+            args.push("--cacert".to_string());
+            args.push(path.display().to_string());
+        }
+        if let Some(ref path) = self.cert {
+            args.push("--cert".to_string());
+            args.push(path.display().to_string());
+        }
+        if let Some(ref path) = self.key {
+            args.push("--key".to_string());
+            args.push(path.display().to_string());
+        }
+
+        // Protocol
+        if let Some(ref proto) = self.resp {
+            match proto {
+                RespProtocol::Resp2 => args.push("-2".to_string()),
+                RespProtocol::Resp3 => args.push("-3".to_string()),
+            }
+        }
+
+        // Cluster
+        if self.cluster_mode {
+            args.push("-c".to_string());
+        }
+
+        // Output format
+        match self.output_format {
+            OutputFormat::Default => {}
+            OutputFormat::Raw => args.push("--raw".to_string()),
+            OutputFormat::Csv => args.push("--csv".to_string()),
+            OutputFormat::Json => args.push("--json".to_string()),
+            OutputFormat::QuotedJson => args.push("--quoted-json".to_string()),
+        }
+
+        if self.no_auth_warning {
+            args.push("--no-auth-warning".to_string());
+        }
+
         args
     }
 
-    fn raw_output(&self, args: &[&str]) -> io::Result<Output> {
+    fn raw_output(&self, args: &[&str]) -> std::io::Result<Output> {
         Command::new(&self.bin)
             .args(self.base_args())
             .args(args)

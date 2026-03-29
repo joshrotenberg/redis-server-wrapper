@@ -11,3 +11,9 @@ homepage = "https://github.com/joshrotenberg/redis-server-wrapper"
 keywords = ["redis", "testing", "wrapper", "server"]
 categories = ["development-tools::testing", "database"]
 rust-version = "1.87"
+
+[dependencies]
+thiserror = "2"
+which = "7"
+
+[workspace]
