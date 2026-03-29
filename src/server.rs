@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use std::time::Duration;
+
+use tokio::process::Command;
 
 use crate::cli::RedisCli;
 use crate::error::{Error, Result};
@@ -16,15 +17,18 @@ use crate::error::{Error, Result};
 /// ```no_run
 /// use redis_server_wrapper::RedisServer;
 ///
+/// # async fn example() {
 /// let server = RedisServer::new()
 ///     .port(6400)
 ///     .bind("127.0.0.1")
 ///     .save(false)
 ///     .start()
+///     .await
 ///     .unwrap();
 ///
-/// assert!(server.is_alive());
+/// assert!(server.is_alive().await);
 /// // Stopped automatically on Drop.
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct RedisServerConfig {
@@ -400,7 +404,7 @@ impl RedisServer {
     ///
     /// Verifies that `redis-server` and `redis-cli` binaries are available
     /// before attempting to launch anything.
-    pub fn start(self) -> Result<RedisServerHandle> {
+    pub async fn start(self) -> Result<RedisServerHandle> {
         if which::which(&self.config.redis_server_bin).is_err() {
             return Err(Error::BinaryNotFound {
                 binary: self.config.redis_server_bin.clone(),
@@ -421,9 +425,10 @@ impl RedisServer {
 
         let status = Command::new(&self.config.redis_server_bin)
             .arg(&conf_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?;
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await?;
 
         if !status.success() {
             return Err(Error::ServerStart {
@@ -439,7 +444,7 @@ impl RedisServer {
             cli = cli.password(pw);
         }
 
-        cli.wait_for_ready(Duration::from_secs(10))?;
+        cli.wait_for_ready(Duration::from_secs(10)).await?;
 
         Ok(RedisServerHandle {
             config: self.config,
@@ -610,8 +615,8 @@ impl RedisServerHandle {
     }
 
     /// Check if the server is alive via PING.
-    pub fn is_alive(&self) -> bool {
-        self.cli.ping()
+    pub async fn is_alive(&self) -> bool {
+        self.cli.ping().await
     }
 
     /// Get a `RedisCli` configured for this server.
@@ -620,8 +625,8 @@ impl RedisServerHandle {
     }
 
     /// Run a redis-cli command against this server.
-    pub fn run(&self, args: &[&str]) -> Result<String> {
-        self.cli.run(args)
+    pub async fn run(&self, args: &[&str]) -> Result<String> {
+        self.cli.run(args).await
     }
 
     /// Stop the server via SHUTDOWN NOSAVE.
@@ -630,8 +635,8 @@ impl RedisServerHandle {
     }
 
     /// Wait until the server is ready (PING -> PONG).
-    pub fn wait_for_ready(&self, timeout: Duration) -> Result<()> {
-        self.cli.wait_for_ready(timeout)
+    pub async fn wait_for_ready(&self, timeout: Duration) -> Result<()> {
+        self.cli.wait_for_ready(timeout).await
     }
 }
 
