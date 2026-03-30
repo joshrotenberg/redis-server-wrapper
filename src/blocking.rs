@@ -454,6 +454,12 @@ impl RedisClusterBuilder {
         self
     }
 
+    /// Set a `requirepass` password for all cluster nodes.
+    pub fn password(mut self, password: impl Into<String>) -> Self {
+        self.inner = self.inner.password(password);
+        self
+    }
+
     /// Set a custom `redis-server` binary path.
     pub fn redis_server_bin(mut self, bin: impl Into<String>) -> Self {
         self.inner = self.inner.redis_server_bin(bin);

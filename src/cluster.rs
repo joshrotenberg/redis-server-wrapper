@@ -31,6 +31,7 @@ pub struct RedisClusterBuilder {
     replicas_per_master: u16,
     base_port: u16,
     bind: String,
+    password: Option<String>,
     redis_server_bin: String,
     redis_cli_bin: String,
 }
@@ -53,6 +54,12 @@ impl RedisClusterBuilder {
 
     pub fn bind(mut self, bind: impl Into<String>) -> Self {
         self.bind = bind.into();
+        self
+    }
+
+    /// Set a `requirepass` password for all cluster nodes.
+    pub fn password(mut self, password: impl Into<String>) -> Self {
+        self.password = Some(password.into());
         self
     }
 
@@ -80,11 +87,14 @@ impl RedisClusterBuilder {
     pub async fn start(self) -> Result<RedisClusterHandle> {
         // Stop any leftover nodes from previous runs.
         for port in self.ports() {
-            RedisCli::new()
+            let mut cli = RedisCli::new()
                 .bin(&self.redis_cli_bin)
                 .host(&self.bind)
-                .port(port)
-                .shutdown();
+                .port(port);
+            if let Some(ref password) = self.password {
+                cli = cli.password(password);
+            }
+            cli.shutdown();
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -93,25 +103,31 @@ impl RedisClusterBuilder {
         for port in self.ports() {
             let node_dir = std::env::temp_dir().join(format!("redis-cluster-wrapper/node-{port}"));
             let _ = std::fs::remove_dir_all(&node_dir);
-            let handle = RedisServer::new()
+
+            let mut server = RedisServer::new()
                 .port(port)
                 .bind(&self.bind)
                 .dir(node_dir)
                 .cluster_enabled(true)
                 .cluster_node_timeout(5000)
                 .redis_server_bin(&self.redis_server_bin)
-                .redis_cli_bin(&self.redis_cli_bin)
-                .start()
-                .await?;
+                .redis_cli_bin(&self.redis_cli_bin);
+            if let Some(ref password) = self.password {
+                server = server.password(password).masterauth(password);
+            }
+            let handle = server.start().await?;
             nodes.push(handle);
         }
 
         // Form the cluster.
         let node_addrs: Vec<String> = nodes.iter().map(|n| n.addr()).collect();
-        let cli = RedisCli::new()
+        let mut cli = RedisCli::new()
             .bin(&self.redis_cli_bin)
             .host(&self.bind)
             .port(self.base_port);
+        if let Some(ref password) = self.password {
+            cli = cli.password(password);
+        }
         cli.cluster_create(&node_addrs, self.replicas_per_master)
             .await?;
 
@@ -122,6 +138,7 @@ impl RedisClusterBuilder {
             nodes,
             bind: self.bind,
             base_port: self.base_port,
+            password: self.password,
             redis_cli_bin: self.redis_cli_bin,
         })
     }
@@ -132,6 +149,7 @@ pub struct RedisClusterHandle {
     nodes: Vec<RedisServerHandle>,
     bind: String,
     base_port: u16,
+    password: Option<String>,
     redis_cli_bin: String,
 }
 
@@ -146,6 +164,7 @@ impl RedisCluster {
             replicas_per_master: 0,
             base_port: 7000,
             bind: "127.0.0.1".into(),
+            password: None,
             redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),
         }
@@ -208,10 +227,14 @@ impl RedisClusterHandle {
 
     /// Get a `RedisCli` for the seed node.
     pub fn cli(&self) -> RedisCli {
-        RedisCli::new()
+        let mut cli = RedisCli::new()
             .bin(&self.redis_cli_bin)
             .host(&self.bind)
-            .port(self.base_port)
+            .port(self.base_port);
+        if let Some(ref password) = self.password {
+            cli = cli.password(password);
+        }
+        cli
     }
 }
 
@@ -231,6 +254,7 @@ mod tests {
         assert_eq!(b.masters, 3);
         assert_eq!(b.replicas_per_master, 0);
         assert_eq!(b.base_port, 7000);
+        assert_eq!(b.password, None);
         assert_eq!(b.total_nodes(), 3);
     }
 
@@ -240,5 +264,11 @@ mod tests {
         assert_eq!(b.total_nodes(), 6);
         let ports: Vec<u16> = b.ports().collect();
         assert_eq!(ports, vec![7000, 7001, 7002, 7003, 7004, 7005]);
+    }
+
+    #[test]
+    fn builder_password() {
+        let b = RedisCluster::builder().password("secret");
+        assert_eq!(b.password.as_deref(), Some("secret"));
     }
 }
