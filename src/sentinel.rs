@@ -9,7 +9,7 @@ use tokio::process::Command;
 
 use crate::cli::RedisCli;
 use crate::error::{Error, Result};
-use crate::server::{RedisServer, RedisServerHandle};
+use crate::server::{RedisServer, RedisServerHandle, SavePolicy};
 
 /// Builder for a Redis Sentinel topology.
 ///
@@ -41,6 +41,8 @@ pub struct RedisSentinelBuilder {
     quorum: u16,
     bind: String,
     logfile: Option<String>,
+    save: Option<SavePolicy>,
+    appendonly: Option<bool>,
     down_after_ms: u64,
     failover_timeout_ms: u64,
     extra: HashMap<String, String>,
@@ -127,6 +129,34 @@ impl RedisSentinelBuilder {
     /// Set the `failover-timeout` for all monitored masters in milliseconds (default: `10000`).
     pub fn failover_timeout_ms(mut self, ms: u64) -> Self {
         self.failover_timeout_ms = ms;
+        self
+    }
+
+    /// Set the RDB save policy for all data-bearing processes in the topology.
+    ///
+    /// `true` omits the `save` directive (Redis defaults apply).
+    /// `false` emits `save ""` to disable RDB entirely.
+    pub fn save(mut self, save: bool) -> Self {
+        self.save = Some(if save {
+            SavePolicy::Default
+        } else {
+            SavePolicy::Disabled
+        });
+        self
+    }
+
+    /// Set a custom RDB save schedule for all data-bearing processes in the topology.
+    pub fn save_schedule(mut self, schedule: Vec<(u64, u64)>) -> Self {
+        self.save = Some(SavePolicy::Custom(schedule));
+        self
+    }
+
+    /// Enable or disable AOF persistence for all data-bearing processes in the topology.
+    ///
+    /// When not set, the builder defaults to `appendonly yes` for the master
+    /// and replicas.
+    pub fn appendonly(mut self, appendonly: bool) -> Self {
+        self.appendonly = Some(appendonly);
         self
     }
 
@@ -232,15 +262,23 @@ impl RedisSentinelBuilder {
         fs::create_dir_all(&base_dir)?;
 
         // 1. Start master.
+        let appendonly = self.appendonly.unwrap_or(true);
         let mut master = RedisServer::new()
             .port(self.master_port)
             .bind(&self.bind)
             .dir(base_dir.join("master"))
-            .appendonly(true)
+            .appendonly(appendonly)
             .redis_server_bin(&self.redis_server_bin)
             .redis_cli_bin(&self.redis_cli_bin);
         if let Some(ref logfile) = self.logfile {
             master = master.logfile(logfile.clone());
+        }
+        if let Some(ref save) = self.save {
+            match save {
+                SavePolicy::Disabled => master = master.save(false),
+                SavePolicy::Default => master = master.save(true),
+                SavePolicy::Custom(pairs) => master = master.save_schedule(pairs.clone()),
+            }
         }
         for (key, value) in &self.extra {
             master = master.extra(key.clone(), value.clone());
@@ -254,12 +292,21 @@ impl RedisSentinelBuilder {
                 .port(port)
                 .bind(&self.bind)
                 .dir(base_dir.join(format!("replica-{port}")))
-                .appendonly(true)
+                .appendonly(appendonly)
                 .replicaof(self.bind.clone(), self.master_port)
                 .redis_server_bin(&self.redis_server_bin)
                 .redis_cli_bin(&self.redis_cli_bin);
             if let Some(ref logfile) = self.logfile {
                 replica = replica.logfile(logfile.clone());
+            }
+            if let Some(ref save) = self.save {
+                match save {
+                    SavePolicy::Disabled => replica = replica.save(false),
+                    SavePolicy::Default => replica = replica.save(true),
+                    SavePolicy::Custom(pairs) => {
+                        replica = replica.save_schedule(pairs.clone());
+                    }
+                }
             }
             for (key, value) in &self.extra {
                 replica = replica.extra(key.clone(), value.clone());
@@ -390,6 +437,8 @@ impl RedisSentinel {
             quorum: 2,
             bind: "127.0.0.1".into(),
             logfile: None,
+            save: None,
+            appendonly: None,
             down_after_ms: 5000,
             failover_timeout_ms: 10000,
             extra: HashMap::new(),

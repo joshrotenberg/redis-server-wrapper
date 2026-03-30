@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crate::cli::RedisCli;
 use crate::error::{Error, Result};
-use crate::server::{RedisServer, RedisServerHandle};
+use crate::server::{RedisServer, RedisServerHandle, SavePolicy};
 
 /// Builder for a Redis Cluster.
 ///
@@ -34,6 +34,8 @@ pub struct RedisClusterBuilder {
     bind: String,
     password: Option<String>,
     logfile: Option<String>,
+    save: Option<SavePolicy>,
+    appendonly: Option<bool>,
     extra: HashMap<String, String>,
     redis_server_bin: String,
     redis_cli_bin: String,
@@ -75,6 +77,31 @@ impl RedisClusterBuilder {
     /// Set the log file path for all cluster nodes.
     pub fn logfile(mut self, path: impl Into<String>) -> Self {
         self.logfile = Some(path.into());
+        self
+    }
+
+    /// Set the RDB save policy for all cluster nodes.
+    ///
+    /// `true` omits the `save` directive (Redis defaults apply).
+    /// `false` emits `save ""` to disable RDB entirely.
+    pub fn save(mut self, save: bool) -> Self {
+        self.save = Some(if save {
+            SavePolicy::Default
+        } else {
+            SavePolicy::Disabled
+        });
+        self
+    }
+
+    /// Set a custom RDB save schedule for all cluster nodes.
+    pub fn save_schedule(mut self, schedule: Vec<(u64, u64)>) -> Self {
+        self.save = Some(SavePolicy::Custom(schedule));
+        self
+    }
+
+    /// Enable or disable AOF persistence for all cluster nodes.
+    pub fn appendonly(mut self, appendonly: bool) -> Self {
+        self.appendonly = Some(appendonly);
         self
     }
 
@@ -140,6 +167,18 @@ impl RedisClusterBuilder {
             if let Some(ref logfile) = self.logfile {
                 server = server.logfile(logfile.clone());
             }
+            if let Some(ref save) = self.save {
+                match save {
+                    SavePolicy::Disabled => server = server.save(false),
+                    SavePolicy::Default => server = server.save(true),
+                    SavePolicy::Custom(pairs) => {
+                        server = server.save_schedule(pairs.clone());
+                    }
+                }
+            }
+            if let Some(appendonly) = self.appendonly {
+                server = server.appendonly(appendonly);
+            }
             for (key, value) in &self.extra {
                 server = server.extra(key.clone(), value.clone());
             }
@@ -197,6 +236,8 @@ impl RedisCluster {
             bind: "127.0.0.1".into(),
             password: None,
             logfile: None,
+            save: None,
+            appendonly: None,
             extra: HashMap::new(),
             redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),

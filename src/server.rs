@@ -87,10 +87,32 @@ pub struct RedisServerConfig {
     pub maxclients: Option<u32>,
 
     // -- persistence --
-    /// Whether RDB snapshots are enabled (default: `false`).
-    pub save: bool,
+    /// RDB save policy (default: [`SavePolicy::Disabled`]).
+    pub save: SavePolicy,
     /// Whether AOF persistence is enabled (default: `false`).
     pub appendonly: bool,
+    /// AOF fsync policy, if set.
+    pub appendfsync: Option<AppendFsync>,
+    /// AOF filename, if set (Redis default: `"appendonly.aof"`).
+    pub appendfilename: Option<String>,
+    /// AOF directory name, if set (Redis default: `"appendonlydir"`).
+    pub appenddirname: Option<PathBuf>,
+    /// Whether the AOF file uses an RDB preamble, if set.
+    pub aof_use_rdb_preamble: Option<bool>,
+    /// Whether truncated AOF files are loaded, if set.
+    pub aof_load_truncated: Option<bool>,
+    /// Maximum allowed size of a corrupt AOF tail, if set (e.g. `"32mb"`).
+    pub aof_load_corrupt_tail_max_size: Option<String>,
+    /// Whether AOF rewrite performs incremental fsync, if set.
+    pub aof_rewrite_incremental_fsync: Option<bool>,
+    /// Whether timestamps are recorded in the AOF file, if set.
+    pub aof_timestamp_enabled: Option<bool>,
+    /// Trigger an AOF rewrite when the file grows by this percentage, if set.
+    pub auto_aof_rewrite_percentage: Option<u32>,
+    /// Minimum AOF size before an automatic rewrite is triggered, if set (e.g. `"64mb"`).
+    pub auto_aof_rewrite_min_size: Option<String>,
+    /// Whether fsync is suppressed during AOF rewrites, if set.
+    pub no_appendfsync_on_rewrite: Option<bool>,
 
     // -- replication --
     /// Master host and port to replicate from, if set.
@@ -133,6 +155,42 @@ pub struct RedisServerConfig {
     pub redis_server_bin: String,
     /// Path to the `redis-cli` binary (default: `"redis-cli"`).
     pub redis_cli_bin: String,
+}
+
+/// AOF fsync policy.
+#[derive(Debug, Clone, Copy)]
+pub enum AppendFsync {
+    /// Fsync after every write operation.
+    Always,
+    /// Fsync once per second (Redis default).
+    Everysec,
+    /// Let the OS decide when to flush.
+    No,
+}
+
+impl std::fmt::Display for AppendFsync {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AppendFsync::Always => f.write_str("always"),
+            AppendFsync::Everysec => f.write_str("everysec"),
+            AppendFsync::No => f.write_str("no"),
+        }
+    }
+}
+
+/// RDB save policy.
+///
+/// Controls whether and how the `save` directive is emitted in the Redis
+/// configuration file.
+#[derive(Debug, Clone, Default)]
+pub enum SavePolicy {
+    /// Emit `save ""` to disable RDB snapshots entirely.
+    #[default]
+    Disabled,
+    /// Omit the `save` directive and let Redis use its built-in defaults.
+    Default,
+    /// Emit one `save <seconds> <changes>` line for each pair.
+    Custom(Vec<(u64, u64)>),
 }
 
 /// Redis log level.
@@ -183,8 +241,19 @@ impl Default for RedisServerConfig {
             maxmemory: None,
             maxmemory_policy: None,
             maxclients: None,
-            save: false,
+            save: SavePolicy::Disabled,
             appendonly: false,
+            appendfsync: None,
+            appendfilename: None,
+            appenddirname: None,
+            aof_use_rdb_preamble: None,
+            aof_load_truncated: None,
+            aof_load_corrupt_tail_max_size: None,
+            aof_rewrite_incremental_fsync: None,
+            aof_timestamp_enabled: None,
+            auto_aof_rewrite_percentage: None,
+            auto_aof_rewrite_min_size: None,
+            no_appendfsync_on_rewrite: None,
             replicaof: None,
             masterauth: None,
             password: None,
@@ -347,14 +416,95 @@ impl RedisServer {
     // -- persistence --
 
     /// Enable or disable RDB snapshots (default: off).
+    ///
+    /// `true` omits the `save` directive (Redis built-in defaults apply).
+    /// `false` emits `save ""` to disable RDB entirely.
     pub fn save(mut self, save: bool) -> Self {
-        self.config.save = save;
+        self.config.save = if save {
+            SavePolicy::Default
+        } else {
+            SavePolicy::Disabled
+        };
+        self
+    }
+
+    /// Set a custom RDB save schedule.
+    ///
+    /// Each `(seconds, changes)` pair emits a `save <seconds> <changes>` line.
+    pub fn save_schedule(mut self, schedule: Vec<(u64, u64)>) -> Self {
+        self.config.save = SavePolicy::Custom(schedule);
         self
     }
 
     /// Enable or disable AOF persistence.
     pub fn appendonly(mut self, appendonly: bool) -> Self {
         self.config.appendonly = appendonly;
+        self
+    }
+
+    /// Set the AOF fsync policy.
+    pub fn appendfsync(mut self, policy: AppendFsync) -> Self {
+        self.config.appendfsync = Some(policy);
+        self
+    }
+
+    /// Set the AOF filename.
+    pub fn appendfilename(mut self, name: impl Into<String>) -> Self {
+        self.config.appendfilename = Some(name.into());
+        self
+    }
+
+    /// Set the AOF directory name.
+    pub fn appenddirname(mut self, name: impl Into<PathBuf>) -> Self {
+        self.config.appenddirname = Some(name.into());
+        self
+    }
+
+    /// Enable or disable the RDB preamble in AOF files.
+    pub fn aof_use_rdb_preamble(mut self, enable: bool) -> Self {
+        self.config.aof_use_rdb_preamble = Some(enable);
+        self
+    }
+
+    /// Control whether truncated AOF files are loaded.
+    pub fn aof_load_truncated(mut self, enable: bool) -> Self {
+        self.config.aof_load_truncated = Some(enable);
+        self
+    }
+
+    /// Set the maximum allowed size of a corrupt AOF tail (e.g. `"32mb"`).
+    pub fn aof_load_corrupt_tail_max_size(mut self, size: impl Into<String>) -> Self {
+        self.config.aof_load_corrupt_tail_max_size = Some(size.into());
+        self
+    }
+
+    /// Enable or disable incremental fsync during AOF rewrites.
+    pub fn aof_rewrite_incremental_fsync(mut self, enable: bool) -> Self {
+        self.config.aof_rewrite_incremental_fsync = Some(enable);
+        self
+    }
+
+    /// Enable or disable timestamps in the AOF file.
+    pub fn aof_timestamp_enabled(mut self, enable: bool) -> Self {
+        self.config.aof_timestamp_enabled = Some(enable);
+        self
+    }
+
+    /// Set the percentage growth that triggers an automatic AOF rewrite.
+    pub fn auto_aof_rewrite_percentage(mut self, pct: u32) -> Self {
+        self.config.auto_aof_rewrite_percentage = Some(pct);
+        self
+    }
+
+    /// Set the minimum AOF size before an automatic rewrite is triggered (e.g. `"64mb"`).
+    pub fn auto_aof_rewrite_min_size(mut self, size: impl Into<String>) -> Self {
+        self.config.auto_aof_rewrite_min_size = Some(size.into());
+        self
+    }
+
+    /// Control whether fsync is suppressed during AOF rewrites.
+    pub fn no_appendfsync_on_rewrite(mut self, enable: bool) -> Self {
+        self.config.no_appendfsync_on_rewrite = Some(enable);
         self
     }
 
@@ -595,11 +745,50 @@ impl RedisServer {
         }
 
         // -- persistence --
-        if !self.config.save {
-            conf.push_str("save \"\"\n");
+        match &self.config.save {
+            SavePolicy::Disabled => conf.push_str("save \"\"\n"),
+            SavePolicy::Default => {}
+            SavePolicy::Custom(pairs) => {
+                for (secs, changes) in pairs {
+                    conf.push_str(&format!("save {secs} {changes}\n"));
+                }
+            }
         }
         if self.config.appendonly {
             conf.push_str("appendonly yes\n");
+        }
+        if let Some(ref policy) = self.config.appendfsync {
+            conf.push_str(&format!("appendfsync {policy}\n"));
+        }
+        if let Some(ref name) = self.config.appendfilename {
+            conf.push_str(&format!("appendfilename \"{name}\"\n"));
+        }
+        if let Some(ref name) = self.config.appenddirname {
+            conf.push_str(&format!("appenddirname \"{}\"\n", name.display()));
+        }
+        if let Some(v) = self.config.aof_use_rdb_preamble {
+            conf.push_str(&format!("aof-use-rdb-preamble {}\n", yn(v)));
+        }
+        if let Some(v) = self.config.aof_load_truncated {
+            conf.push_str(&format!("aof-load-truncated {}\n", yn(v)));
+        }
+        if let Some(ref size) = self.config.aof_load_corrupt_tail_max_size {
+            conf.push_str(&format!("aof-load-corrupt-tail-max-size {size}\n"));
+        }
+        if let Some(v) = self.config.aof_rewrite_incremental_fsync {
+            conf.push_str(&format!("aof-rewrite-incremental-fsync {}\n", yn(v)));
+        }
+        if let Some(v) = self.config.aof_timestamp_enabled {
+            conf.push_str(&format!("aof-timestamp-enabled {}\n", yn(v)));
+        }
+        if let Some(pct) = self.config.auto_aof_rewrite_percentage {
+            conf.push_str(&format!("auto-aof-rewrite-percentage {pct}\n"));
+        }
+        if let Some(ref size) = self.config.auto_aof_rewrite_min_size {
+            conf.push_str(&format!("auto-aof-rewrite-min-size {size}\n"));
+        }
+        if let Some(v) = self.config.no_appendfsync_on_rewrite {
+            conf.push_str(&format!("no-appendfsync-on-rewrite {}\n", yn(v)));
         }
 
         // -- replication --
@@ -741,7 +930,7 @@ mod tests {
         let s = RedisServer::new();
         assert_eq!(s.config.port, 6379);
         assert_eq!(s.config.bind, "127.0.0.1");
-        assert!(!s.config.save);
+        assert!(matches!(s.config.save, SavePolicy::Disabled));
     }
 
     #[test]
@@ -758,11 +947,42 @@ mod tests {
 
         assert_eq!(s.config.port, 6400);
         assert_eq!(s.config.bind, "0.0.0.0");
-        assert!(s.config.save);
+        assert!(matches!(s.config.save, SavePolicy::Default));
         assert!(s.config.appendonly);
         assert_eq!(s.config.password.as_deref(), Some("secret"));
         assert_eq!(s.config.logfile.as_deref(), Some("/tmp/redis.log"));
         assert_eq!(s.config.extra.get("maxmemory").unwrap(), "100mb");
+    }
+
+    #[test]
+    fn save_schedule() {
+        let s = RedisServer::new().save_schedule(vec![(900, 1), (300, 10)]);
+        match &s.config.save {
+            SavePolicy::Custom(pairs) => {
+                assert_eq!(pairs, &[(900, 1), (300, 10)]);
+            }
+            _ => panic!("expected SavePolicy::Custom"),
+        }
+    }
+
+    #[test]
+    fn aof_tuning() {
+        let s = RedisServer::new()
+            .appendonly(true)
+            .appendfsync(AppendFsync::Always)
+            .appendfilename("my.aof")
+            .aof_use_rdb_preamble(true)
+            .auto_aof_rewrite_percentage(100)
+            .auto_aof_rewrite_min_size("64mb")
+            .no_appendfsync_on_rewrite(true);
+
+        assert!(s.config.appendonly);
+        assert!(matches!(s.config.appendfsync, Some(AppendFsync::Always)));
+        assert_eq!(s.config.appendfilename.as_deref(), Some("my.aof"));
+        assert_eq!(s.config.aof_use_rdb_preamble, Some(true));
+        assert_eq!(s.config.auto_aof_rewrite_percentage, Some(100));
+        assert_eq!(s.config.auto_aof_rewrite_min_size.as_deref(), Some("64mb"));
+        assert_eq!(s.config.no_appendfsync_on_rewrite, Some(true));
     }
 
     #[test]

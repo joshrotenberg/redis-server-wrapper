@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::runtime::Runtime;
 
 use crate::error::Result;
-use crate::server::LogLevel;
+use crate::server::{AppendFsync, LogLevel};
 use crate::{cli, cluster, sentinel, server};
 
 // ── RedisCli ──────────────────────────────────────────────────────────────────
@@ -250,9 +250,81 @@ impl RedisServer {
         self
     }
 
+    /// Set a custom RDB save schedule.
+    pub fn save_schedule(mut self, schedule: Vec<(u64, u64)>) -> Self {
+        self.inner = self.inner.save_schedule(schedule);
+        self
+    }
+
     /// Enable or disable AOF persistence.
     pub fn appendonly(mut self, appendonly: bool) -> Self {
         self.inner = self.inner.appendonly(appendonly);
+        self
+    }
+
+    /// Set the AOF fsync policy.
+    pub fn appendfsync(mut self, policy: AppendFsync) -> Self {
+        self.inner = self.inner.appendfsync(policy);
+        self
+    }
+
+    /// Set the AOF filename.
+    pub fn appendfilename(mut self, name: impl Into<String>) -> Self {
+        self.inner = self.inner.appendfilename(name);
+        self
+    }
+
+    /// Set the AOF directory name.
+    pub fn appenddirname(mut self, name: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.appenddirname(name);
+        self
+    }
+
+    /// Enable or disable the RDB preamble in AOF files.
+    pub fn aof_use_rdb_preamble(mut self, enable: bool) -> Self {
+        self.inner = self.inner.aof_use_rdb_preamble(enable);
+        self
+    }
+
+    /// Control whether truncated AOF files are loaded.
+    pub fn aof_load_truncated(mut self, enable: bool) -> Self {
+        self.inner = self.inner.aof_load_truncated(enable);
+        self
+    }
+
+    /// Set the maximum allowed size of a corrupt AOF tail (e.g. `"32mb"`).
+    pub fn aof_load_corrupt_tail_max_size(mut self, size: impl Into<String>) -> Self {
+        self.inner = self.inner.aof_load_corrupt_tail_max_size(size);
+        self
+    }
+
+    /// Enable or disable incremental fsync during AOF rewrites.
+    pub fn aof_rewrite_incremental_fsync(mut self, enable: bool) -> Self {
+        self.inner = self.inner.aof_rewrite_incremental_fsync(enable);
+        self
+    }
+
+    /// Enable or disable timestamps in the AOF file.
+    pub fn aof_timestamp_enabled(mut self, enable: bool) -> Self {
+        self.inner = self.inner.aof_timestamp_enabled(enable);
+        self
+    }
+
+    /// Set the percentage growth that triggers an automatic AOF rewrite.
+    pub fn auto_aof_rewrite_percentage(mut self, pct: u32) -> Self {
+        self.inner = self.inner.auto_aof_rewrite_percentage(pct);
+        self
+    }
+
+    /// Set the minimum AOF size before an automatic rewrite is triggered (e.g. `"64mb"`).
+    pub fn auto_aof_rewrite_min_size(mut self, size: impl Into<String>) -> Self {
+        self.inner = self.inner.auto_aof_rewrite_min_size(size);
+        self
+    }
+
+    /// Control whether fsync is suppressed during AOF rewrites.
+    pub fn no_appendfsync_on_rewrite(mut self, enable: bool) -> Self {
+        self.inner = self.inner.no_appendfsync_on_rewrite(enable);
         self
     }
 
@@ -475,6 +547,24 @@ impl RedisClusterBuilder {
         self
     }
 
+    /// Set the RDB save policy for all cluster nodes.
+    pub fn save(mut self, save: bool) -> Self {
+        self.inner = self.inner.save(save);
+        self
+    }
+
+    /// Set a custom RDB save schedule for all cluster nodes.
+    pub fn save_schedule(mut self, schedule: Vec<(u64, u64)>) -> Self {
+        self.inner = self.inner.save_schedule(schedule);
+        self
+    }
+
+    /// Enable or disable AOF persistence for all cluster nodes.
+    pub fn appendonly(mut self, appendonly: bool) -> Self {
+        self.inner = self.inner.appendonly(appendonly);
+        self
+    }
+
     /// Set an arbitrary config directive for all cluster nodes.
     pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.inner = self.inner.extra(key, value);
@@ -642,6 +732,24 @@ impl RedisSentinelBuilder {
         self.inner = self
             .inner
             .monitor_with_replicas(name, host, port, expected_replicas);
+        self
+    }
+
+    /// Set the RDB save policy for all data-bearing processes in the topology.
+    pub fn save(mut self, save: bool) -> Self {
+        self.inner = self.inner.save(save);
+        self
+    }
+
+    /// Set a custom RDB save schedule for all data-bearing processes in the topology.
+    pub fn save_schedule(mut self, schedule: Vec<(u64, u64)>) -> Self {
+        self.inner = self.inner.save_schedule(schedule);
+        self
+    }
+
+    /// Enable or disable AOF persistence for all data-bearing processes in the topology.
+    pub fn appendonly(mut self, appendonly: bool) -> Self {
+        self.inner = self.inner.appendonly(appendonly);
         self
     }
 
