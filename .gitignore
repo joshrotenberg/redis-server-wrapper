@@ -5,3 +5,7 @@ Cargo.lock
 *.swo
 *~
 CLAUDE.md
+# forza internal files
+.plan_breadcrumb.md
+.review_breadcrumb.md
+.forza/
