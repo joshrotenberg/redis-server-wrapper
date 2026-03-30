@@ -16,6 +16,18 @@ pub enum RespProtocol {
     Resp3,
 }
 
+/// IP version preference for connections.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum IpPreference {
+    /// Use the system default.
+    #[default]
+    Default,
+    /// Prefer IPv4 (`-4`).
+    Ipv4,
+    /// Prefer IPv6 (`-6`).
+    Ipv6,
+}
+
 /// Output format for `redis-cli` commands.
 #[derive(Debug, Clone, Copy)]
 pub enum OutputFormat {
@@ -44,12 +56,23 @@ pub struct RedisCli {
     tls: bool,
     sni: Option<String>,
     cacert: Option<PathBuf>,
+    cacertdir: Option<PathBuf>,
     cert: Option<PathBuf>,
     key: Option<PathBuf>,
+    insecure: bool,
+    tls_ciphers: Option<String>,
+    tls_ciphersuites: Option<String>,
     resp: Option<RespProtocol>,
     cluster_mode: bool,
     output_format: OutputFormat,
     no_auth_warning: bool,
+    uri: Option<String>,
+    timeout: Option<f64>,
+    askpass: bool,
+    client_name: Option<String>,
+    ip_preference: IpPreference,
+    repeat: Option<u32>,
+    interval: Option<f64>,
 }
 
 impl RedisCli {
@@ -66,12 +89,23 @@ impl RedisCli {
             tls: false,
             sni: None,
             cacert: None,
+            cacertdir: None,
             cert: None,
             key: None,
+            insecure: false,
+            tls_ciphers: None,
+            tls_ciphersuites: None,
             resp: None,
             cluster_mode: false,
             output_format: OutputFormat::Default,
             no_auth_warning: false,
+            uri: None,
+            timeout: None,
+            askpass: false,
+            client_name: None,
+            ip_preference: IpPreference::Default,
+            repeat: None,
+            interval: None,
         }
     }
 
@@ -144,6 +178,72 @@ impl RedisCli {
     /// Set the client private key file for TLS.
     pub fn key(mut self, path: impl Into<PathBuf>) -> Self {
         self.key = Some(path.into());
+        self
+    }
+
+    /// Set the CA certificate directory for TLS verification.
+    pub fn cacertdir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.cacertdir = Some(path.into());
+        self
+    }
+
+    /// Skip TLS certificate verification (`--insecure`).
+    pub fn insecure(mut self, enable: bool) -> Self {
+        self.insecure = enable;
+        self
+    }
+
+    /// Set the allowed TLS 1.2 ciphers (`--tls-ciphers`).
+    pub fn tls_ciphers(mut self, ciphers: impl Into<String>) -> Self {
+        self.tls_ciphers = Some(ciphers.into());
+        self
+    }
+
+    /// Set the allowed TLS 1.3 ciphersuites (`--tls-ciphersuites`).
+    pub fn tls_ciphersuites(mut self, ciphersuites: impl Into<String>) -> Self {
+        self.tls_ciphersuites = Some(ciphersuites.into());
+        self
+    }
+
+    /// Set the server URI (`-u`), e.g. `redis://user:pass@host:port/db`.
+    pub fn uri(mut self, uri: impl Into<String>) -> Self {
+        self.uri = Some(uri.into());
+        self
+    }
+
+    /// Set the connection timeout in seconds (`-t`).
+    pub fn timeout(mut self, seconds: f64) -> Self {
+        self.timeout = Some(seconds);
+        self
+    }
+
+    /// Prompt for password from stdin (`--askpass`).
+    pub fn askpass(mut self, enable: bool) -> Self {
+        self.askpass = enable;
+        self
+    }
+
+    /// Set the client connection name (`--name`).
+    pub fn client_name(mut self, name: impl Into<String>) -> Self {
+        self.client_name = Some(name.into());
+        self
+    }
+
+    /// Set IP version preference for connections.
+    pub fn ip_preference(mut self, preference: IpPreference) -> Self {
+        self.ip_preference = preference;
+        self
+    }
+
+    /// Execute the command N times (`-r`).
+    pub fn repeat(mut self, count: u32) -> Self {
+        self.repeat = Some(count);
+        self
+    }
+
+    /// Set interval in seconds between repeated commands (`-i`).
+    pub fn interval(mut self, seconds: f64) -> Self {
+        self.interval = Some(seconds);
         self
     }
 
@@ -263,7 +363,11 @@ impl RedisCli {
     fn base_args(&self) -> Vec<String> {
         let mut args = Vec::new();
 
-        if let Some(ref path) = self.unixsocket {
+        // Connection
+        if let Some(ref uri) = self.uri {
+            args.push("-u".to_string());
+            args.push(uri.clone());
+        } else if let Some(ref path) = self.unixsocket {
             args.push("-s".to_string());
             args.push(path.display().to_string());
         } else {
@@ -273,6 +377,7 @@ impl RedisCli {
             args.push(self.port.to_string());
         }
 
+        // Auth
         if let Some(ref user) = self.user {
             args.push("--user".to_string());
             args.push(user.clone());
@@ -281,9 +386,41 @@ impl RedisCli {
             args.push("-a".to_string());
             args.push(pw.clone());
         }
+        if self.askpass {
+            args.push("--askpass".to_string());
+        }
         if let Some(db) = self.db {
             args.push("-n".to_string());
             args.push(db.to_string());
+        }
+
+        // Client name
+        if let Some(ref name) = self.client_name {
+            args.push("--name".to_string());
+            args.push(name.clone());
+        }
+
+        // IP preference
+        match self.ip_preference {
+            IpPreference::Default => {}
+            IpPreference::Ipv4 => args.push("-4".to_string()),
+            IpPreference::Ipv6 => args.push("-6".to_string()),
+        }
+
+        // Timeout
+        if let Some(t) = self.timeout {
+            args.push("-t".to_string());
+            args.push(t.to_string());
+        }
+
+        // Repeat / interval
+        if let Some(r) = self.repeat {
+            args.push("-r".to_string());
+            args.push(r.to_string());
+        }
+        if let Some(i) = self.interval {
+            args.push("-i".to_string());
+            args.push(i.to_string());
         }
 
         // TLS
@@ -298,6 +435,10 @@ impl RedisCli {
             args.push("--cacert".to_string());
             args.push(path.display().to_string());
         }
+        if let Some(ref path) = self.cacertdir {
+            args.push("--cacertdir".to_string());
+            args.push(path.display().to_string());
+        }
         if let Some(ref path) = self.cert {
             args.push("--cert".to_string());
             args.push(path.display().to_string());
@@ -305,6 +446,17 @@ impl RedisCli {
         if let Some(ref path) = self.key {
             args.push("--key".to_string());
             args.push(path.display().to_string());
+        }
+        if self.insecure {
+            args.push("--insecure".to_string());
+        }
+        if let Some(ref ciphers) = self.tls_ciphers {
+            args.push("--tls-ciphers".to_string());
+            args.push(ciphers.clone());
+        }
+        if let Some(ref suites) = self.tls_ciphersuites {
+            args.push("--tls-ciphersuites".to_string());
+            args.push(suites.clone());
         }
 
         // Protocol
