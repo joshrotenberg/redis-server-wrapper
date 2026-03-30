@@ -622,6 +622,26 @@ impl RedisSentinelBuilder {
         self
     }
 
+    /// Add an additional master for the sentinels to monitor.
+    pub fn monitor(mut self, name: impl Into<String>, host: impl Into<String>, port: u16) -> Self {
+        self.inner = self.inner.monitor(name, host, port);
+        self
+    }
+
+    /// Add an additional master and the minimum number of replicas expected for it.
+    pub fn monitor_with_replicas(
+        mut self,
+        name: impl Into<String>,
+        host: impl Into<String>,
+        port: u16,
+        expected_replicas: u16,
+    ) -> Self {
+        self.inner = self
+            .inner
+            .monitor_with_replicas(name, host, port, expected_replicas);
+        self
+    }
+
     /// Set an arbitrary config directive for all processes in the topology.
     pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.inner = self.inner.extra(key, value);
@@ -660,6 +680,16 @@ impl RedisSentinelHandle {
         self.inner.master_addr()
     }
 
+    /// All monitored master names.
+    pub fn monitored_master_names(&self) -> Vec<&str> {
+        self.inner.monitored_master_names()
+    }
+
+    /// All monitored master addresses.
+    pub fn monitored_master_addrs(&self) -> Vec<String> {
+        self.inner.monitored_master_addrs()
+    }
+
     /// All sentinel addresses.
     pub fn sentinel_addrs(&self) -> Vec<String> {
         self.inner.sentinel_addrs()
@@ -678,6 +708,11 @@ impl RedisSentinelHandle {
     /// Query a sentinel for the current master status.
     pub fn poke(&self) -> Result<HashMap<String, String>> {
         self.rt.block_on(self.inner.poke())
+    }
+
+    /// Query a sentinel for a specific monitored master status.
+    pub fn poke_master(&self, master_name: &str) -> Result<HashMap<String, String>> {
+        self.rt.block_on(self.inner.poke_master(master_name))
     }
 
     /// Check if the topology is healthy.

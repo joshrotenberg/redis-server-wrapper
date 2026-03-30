@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::process::Command;
 
@@ -45,6 +46,15 @@ pub struct RedisSentinelBuilder {
     extra: HashMap<String, String>,
     redis_server_bin: String,
     redis_cli_bin: String,
+    monitored_masters: Vec<MonitoredMaster>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MonitoredMaster {
+    name: String,
+    host: String,
+    port: u16,
+    expected_replicas: u16,
 }
 
 impl RedisSentinelBuilder {
@@ -118,6 +128,38 @@ impl RedisSentinelBuilder {
         self
     }
 
+    /// Add an additional master for the sentinels to monitor.
+    ///
+    /// The builder-managed topology still creates the primary master configured by
+    /// [`Self::master_name`] and [`Self::master_port`]. Additional monitored
+    /// masters are expected to already be running.
+    pub fn monitor(mut self, name: impl Into<String>, host: impl Into<String>, port: u16) -> Self {
+        self.monitored_masters.push(MonitoredMaster {
+            name: name.into(),
+            host: host.into(),
+            port,
+            expected_replicas: 0,
+        });
+        self
+    }
+
+    /// Add an additional master and the minimum number of replicas expected for it.
+    pub fn monitor_with_replicas(
+        mut self,
+        name: impl Into<String>,
+        host: impl Into<String>,
+        port: u16,
+        expected_replicas: u16,
+    ) -> Self {
+        self.monitored_masters.push(MonitoredMaster {
+            name: name.into(),
+            host: host.into(),
+            port,
+            expected_replicas,
+        });
+        self
+    }
+
     fn replica_ports(&self) -> impl Iterator<Item = u16> {
         let base = self.replica_base_port;
         let n = self.num_replicas;
@@ -132,6 +174,15 @@ impl RedisSentinelBuilder {
 
     /// Start the full topology: master, replicas, sentinels.
     pub async fn start(self) -> Result<RedisSentinelHandle> {
+        let mut monitored_masters = Vec::with_capacity(1 + self.monitored_masters.len());
+        monitored_masters.push(MonitoredMaster {
+            name: self.master_name.clone(),
+            host: self.bind.clone(),
+            port: self.master_port,
+            expected_replicas: self.num_replicas,
+        });
+        monitored_masters.extend(self.monitored_masters.iter().cloned());
+
         // Kill leftover processes.
         let cli_for_shutdown = |port: u16| {
             RedisCli::new()
@@ -149,10 +200,16 @@ impl RedisSentinelBuilder {
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        let base_dir = std::env::temp_dir().join("redis-sentinel-wrapper");
-        if base_dir.exists() {
-            let _ = fs::remove_dir_all(&base_dir);
-        }
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let base_dir = std::env::temp_dir().join(format!(
+            "redis-sentinel-wrapper-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        fs::create_dir_all(&base_dir)?;
 
         // 1. Start master.
         let mut master = RedisServer::new()
@@ -211,22 +268,26 @@ impl RedisSentinelBuilder {
                  daemonize yes\n\
                  pidfile {dir}/sentinel.pid\n\
                  logfile {logfile}\n\
-                 dir {dir}\n\
-                 sentinel monitor {name} {master_host} {master_port} {quorum}\n\
-                 sentinel down-after-milliseconds {name} {down_after}\n\
-                 sentinel failover-timeout {name} {failover_timeout}\n\
-                 sentinel parallel-syncs {name} 1\n",
+                 dir {dir}\n",
                 port = port,
                 bind = self.bind,
                 dir = dir.display(),
                 logfile = logfile,
-                name = self.master_name,
-                master_host = self.bind,
-                master_port = self.master_port,
-                quorum = self.quorum,
-                down_after = self.down_after_ms,
-                failover_timeout = self.failover_timeout_ms,
             );
+            for master in &monitored_masters {
+                conf.push_str(&format!(
+                    "sentinel monitor {name} {host} {master_port} {quorum}\n\
+                     sentinel down-after-milliseconds {name} {down_after}\n\
+                     sentinel failover-timeout {name} {failover_timeout}\n\
+                     sentinel parallel-syncs {name} 1\n",
+                    name = master.name,
+                    host = master.host,
+                    master_port = master.port,
+                    quorum = self.quorum,
+                    down_after = self.down_after_ms,
+                    failover_timeout = self.failover_timeout_ms,
+                ));
+            }
             for (key, value) in &self.extra {
                 conf.push_str(&format!("{key} {value}\n"));
             }
@@ -271,7 +332,7 @@ impl RedisSentinelBuilder {
             bind: self.bind,
             redis_cli_bin: self.redis_cli_bin,
             num_sentinels: self.num_sentinels,
-            num_replicas: self.num_replicas,
+            monitored_masters,
         })
     }
 }
@@ -287,7 +348,7 @@ pub struct RedisSentinelHandle {
     bind: String,
     redis_cli_bin: String,
     num_sentinels: u16,
-    num_replicas: u16,
+    monitored_masters: Vec<MonitoredMaster>,
 }
 
 /// Convenience constructor.
@@ -311,6 +372,7 @@ impl RedisSentinel {
             extra: HashMap::new(),
             redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),
+            monitored_masters: Vec::new(),
         }
     }
 }
@@ -319,6 +381,22 @@ impl RedisSentinelHandle {
     /// The master's address.
     pub fn master_addr(&self) -> String {
         self.master.addr()
+    }
+
+    /// All monitored master names.
+    pub fn monitored_master_names(&self) -> Vec<&str> {
+        self.monitored_masters
+            .iter()
+            .map(|master| master.name.as_str())
+            .collect()
+    }
+
+    /// All monitored master addresses.
+    pub fn monitored_master_addrs(&self) -> Vec<String> {
+        self.monitored_masters
+            .iter()
+            .map(|master| format!("{}:{}", master.host, master.port))
+            .collect()
     }
 
     /// The PIDs of all processes in the topology (master, replicas, sentinels).
@@ -347,12 +425,17 @@ impl RedisSentinelHandle {
 
     /// Query a sentinel for the current master status.
     pub async fn poke(&self) -> Result<HashMap<String, String>> {
+        self.poke_master(&self.master_name).await
+    }
+
+    /// Query a sentinel for a specific monitored master status.
+    pub async fn poke_master(&self, master_name: &str) -> Result<HashMap<String, String>> {
         for port in &self.sentinel_ports {
             let cli = RedisCli::new()
                 .bin(&self.redis_cli_bin)
                 .host(&self.bind)
                 .port(*port);
-            if let Ok(raw) = cli.run(&["SENTINEL", "MASTER", &self.master_name]).await {
+            if let Ok(raw) = cli.run(&["SENTINEL", "MASTER", master_name]).await {
                 return Ok(parse_flat_kv(&raw));
             }
         }
@@ -361,7 +444,10 @@ impl RedisSentinelHandle {
 
     /// Check if the topology is healthy.
     pub async fn is_healthy(&self) -> bool {
-        if let Ok(info) = self.poke().await {
+        for master in &self.monitored_masters {
+            let Ok(info) = self.poke_master(&master.name).await else {
+                return false;
+            };
             let flags = info.get("flags").map(|s| s.as_str()).unwrap_or("");
             let num_slaves: u64 = info
                 .get("num-slaves")
@@ -372,12 +458,14 @@ impl RedisSentinelHandle {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0)
                 + 1;
-            flags == "master"
-                && num_slaves >= self.num_replicas as u64
-                && num_sentinels >= self.num_sentinels as u64
-        } else {
-            false
+            if flags != "master"
+                || num_slaves < master.expected_replicas as u64
+                || num_sentinels < self.num_sentinels as u64
+            {
+                return false;
+            }
         }
+        true
     }
 
     /// Wait until the topology is healthy or timeout.
@@ -441,6 +529,7 @@ mod tests {
         assert_eq!(b.quorum, 2);
         assert!(b.logfile.is_none());
         assert!(b.extra.is_empty());
+        assert!(b.monitored_masters.is_empty());
     }
 
     #[test]
@@ -452,7 +541,8 @@ mod tests {
             .sentinels(5)
             .quorum(3)
             .logfile("/tmp/sentinel.log")
-            .extra("maxmemory", "10mb");
+            .extra("maxmemory", "10mb")
+            .monitor("backup", "127.0.0.1", 6501);
         assert_eq!(b.master_name, "custom");
         assert_eq!(b.master_port, 6500);
         assert_eq!(b.num_replicas, 1);
@@ -460,6 +550,16 @@ mod tests {
         assert_eq!(b.quorum, 3);
         assert_eq!(b.logfile.as_deref(), Some("/tmp/sentinel.log"));
         assert_eq!(b.extra.get("maxmemory").map(String::as_str), Some("10mb"));
+        assert_eq!(b.monitored_masters.len(), 1);
+        assert_eq!(
+            b.monitored_masters[0],
+            MonitoredMaster {
+                name: "backup".into(),
+                host: "127.0.0.1".into(),
+                port: 6501,
+                expected_replicas: 0,
+            }
+        );
     }
 
     #[test]
