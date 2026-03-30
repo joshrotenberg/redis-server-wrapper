@@ -99,3 +99,46 @@ fn blocking_sentinel_start_and_health() {
     assert_eq!(sentinel.master_addr(), "127.0.0.1:16590");
     assert_eq!(sentinel.sentinel_addrs().len(), 3);
 }
+
+#[test]
+fn blocking_sentinel_monitors_multiple_masters() {
+    let external_master = RedisServer::new()
+        .port(16595)
+        .bind("127.0.0.1")
+        .start()
+        .expect("failed to start external master");
+
+    let sentinel = RedisSentinel::builder()
+        .master_port(16596)
+        .replicas(1)
+        .replica_base_port(16597)
+        .sentinels(3)
+        .sentinel_base_port(26596)
+        .monitor("backup", "127.0.0.1", 16595)
+        .start()
+        .expect("failed to start sentinel topology");
+
+    sentinel
+        .wait_for_healthy(std::time::Duration::from_secs(30))
+        .expect("sentinel topology did not become healthy");
+
+    assert!(sentinel.is_healthy());
+    assert_eq!(
+        sentinel.monitored_master_names(),
+        vec!["mymaster", "backup"]
+    );
+    assert_eq!(
+        sentinel.monitored_master_addrs(),
+        vec!["127.0.0.1:16596".to_string(), "127.0.0.1:16595".to_string()]
+    );
+
+    let backup = sentinel
+        .poke_master("backup")
+        .expect("failed to query backup master");
+    assert_eq!(backup.get("name").map(String::as_str), Some("backup"));
+    assert_eq!(backup.get("ip").map(String::as_str), Some("127.0.0.1"));
+    assert_eq!(backup.get("port").map(String::as_str), Some("16595"));
+
+    drop(sentinel);
+    drop(external_master);
+}
