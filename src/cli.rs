@@ -234,7 +234,9 @@ impl RedisCli {
         node_addrs: &[String],
         replicas_per_master: u16,
     ) -> Result<()> {
-        let mut args: Vec<String> = vec!["--cluster".into(), "create".into()];
+        let mut args = self.base_args();
+        args.push("--cluster".into());
+        args.push("create".into());
         args.extend(node_addrs.iter().cloned());
         if replicas_per_master > 0 {
             args.push("--cluster-replicas".into());
