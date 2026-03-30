@@ -150,7 +150,8 @@
 //! topologies, sentinels are shut down first, then replicas and master (via
 //! their own handle drops).
 //!
-//! You can also call `.stop()` explicitly on any handle to shut down early.
+//! You can also call `.stop()` explicitly on any handle to shut down early, or
+//! `.detach()` on a server handle to consume it without stopping the process.
 
 #[cfg(feature = "tokio")]
 pub mod cli;

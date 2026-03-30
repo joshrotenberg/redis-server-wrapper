@@ -459,6 +459,7 @@ impl RedisServer {
             config: self.config,
             cli,
             pid,
+            detached: false,
         })
     }
 
@@ -607,6 +608,7 @@ pub struct RedisServerHandle {
     config: RedisServerConfig,
     cli: RedisCli,
     pid: u32,
+    detached: bool,
 }
 
 impl RedisServerHandle {
@@ -645,6 +647,11 @@ impl RedisServerHandle {
         self.cli.run(args).await
     }
 
+    /// Consume the handle without stopping the server.
+    pub fn detach(mut self) {
+        self.detached = true;
+    }
+
     /// Stop the server via SHUTDOWN NOSAVE.
     pub fn stop(&self) {
         self.cli.shutdown();
@@ -658,7 +665,9 @@ impl RedisServerHandle {
 
 impl Drop for RedisServerHandle {
     fn drop(&mut self) {
-        self.stop();
+        if !self.detached {
+            self.stop();
+        }
     }
 }
 

@@ -43,6 +43,27 @@ fn blocking_server_stop_and_verify() {
 }
 
 #[test]
+fn blocking_server_detach_leaves_server_running() {
+    let server = RedisServer::new()
+        .port(16503)
+        .start()
+        .expect("failed to start redis-server");
+
+    let cli = redis_server_wrapper::blocking::RedisCli::new()
+        .host("127.0.0.1")
+        .port(16503);
+    server.detach();
+
+    cli.wait_for_ready(std::time::Duration::from_secs(2))
+        .expect("detached server should still be reachable");
+    assert!(cli.ping());
+
+    cli.run(&["SHUTDOWN", "NOSAVE"]).unwrap_or_default();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(!cli.ping());
+}
+
+#[test]
 fn blocking_cluster_start_and_health() {
     let cluster = RedisCluster::builder()
         .masters(3)
