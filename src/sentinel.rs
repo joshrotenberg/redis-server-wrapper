@@ -218,7 +218,14 @@ impl RedisSentinelBuilder {
                 .host(&self.bind)
                 .port(port);
             cli.wait_for_ready(Duration::from_secs(10)).await?;
-            sentinel_handles.push((port, cli));
+
+            let pid_path = dir.join("sentinel.pid");
+            let pid: u32 = fs::read_to_string(&pid_path)?
+                .trim()
+                .parse()
+                .map_err(|_| Error::SentinelStart { port })?;
+
+            sentinel_handles.push((port, pid, cli));
         }
 
         // Wait for sentinels to discover each other.
@@ -227,7 +234,8 @@ impl RedisSentinelBuilder {
         Ok(RedisSentinelHandle {
             master,
             replicas,
-            sentinel_ports: sentinel_handles.iter().map(|(p, _)| *p).collect(),
+            sentinel_ports: sentinel_handles.iter().map(|(p, _, _)| *p).collect(),
+            sentinel_pids: sentinel_handles.iter().map(|(_, pid, _)| *pid).collect(),
             master_name: self.master_name,
             bind: self.bind,
             redis_cli_bin: self.redis_cli_bin,
@@ -243,6 +251,7 @@ pub struct RedisSentinelHandle {
     #[allow(dead_code)] // Kept alive for Drop cleanup
     replicas: Vec<RedisServerHandle>,
     sentinel_ports: Vec<u16>,
+    sentinel_pids: Vec<u32>,
     master_name: String,
     bind: String,
     redis_cli_bin: String,
@@ -277,6 +286,17 @@ impl RedisSentinelHandle {
     /// The master's address.
     pub fn master_addr(&self) -> String {
         self.master.addr()
+    }
+
+    /// The PIDs of all processes in the topology (master, replicas, sentinels).
+    pub fn pids(&self) -> Vec<u32> {
+        let mut pids = Vec::with_capacity(1 + self.replicas.len() + self.sentinel_pids.len());
+        pids.push(self.master.pid());
+        for replica in &self.replicas {
+            pids.push(replica.pid());
+        }
+        pids.extend_from_slice(&self.sentinel_pids);
+        pids
     }
 
     /// All sentinel addresses.

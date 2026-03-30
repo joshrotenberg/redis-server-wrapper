@@ -379,6 +379,11 @@ impl RedisServerHandle {
         self.inner.host()
     }
 
+    /// The PID of the `redis-server` process.
+    pub fn pid(&self) -> u32 {
+        self.inner.pid()
+    }
+
     /// Check if the server is alive via PING.
     pub fn is_alive(&self) -> bool {
         self.rt.block_on(self.inner.is_alive())
@@ -479,6 +484,11 @@ impl RedisClusterHandle {
     /// All node addresses.
     pub fn node_addrs(&self) -> Vec<String> {
         self.inner.node_addrs()
+    }
+
+    /// The PIDs of all `redis-server` processes in the cluster.
+    pub fn pids(&self) -> Vec<u32> {
+        self.inner.pids()
     }
 
     /// Check if all nodes are alive.
@@ -612,6 +622,11 @@ impl RedisSentinelHandle {
     /// All sentinel addresses.
     pub fn sentinel_addrs(&self) -> Vec<String> {
         self.inner.sentinel_addrs()
+    }
+
+    /// The PIDs of all processes in the topology (master, replicas, sentinels).
+    pub fn pids(&self) -> Vec<u32> {
+        self.inner.pids()
     }
 
     /// The monitored master name.
