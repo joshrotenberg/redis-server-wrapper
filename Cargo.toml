@@ -10,7 +10,9 @@ documentation = "https://docs.rs/redis-server-wrapper"
 homepage = "https://github.com/joshrotenberg/redis-server-wrapper"
 keywords = ["redis", "testing", "wrapper", "server"]
 categories = ["development-tools::testing", "database"]
+readme = "README.md"
 rust-version = "1.87"
+exclude = [".github/", "tests/", "examples/"]
 
 [features]
 default = ["tokio"]
