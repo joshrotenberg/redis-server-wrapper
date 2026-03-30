@@ -176,5 +176,6 @@ pub use error::{Error, Result};
 pub use sentinel::{RedisSentinel, RedisSentinelBuilder, RedisSentinelHandle};
 #[cfg(feature = "tokio")]
 pub use server::{
-    AppendFsync, LogLevel, RedisServer, RedisServerConfig, RedisServerHandle, SavePolicy,
+    AppendFsync, LogLevel, RedisServer, RedisServerConfig, RedisServerHandle, ReplDisklessLoad,
+    SavePolicy,
 };
