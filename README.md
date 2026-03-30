@@ -20,12 +20,37 @@ just `redis-server` and `redis-cli` on PATH.
 
 ## Prerequisites
 
-`redis-server` and `redis-cli` must be available on your PATH (or specify custom paths).
+`redis-server` and `redis-cli` must be available on your PATH (or specify custom paths with
+`.redis_server_bin()` and `.redis_cli_bin()` on any builder).
+
+## Installation
+
+Add to `Cargo.toml` for async use (the default):
+
+```toml
+[dev-dependencies]
+redis-server-wrapper = "0.1"
+```
+
+The `tokio` feature is enabled by default. To use the synchronous blocking API instead,
+disable default features and enable `blocking`:
+
+```toml
+[dev-dependencies]
+redis-server-wrapper = { version = "0.1", default-features = false, features = ["blocking"] }
+```
+
+To use both async and blocking APIs together:
+
+```toml
+[dev-dependencies]
+redis-server-wrapper = { version = "0.1", features = ["blocking"] }
+```
 
 ## Usage
 
-The API is async-first and requires [tokio](https://tokio.rs). Enable the `blocking` feature
-for synchronous wrappers; see the [Blocking API](#blocking-api) section below.
+The async API requires [tokio](https://tokio.rs). See the [Blocking API](#blocking-api) section
+for synchronous use.
 
 ### Single Server
 
@@ -43,8 +68,54 @@ assert!(server.is_alive().await);
 // Stopped automatically on drop.
 ```
 
-If you want the process to keep running after the handle is consumed, call
-`server.detach()` instead of dropping it.
+The server process is stopped via `SHUTDOWN NOSAVE` when the handle is dropped.
+Call `server.detach()` to consume the handle without stopping the process.
+
+### Configuration
+
+Common options have dedicated builder methods. Anything else can be passed as
+a raw Redis directive with `.extra(key, value)`:
+
+```rust
+use redis_server_wrapper::{LogLevel, RedisServer};
+
+let server = RedisServer::new()
+    .port(6400)
+    .bind("127.0.0.1")
+    .password("secret")
+    .loglevel(LogLevel::Warning)
+    .appendonly(true)
+    .extra("maxmemory", "256mb")
+    .extra("maxmemory-policy", "allkeys-lru")
+    .start()
+    .await
+    .unwrap();
+```
+
+### Running Commands
+
+The handle exposes a `RedisCli` you can use to run arbitrary commands against the server:
+
+```rust
+use redis_server_wrapper::RedisServer;
+
+let server = RedisServer::new().port(6400).start().await.unwrap();
+
+server.run(&["SET", "key", "value"]).await.unwrap();
+let val = server.run(&["GET", "key"]).await.unwrap();
+assert_eq!(val.trim(), "value");
+```
+
+You can also get a `RedisCli` instance directly from the handle:
+
+```rust
+use redis_server_wrapper::RedisServer;
+
+let server = RedisServer::new().port(6400).start().await.unwrap();
+let cli = server.cli();
+let pong = cli.ping().await;
+assert!(pong);
+```
 
 ### Cluster
 
@@ -78,17 +149,34 @@ let sentinel = RedisSentinel::builder()
 assert!(sentinel.is_healthy().await);
 ```
 
+## Error Handling
+
+All fallible operations return `Result<T, Error>`. The `Error` enum covers server
+start failures, timeouts, CLI errors, and underlying I/O errors:
+
+```rust
+use redis_server_wrapper::{Error, RedisServer};
+
+match RedisServer::new().port(6400).start().await {
+    Ok(server) => println!("running on {}", server.addr()),
+    Err(Error::ServerStart { port }) => eprintln!("could not start on port {port}"),
+    Err(Error::BinaryNotFound { binary }) => eprintln!("{binary} not found on PATH"),
+    Err(e) => eprintln!("unexpected: {e}"),
+}
+```
+
 ## Blocking API
 
 Enable the `blocking` feature for synchronous wrappers that require no async runtime:
 
 ```toml
 [dev-dependencies]
-redis-server-wrapper = { version = "...", features = ["blocking"] }
+redis-server-wrapper = { version = "0.1", features = ["blocking"] }
 ```
 
 The `blocking` module mirrors the async API. Every operation blocks the calling thread
-until it completes:
+until it completes. Handles own a long-lived `tokio::runtime::Runtime` so that the
+underlying async `Drop` implementation keeps working correctly.
 
 ```rust
 use redis_server_wrapper::blocking::RedisServer;
@@ -126,6 +214,14 @@ let sentinel = RedisSentinel::builder()
     .unwrap();
 
 assert!(sentinel.is_healthy());
+```
+
+## Examples
+
+The crate ships a runnable example that demonstrates various server configurations:
+
+```sh
+cargo run --example redis-run
 ```
 
 ## License

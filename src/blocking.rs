@@ -18,7 +18,10 @@ use crate::{cli, cluster, sentinel, server};
 
 /// Synchronous wrapper for [`crate::RedisCli`].
 ///
-/// Each async method creates a single-use [`Runtime`] internally.
+/// Each method on this type blocks the calling thread by running the
+/// corresponding async operation on a temporary [`Runtime`].  For running
+/// many commands against a single server, prefer the async API which shares a
+/// long-lived runtime.
 pub struct RedisCli {
     inner: cli::RedisCli,
 }

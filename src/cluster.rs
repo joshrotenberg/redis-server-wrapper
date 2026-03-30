@@ -40,21 +40,27 @@ pub struct RedisClusterBuilder {
 }
 
 impl RedisClusterBuilder {
+    /// Set the number of master nodes (default: `3`).
     pub fn masters(mut self, n: u16) -> Self {
         self.masters = n;
         self
     }
 
+    /// Set the number of replicas per master (default: `0`).
     pub fn replicas_per_master(mut self, n: u16) -> Self {
         self.replicas_per_master = n;
         self
     }
 
+    /// Set the base port for cluster nodes (default: `7000`).
+    ///
+    /// Nodes are assigned consecutive ports starting at this value.
     pub fn base_port(mut self, port: u16) -> Self {
         self.base_port = port;
         self
     }
 
+    /// Set the bind address for all cluster nodes (default: `"127.0.0.1"`).
     pub fn bind(mut self, bind: impl Into<String>) -> Self {
         self.bind = bind.into();
         self
@@ -78,11 +84,13 @@ impl RedisClusterBuilder {
         self
     }
 
+    /// Set a custom `redis-server` binary path.
     pub fn redis_server_bin(mut self, bin: impl Into<String>) -> Self {
         self.redis_server_bin = bin.into();
         self
     }
 
+    /// Set a custom `redis-cli` binary path.
     pub fn redis_cli_bin(mut self, bin: impl Into<String>) -> Self {
         self.redis_cli_bin = bin.into();
         self
@@ -173,7 +181,10 @@ pub struct RedisClusterHandle {
     redis_cli_bin: String,
 }
 
-/// Convenience constructor.
+/// Entry point for building a Redis Cluster topology.
+///
+/// Call [`RedisCluster::builder`] to obtain a [`RedisClusterBuilder`], then
+/// configure it and call [`RedisClusterBuilder::start`] to launch the cluster.
 pub struct RedisCluster;
 
 impl RedisCluster {
