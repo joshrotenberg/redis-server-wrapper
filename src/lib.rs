@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! Type-safe wrapper for `redis-server` and `redis-cli` with builder pattern APIs.
 //!
 //! Manage Redis server processes for testing, development, and CI.

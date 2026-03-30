@@ -58,71 +58,91 @@ struct MonitoredMaster {
 }
 
 impl RedisSentinelBuilder {
+    /// Set the name of the monitored master (default: `"mymaster"`).
     pub fn master_name(mut self, name: impl Into<String>) -> Self {
         self.master_name = name.into();
         self
     }
 
+    /// Set the master's port (default: `6390`).
     pub fn master_port(mut self, port: u16) -> Self {
         self.master_port = port;
         self
     }
 
+    /// Set the number of replicas to start (default: `2`).
     pub fn replicas(mut self, n: u16) -> Self {
         self.num_replicas = n;
         self
     }
 
+    /// Set the base port for replica nodes (default: `6391`).
+    ///
+    /// Replicas are assigned consecutive ports starting at this value.
     pub fn replica_base_port(mut self, port: u16) -> Self {
         self.replica_base_port = port;
         self
     }
 
+    /// Set the number of sentinel processes to start (default: `3`).
     pub fn sentinels(mut self, n: u16) -> Self {
         self.num_sentinels = n;
         self
     }
 
+    /// Set the base port for sentinel processes (default: `26389`).
+    ///
+    /// Sentinels are assigned consecutive ports starting at this value.
     pub fn sentinel_base_port(mut self, port: u16) -> Self {
         self.sentinel_base_port = port;
         self
     }
 
+    /// Set the quorum count — how many sentinels must agree before a failover is triggered (default: `2`).
     pub fn quorum(mut self, q: u16) -> Self {
         self.quorum = q;
         self
     }
 
+    /// Set the bind address for all processes in the topology (default: `"127.0.0.1"`).
     pub fn bind(mut self, bind: impl Into<String>) -> Self {
         self.bind = bind.into();
         self
     }
 
+    /// Set the log file path for all processes in the topology.
     pub fn logfile(mut self, path: impl Into<String>) -> Self {
         self.logfile = Some(path.into());
         self
     }
 
+    /// Set the `down-after-milliseconds` threshold for all monitored masters (default: `5000`).
+    ///
+    /// A master is considered down after it fails to respond within this many milliseconds.
     pub fn down_after_ms(mut self, ms: u64) -> Self {
         self.down_after_ms = ms;
         self
     }
 
+    /// Set the `failover-timeout` for all monitored masters in milliseconds (default: `10000`).
     pub fn failover_timeout_ms(mut self, ms: u64) -> Self {
         self.failover_timeout_ms = ms;
         self
     }
 
+    /// Set an arbitrary config directive for all processes in the topology.
     pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.extra.insert(key.into(), value.into());
         self
     }
 
+    /// Set a custom `redis-server` binary path.
     pub fn redis_server_bin(mut self, bin: impl Into<String>) -> Self {
         self.redis_server_bin = bin.into();
         self
     }
 
+    /// Set a custom `redis-cli` binary path.
     pub fn redis_cli_bin(mut self, bin: impl Into<String>) -> Self {
         self.redis_cli_bin = bin.into();
         self
@@ -351,7 +371,10 @@ pub struct RedisSentinelHandle {
     monitored_masters: Vec<MonitoredMaster>,
 }
 
-/// Convenience constructor.
+/// Entry point for building a Redis Sentinel topology.
+///
+/// Call [`RedisSentinel::builder`] to obtain a [`RedisSentinelBuilder`], then
+/// configure it and call [`RedisSentinelBuilder::start`] to launch the topology.
 pub struct RedisSentinel;
 
 impl RedisSentinel {
@@ -423,12 +446,23 @@ impl RedisSentinelHandle {
         &self.master_name
     }
 
-    /// Query a sentinel for the current master status.
+    /// Query a sentinel for the primary monitored master's status.
+    ///
+    /// Iterates over the sentinel processes until one responds, then runs
+    /// `SENTINEL MASTER <name>` and returns the result as a flat key/value map.
+    ///
+    /// Common keys in the returned map include `"ip"`, `"port"`, `"flags"`,
+    /// `"num-slaves"`, and `"num-other-sentinels"`.
+    ///
+    /// Returns [`Error::NoReachableSentinel`] if no sentinel responds.
     pub async fn poke(&self) -> Result<HashMap<String, String>> {
         self.poke_master(&self.master_name).await
     }
 
-    /// Query a sentinel for a specific monitored master status.
+    /// Query a sentinel for a specific monitored master's status.
+    ///
+    /// Like [`poke`](Self::poke) but targets `master_name` instead of the
+    /// primary master configured for this topology.
     pub async fn poke_master(&self, master_name: &str) -> Result<HashMap<String, String>> {
         for port in &self.sentinel_ports {
             let cli = RedisCli::new()

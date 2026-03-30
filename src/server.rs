@@ -10,7 +10,11 @@ use tokio::process::Command;
 use crate::cli::RedisCli;
 use crate::error::{Error, Result};
 
-/// Builder and lifecycle manager for a single `redis-server` process.
+/// Full configuration snapshot for a single `redis-server` process.
+///
+/// This struct is populated by the [`RedisServer`] builder and passed to
+/// [`RedisServer::start`]. You rarely need to construct it directly; use the
+/// builder instead.
 ///
 /// # Example
 ///
@@ -33,73 +37,114 @@ use crate::error::{Error, Result};
 #[derive(Debug, Clone)]
 pub struct RedisServerConfig {
     // -- network --
+    /// TCP port the server listens on (default: `6379`).
     pub port: u16,
+    /// IP address to bind (default: `"127.0.0.1"`).
     pub bind: String,
+    /// Whether protected mode is enabled (default: `false`).
     pub protected_mode: bool,
+    /// TCP backlog queue length, if set.
     pub tcp_backlog: Option<u32>,
+    /// Unix domain socket path, if set.
     pub unixsocket: Option<PathBuf>,
+    /// Unix socket file permissions (e.g. `700`), if set.
     pub unixsocketperm: Option<u32>,
+    /// Idle client timeout in seconds (`0` = disabled), if set.
     pub timeout: Option<u32>,
+    /// TCP keepalive interval in seconds, if set.
     pub tcp_keepalive: Option<u32>,
 
     // -- tls --
+    /// TLS listening port, if set.
     pub tls_port: Option<u16>,
+    /// Path to the TLS certificate file, if set.
     pub tls_cert_file: Option<PathBuf>,
+    /// Path to the TLS private key file, if set.
     pub tls_key_file: Option<PathBuf>,
+    /// Path to the TLS CA certificate file, if set.
     pub tls_ca_cert_file: Option<PathBuf>,
+    /// Whether TLS client authentication is required, if set.
     pub tls_auth_clients: Option<bool>,
 
     // -- general --
+    /// Whether the server daemonizes itself (default: `true`).
     pub daemonize: bool,
+    /// Working directory for data files (default: a sub-directory of `$TMPDIR`).
     pub dir: PathBuf,
+    /// Path to the log file, if set. Defaults to `redis.log` inside the node directory.
     pub logfile: Option<String>,
+    /// Server log verbosity (default: [`LogLevel::Notice`]).
     pub loglevel: LogLevel,
+    /// Number of databases, if set (Redis default: `16`).
     pub databases: Option<u32>,
 
     // -- memory --
+    /// Maximum memory limit (e.g. `"256mb"`), if set.
     pub maxmemory: Option<String>,
+    /// Eviction policy when `maxmemory` is reached, if set.
     pub maxmemory_policy: Option<String>,
+    /// Maximum number of simultaneous client connections, if set.
     pub maxclients: Option<u32>,
 
     // -- persistence --
+    /// Whether RDB snapshots are enabled (default: `false`).
     pub save: bool,
+    /// Whether AOF persistence is enabled (default: `false`).
     pub appendonly: bool,
 
     // -- replication --
+    /// Master host and port to replicate from, if set.
     pub replicaof: Option<(String, u16)>,
+    /// Password for authenticating with a master, if set.
     pub masterauth: Option<String>,
 
     // -- security --
+    /// `requirepass` password for client connections, if set.
     pub password: Option<String>,
+    /// Path to an ACL file, if set.
     pub acl_file: Option<PathBuf>,
 
     // -- cluster --
+    /// Whether Redis Cluster mode is enabled (default: `false`).
     pub cluster_enabled: bool,
+    /// Cluster node timeout in milliseconds, if set.
     pub cluster_node_timeout: Option<u64>,
 
     // -- modules --
+    /// List of Redis module paths to load at startup.
     pub loadmodule: Vec<PathBuf>,
 
     // -- advanced --
+    /// Server tick frequency in Hz, if set (Redis default: `10`).
     pub hz: Option<u32>,
+    /// Number of I/O threads, if set.
     pub io_threads: Option<u32>,
+    /// Whether I/O threads also handle reads, if set.
     pub io_threads_do_reads: Option<bool>,
+    /// Keyspace notification event mask (e.g. `"KEA"`), if set.
     pub notify_keyspace_events: Option<String>,
 
     // -- catch-all for anything not covered above --
+    /// Arbitrary key/value directives forwarded verbatim to the config file.
     pub extra: HashMap<String, String>,
 
     // -- binary paths --
+    /// Path to the `redis-server` binary (default: `"redis-server"`).
     pub redis_server_bin: String,
+    /// Path to the `redis-cli` binary (default: `"redis-cli"`).
     pub redis_cli_bin: String,
 }
 
 /// Redis log level.
 #[derive(Debug, Clone, Copy)]
 pub enum LogLevel {
+    /// Very verbose output, useful for diagnosing Redis internals.
     Debug,
+    /// Slightly less verbose than `Debug`.
     Verbose,
+    /// Informational messages only (default).
     Notice,
+    /// Only critical events are logged.
     Warning,
 }
 
@@ -164,6 +209,7 @@ pub struct RedisServer {
 }
 
 impl RedisServer {
+    /// Create a new builder with default settings.
     pub fn new() -> Self {
         Self {
             config: RedisServerConfig::default(),
