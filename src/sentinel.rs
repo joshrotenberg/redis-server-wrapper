@@ -39,8 +39,10 @@ pub struct RedisSentinelBuilder {
     sentinel_base_port: u16,
     quorum: u16,
     bind: String,
+    logfile: Option<String>,
     down_after_ms: u64,
     failover_timeout_ms: u64,
+    extra: HashMap<String, String>,
     redis_server_bin: String,
     redis_cli_bin: String,
 }
@@ -86,6 +88,11 @@ impl RedisSentinelBuilder {
         self
     }
 
+    pub fn logfile(mut self, path: impl Into<String>) -> Self {
+        self.logfile = Some(path.into());
+        self
+    }
+
     pub fn down_after_ms(mut self, ms: u64) -> Self {
         self.down_after_ms = ms;
         self
@@ -93,6 +100,11 @@ impl RedisSentinelBuilder {
 
     pub fn failover_timeout_ms(mut self, ms: u64) -> Self {
         self.failover_timeout_ms = ms;
+        self
+    }
+
+    pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.extra.insert(key.into(), value.into());
         self
     }
 
@@ -143,29 +155,39 @@ impl RedisSentinelBuilder {
         }
 
         // 1. Start master.
-        let master = RedisServer::new()
+        let mut master = RedisServer::new()
             .port(self.master_port)
             .bind(&self.bind)
             .dir(base_dir.join("master"))
             .appendonly(true)
             .redis_server_bin(&self.redis_server_bin)
-            .redis_cli_bin(&self.redis_cli_bin)
-            .start()
-            .await?;
+            .redis_cli_bin(&self.redis_cli_bin);
+        if let Some(ref logfile) = self.logfile {
+            master = master.logfile(logfile.clone());
+        }
+        for (key, value) in &self.extra {
+            master = master.extra(key.clone(), value.clone());
+        }
+        let master = master.start().await?;
 
         // 2. Start replicas.
         let mut replicas = Vec::new();
         for port in self.replica_ports() {
-            let replica = RedisServer::new()
+            let mut replica = RedisServer::new()
                 .port(port)
                 .bind(&self.bind)
                 .dir(base_dir.join(format!("replica-{port}")))
                 .appendonly(true)
-                .extra("replicaof", format!("{} {}", self.bind, self.master_port))
+                .replicaof(self.bind.clone(), self.master_port)
                 .redis_server_bin(&self.redis_server_bin)
-                .redis_cli_bin(&self.redis_cli_bin)
-                .start()
-                .await?;
+                .redis_cli_bin(&self.redis_cli_bin);
+            if let Some(ref logfile) = self.logfile {
+                replica = replica.logfile(logfile.clone());
+            }
+            for (key, value) in &self.extra {
+                replica = replica.extra(key.clone(), value.clone());
+            }
+            let replica = replica.start().await?;
             replicas.push(replica);
         }
 
@@ -178,12 +200,17 @@ impl RedisSentinelBuilder {
             let dir = base_dir.join(format!("sentinel-{port}"));
             fs::create_dir_all(&dir)?;
             let conf_path = dir.join("sentinel.conf");
-            let conf = format!(
+            let logfile = self
+                .logfile
+                .as_deref()
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{}/sentinel.log", dir.display()));
+            let mut conf = format!(
                 "port {port}\n\
                  bind {bind}\n\
                  daemonize yes\n\
                  pidfile {dir}/sentinel.pid\n\
-                 logfile {dir}/sentinel.log\n\
+                 logfile {logfile}\n\
                  dir {dir}\n\
                  sentinel monitor {name} {master_host} {master_port} {quorum}\n\
                  sentinel down-after-milliseconds {name} {down_after}\n\
@@ -192,6 +219,7 @@ impl RedisSentinelBuilder {
                 port = port,
                 bind = self.bind,
                 dir = dir.display(),
+                logfile = logfile,
                 name = self.master_name,
                 master_host = self.bind,
                 master_port = self.master_port,
@@ -199,6 +227,9 @@ impl RedisSentinelBuilder {
                 down_after = self.down_after_ms,
                 failover_timeout = self.failover_timeout_ms,
             );
+            for (key, value) in &self.extra {
+                conf.push_str(&format!("{key} {value}\n"));
+            }
             fs::write(&conf_path, conf)?;
 
             let status = Command::new(&self.redis_server_bin)
@@ -274,8 +305,10 @@ impl RedisSentinel {
             sentinel_base_port: 26389,
             quorum: 2,
             bind: "127.0.0.1".into(),
+            logfile: None,
             down_after_ms: 5000,
             failover_timeout_ms: 10000,
+            extra: HashMap::new(),
             redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),
         }
@@ -406,6 +439,8 @@ mod tests {
         assert_eq!(b.num_replicas, 2);
         assert_eq!(b.num_sentinels, 3);
         assert_eq!(b.quorum, 2);
+        assert!(b.logfile.is_none());
+        assert!(b.extra.is_empty());
     }
 
     #[test]
@@ -415,12 +450,16 @@ mod tests {
             .master_port(6500)
             .replicas(1)
             .sentinels(5)
-            .quorum(3);
+            .quorum(3)
+            .logfile("/tmp/sentinel.log")
+            .extra("maxmemory", "10mb");
         assert_eq!(b.master_name, "custom");
         assert_eq!(b.master_port, 6500);
         assert_eq!(b.num_replicas, 1);
         assert_eq!(b.num_sentinels, 5);
         assert_eq!(b.quorum, 3);
+        assert_eq!(b.logfile.as_deref(), Some("/tmp/sentinel.log"));
+        assert_eq!(b.extra.get("maxmemory").map(String::as_str), Some("10mb"));
     }
 
     #[test]

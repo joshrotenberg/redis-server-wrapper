@@ -207,6 +207,12 @@ impl RedisServer {
         self
     }
 
+    /// Set the log file path.
+    pub fn logfile(mut self, path: impl Into<String>) -> Self {
+        self.inner = self.inner.logfile(path);
+        self
+    }
+
     /// Set the number of databases.
     pub fn databases(mut self, n: u32) -> Self {
         self.inner = self.inner.databases(n);
@@ -460,6 +466,18 @@ impl RedisClusterBuilder {
         self
     }
 
+    /// Set the log file path for all cluster nodes.
+    pub fn logfile(mut self, path: impl Into<String>) -> Self {
+        self.inner = self.inner.logfile(path);
+        self
+    }
+
+    /// Set an arbitrary config directive for all cluster nodes.
+    pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.inner = self.inner.extra(key, value);
+        self
+    }
+
     /// Set a custom `redis-server` binary path.
     pub fn redis_server_bin(mut self, bin: impl Into<String>) -> Self {
         self.inner = self.inner.redis_server_bin(bin);
@@ -586,6 +604,12 @@ impl RedisSentinelBuilder {
         self
     }
 
+    /// Set the log file path for all processes in the topology.
+    pub fn logfile(mut self, path: impl Into<String>) -> Self {
+        self.inner = self.inner.logfile(path);
+        self
+    }
+
     /// Set down-after-milliseconds for the sentinel.
     pub fn down_after_ms(mut self, ms: u64) -> Self {
         self.inner = self.inner.down_after_ms(ms);
@@ -595,6 +619,12 @@ impl RedisSentinelBuilder {
     /// Set failover-timeout for the sentinel.
     pub fn failover_timeout_ms(mut self, ms: u64) -> Self {
         self.inner = self.inner.failover_timeout_ms(ms);
+        self
+    }
+
+    /// Set an arbitrary config directive for all processes in the topology.
+    pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.inner = self.inner.extra(key, value);
         self
     }
 

@@ -1,5 +1,6 @@
 //! Redis Cluster lifecycle management built on `RedisServer`.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::cli::RedisCli;
@@ -32,6 +33,8 @@ pub struct RedisClusterBuilder {
     base_port: u16,
     bind: String,
     password: Option<String>,
+    logfile: Option<String>,
+    extra: HashMap<String, String>,
     redis_server_bin: String,
     redis_cli_bin: String,
 }
@@ -60,6 +63,18 @@ impl RedisClusterBuilder {
     /// Set a `requirepass` password for all cluster nodes.
     pub fn password(mut self, password: impl Into<String>) -> Self {
         self.password = Some(password.into());
+        self
+    }
+
+    /// Set the log file path for all cluster nodes.
+    pub fn logfile(mut self, path: impl Into<String>) -> Self {
+        self.logfile = Some(path.into());
+        self
+    }
+
+    /// Set an arbitrary config directive for all cluster nodes.
+    pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.extra.insert(key.into(), value.into());
         self
     }
 
@@ -103,7 +118,6 @@ impl RedisClusterBuilder {
         for port in self.ports() {
             let node_dir = std::env::temp_dir().join(format!("redis-cluster-wrapper/node-{port}"));
             let _ = std::fs::remove_dir_all(&node_dir);
-
             let mut server = RedisServer::new()
                 .port(port)
                 .bind(&self.bind)
@@ -114,6 +128,12 @@ impl RedisClusterBuilder {
                 .redis_cli_bin(&self.redis_cli_bin);
             if let Some(ref password) = self.password {
                 server = server.password(password).masterauth(password);
+            }
+            if let Some(ref logfile) = self.logfile {
+                server = server.logfile(logfile.clone());
+            }
+            for (key, value) in &self.extra {
+                server = server.extra(key.clone(), value.clone());
             }
             let handle = server.start().await?;
             nodes.push(handle);
@@ -165,6 +185,8 @@ impl RedisCluster {
             base_port: 7000,
             bind: "127.0.0.1".into(),
             password: None,
+            logfile: None,
+            extra: HashMap::new(),
             redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),
         }
@@ -255,6 +277,8 @@ mod tests {
         assert_eq!(b.replicas_per_master, 0);
         assert_eq!(b.base_port, 7000);
         assert_eq!(b.password, None);
+        assert!(b.logfile.is_none());
+        assert!(b.extra.is_empty());
         assert_eq!(b.total_nodes(), 3);
     }
 
@@ -270,5 +294,14 @@ mod tests {
     fn builder_password() {
         let b = RedisCluster::builder().password("secret");
         assert_eq!(b.password.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn builder_logfile_and_extra() {
+        let b = RedisCluster::builder()
+            .logfile("/tmp/cluster.log")
+            .extra("maxmemory", "10mb");
+        assert_eq!(b.logfile.as_deref(), Some("/tmp/cluster.log"));
+        assert_eq!(b.extra.get("maxmemory").map(String::as_str), Some("10mb"));
     }
 }
