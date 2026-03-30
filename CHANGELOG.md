@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.1.0...v0.2.0) - 2026-03-30
+
+### Added
+
+- *(sentinel)* support multiple monitored masters closes #27 ([#33](https://github.com/joshrotenberg/redis-server-wrapper/pull/33))
+- *(builders)* add logfile and extra to cluster and sentinel closes #26 ([#32](https://github.com/joshrotenberg/redis-server-wrapper/pull/32))
+- *(cluster)* add password support to RedisClusterBuilder closes #25 ([#31](https://github.com/joshrotenberg/redis-server-wrapper/pull/31))
+- add pid() method to RedisServerHandle and pids() to cluster/sentinel handles ([#28](https://github.com/joshrotenberg/redis-server-wrapper/pull/28))
+
+### Fixed
+
+- *(cluster)* clear stale node dirs closes #24 ([#30](https://github.com/joshrotenberg/redis-server-wrapper/pull/30))
+
+### Other
+
+- pre-release documentation audit closes #34 ([#36](https://github.com/joshrotenberg/redis-server-wrapper/pull/36))
+- add forza.toml configuration ([#29](https://github.com/joshrotenberg/redis-server-wrapper/pull/29))
+- release v0.1.0 ([#21](https://github.com/joshrotenberg/redis-server-wrapper/pull/21))
+
 ### Added
 
 - *(server)* add `detach()` to async and blocking server handles so they can be consumed without shutting down the Redis process closes #24
