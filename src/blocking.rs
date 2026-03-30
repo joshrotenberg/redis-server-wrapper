@@ -70,6 +70,132 @@ impl RedisCli {
         self
     }
 
+    /// Connect via a Unix socket instead of TCP.
+    pub fn unixsocket(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.unixsocket(path);
+        self
+    }
+
+    /// Enable TLS for the connection.
+    pub fn tls(mut self, enable: bool) -> Self {
+        self.inner = self.inner.tls(enable);
+        self
+    }
+
+    /// Set the SNI hostname for TLS.
+    pub fn sni(mut self, hostname: impl Into<String>) -> Self {
+        self.inner = self.inner.sni(hostname);
+        self
+    }
+
+    /// Set the CA certificate file for TLS verification.
+    pub fn cacert(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.cacert(path);
+        self
+    }
+
+    /// Set the CA certificate directory for TLS verification.
+    pub fn cacertdir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.cacertdir(path);
+        self
+    }
+
+    /// Set the client certificate file for TLS.
+    pub fn cert(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.cert(path);
+        self
+    }
+
+    /// Set the client private key file for TLS.
+    pub fn key(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.key(path);
+        self
+    }
+
+    /// Skip TLS certificate verification (`--insecure`).
+    pub fn insecure(mut self, enable: bool) -> Self {
+        self.inner = self.inner.insecure(enable);
+        self
+    }
+
+    /// Set the allowed TLS 1.2 ciphers (`--tls-ciphers`).
+    pub fn tls_ciphers(mut self, ciphers: impl Into<String>) -> Self {
+        self.inner = self.inner.tls_ciphers(ciphers);
+        self
+    }
+
+    /// Set the allowed TLS 1.3 ciphersuites (`--tls-ciphersuites`).
+    pub fn tls_ciphersuites(mut self, ciphersuites: impl Into<String>) -> Self {
+        self.inner = self.inner.tls_ciphersuites(ciphersuites);
+        self
+    }
+
+    /// Set the RESP protocol version.
+    pub fn resp(mut self, protocol: cli::RespProtocol) -> Self {
+        self.inner = self.inner.resp(protocol);
+        self
+    }
+
+    /// Enable cluster mode (`-c` flag) for following redirects.
+    pub fn cluster_mode(mut self, enable: bool) -> Self {
+        self.inner = self.inner.cluster_mode(enable);
+        self
+    }
+
+    /// Set the output format.
+    pub fn output_format(mut self, format: cli::OutputFormat) -> Self {
+        self.inner = self.inner.output_format(format);
+        self
+    }
+
+    /// Suppress the AUTH password warning.
+    pub fn no_auth_warning(mut self, suppress: bool) -> Self {
+        self.inner = self.inner.no_auth_warning(suppress);
+        self
+    }
+
+    /// Set the server URI (`-u`), e.g. `redis://user:pass@host:port/db`.
+    pub fn uri(mut self, uri: impl Into<String>) -> Self {
+        self.inner = self.inner.uri(uri);
+        self
+    }
+
+    /// Set the connection timeout in seconds (`-t`).
+    pub fn timeout(mut self, seconds: f64) -> Self {
+        self.inner = self.inner.timeout(seconds);
+        self
+    }
+
+    /// Prompt for password from stdin (`--askpass`).
+    pub fn askpass(mut self, enable: bool) -> Self {
+        self.inner = self.inner.askpass(enable);
+        self
+    }
+
+    /// Set the client connection name (`--name`).
+    pub fn client_name(mut self, name: impl Into<String>) -> Self {
+        self.inner = self.inner.client_name(name);
+        self
+    }
+
+    /// Set IP version preference for connections.
+    pub fn ip_preference(mut self, preference: cli::IpPreference) -> Self {
+        self.inner = self.inner.ip_preference(preference);
+        self
+    }
+
+    /// Execute the command N times (`-r`).
+    pub fn repeat(mut self, count: u32) -> Self {
+        self.inner = self.inner.repeat(count);
+        self
+    }
+
+    /// Set interval in seconds between repeated commands (`-i`).
+    pub fn interval(mut self, seconds: f64) -> Self {
+        self.inner = self.inner.interval(seconds);
+        self
+    }
+
     /// Run a command and return stdout on success.
     pub fn run(&self, args: &[&str]) -> Result<String> {
         Runtime::new()?.block_on(self.inner.run(args))
