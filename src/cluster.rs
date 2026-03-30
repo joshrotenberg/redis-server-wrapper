@@ -91,10 +91,12 @@ impl RedisClusterBuilder {
         // Start each node.
         let mut nodes = Vec::new();
         for port in self.ports() {
+            let node_dir = std::env::temp_dir().join(format!("redis-cluster-wrapper/node-{port}"));
+            let _ = std::fs::remove_dir_all(&node_dir);
             let handle = RedisServer::new()
                 .port(port)
                 .bind(&self.bind)
-                .dir(std::env::temp_dir().join(format!("redis-cluster-wrapper/node-{port}")))
+                .dir(node_dir)
                 .cluster_enabled(true)
                 .cluster_node_timeout(5000)
                 .redis_server_bin(&self.redis_server_bin)

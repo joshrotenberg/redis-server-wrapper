@@ -74,3 +74,24 @@ async fn stop_and_verify() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert!(!server.is_alive().await);
 }
+
+#[tokio::test]
+async fn detach_leaves_server_running() {
+    let server = RedisServer::new()
+        .port(16405)
+        .start()
+        .await
+        .expect("failed to start redis-server");
+
+    let cli = server.cli().clone();
+    server.detach();
+
+    cli.wait_for_ready(std::time::Duration::from_secs(2))
+        .await
+        .expect("detached server should still be reachable");
+    assert!(cli.ping().await);
+
+    cli.shutdown();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(!cli.ping().await);
+}

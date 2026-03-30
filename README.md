@@ -43,6 +43,9 @@ assert!(server.is_alive().await);
 // Stopped automatically on drop.
 ```
 
+If you want the process to keep running after the handle is consumed, call
+`server.detach()` instead of dropping it.
+
 ### Cluster
 
 ```rust
@@ -99,6 +102,8 @@ let server = RedisServer::new()
 assert!(server.is_alive());
 // Stopped automatically on drop.
 ```
+
+Use `server.detach()` in the blocking API for the same keep-running behavior.
 
 Cluster and Sentinel work the same way:
 

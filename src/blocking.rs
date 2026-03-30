@@ -394,6 +394,11 @@ impl RedisServerHandle {
         self.rt.block_on(self.inner.run(args))
     }
 
+    /// Consume the handle without stopping the server.
+    pub fn detach(self) {
+        self.inner.detach();
+    }
+
     /// Stop the server via SHUTDOWN NOSAVE.
     pub fn stop(&self) {
         self.inner.stop();

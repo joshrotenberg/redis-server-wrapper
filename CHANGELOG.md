@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(server)* add `detach()` to async and blocking server handles so they can be consumed without shutting down the Redis process closes #24
+
 ## [0.1.0](https://github.com/joshrotenberg/redis-server-wrapper/releases/tag/v0.1.0) - 2026-03-30
 
 ### Added
