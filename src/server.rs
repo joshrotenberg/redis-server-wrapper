@@ -52,6 +52,7 @@ pub struct RedisServerConfig {
     // -- general --
     pub daemonize: bool,
     pub dir: PathBuf,
+    pub logfile: Option<String>,
     pub loglevel: LogLevel,
     pub databases: Option<u32>,
 
@@ -131,6 +132,7 @@ impl Default for RedisServerConfig {
             tls_auth_clients: None,
             daemonize: true,
             dir: std::env::temp_dir().join("redis-server-wrapper"),
+            logfile: None,
             loglevel: LogLevel::Notice,
             databases: None,
             maxmemory: None,
@@ -261,6 +263,12 @@ impl RedisServer {
     /// Set the log level (default: [`LogLevel::Notice`]).
     pub fn loglevel(mut self, level: LogLevel) -> Self {
         self.config.loglevel = level;
+        self
+    }
+
+    /// Set the log file path. Defaults to `redis.log` inside the node directory.
+    pub fn logfile(mut self, path: impl Into<String>) -> Self {
+        self.config.logfile = Some(path.into());
         self
     }
 
@@ -471,7 +479,6 @@ impl RedisServer {
              bind {bind}\n\
              daemonize {daemonize}\n\
              pidfile {dir}/redis.pid\n\
-             logfile {dir}/redis.log\n\
              dir {dir}\n\
              loglevel {level}\n\
              protected-mode {protected}\n",
@@ -482,6 +489,14 @@ impl RedisServer {
             level = self.config.loglevel,
             protected = yn(self.config.protected_mode),
         );
+
+        let logfile = self
+            .config
+            .logfile
+            .as_deref()
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("{}/redis.log", node_dir.display()));
+        conf.push_str(&format!("logfile {logfile}\n"));
 
         // -- network --
         if let Some(backlog) = self.config.tcp_backlog {
@@ -691,6 +706,7 @@ mod tests {
             .save(true)
             .appendonly(true)
             .password("secret")
+            .logfile("/tmp/redis.log")
             .loglevel(LogLevel::Warning)
             .extra("maxmemory", "100mb");
 
@@ -699,6 +715,7 @@ mod tests {
         assert!(s.config.save);
         assert!(s.config.appendonly);
         assert_eq!(s.config.password.as_deref(), Some("secret"));
+        assert_eq!(s.config.logfile.as_deref(), Some("/tmp/redis.log"));
         assert_eq!(s.config.extra.get("maxmemory").unwrap(), "100mb");
     }
 

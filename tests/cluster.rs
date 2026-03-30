@@ -1,11 +1,21 @@
 use redis_server_wrapper::RedisCluster;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[tokio::test]
 async fn cluster_start_and_health() {
+    let log_path = std::env::temp_dir().join(format!(
+        "redis-cluster-{}.log",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos()
+    ));
     let cluster = RedisCluster::builder()
         .masters(3)
         .replicas_per_master(0)
         .base_port(17000)
+        .logfile(log_path.display().to_string())
+        .extra("maxmemory", "10mb")
         .start()
         .await
         .expect("failed to start redis cluster");
@@ -16,6 +26,18 @@ async fn cluster_start_and_health() {
         .await
         .expect("cluster did not become healthy");
     assert!(cluster.is_healthy().await);
+    let maxmemory = cluster
+        .cli()
+        .run(&["CONFIG", "GET", "maxmemory"])
+        .await
+        .expect("failed to query cluster config");
+    assert!(maxmemory.contains("10485760") || maxmemory.contains("10mb"));
+    let logfile = cluster
+        .cli()
+        .run(&["CONFIG", "GET", "logfile"])
+        .await
+        .expect("failed to query cluster logfile");
+    assert!(logfile.contains(&log_path.display().to_string()));
     assert_eq!(cluster.node_addrs().len(), 3);
     assert_eq!(cluster.addr(), "127.0.0.1:17000");
 }
