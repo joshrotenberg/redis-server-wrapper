@@ -446,9 +446,19 @@ impl RedisServer {
 
         cli.wait_for_ready(Duration::from_secs(10)).await?;
 
+        let pid_path = node_dir.join("redis.pid");
+        let pid: u32 = fs::read_to_string(&pid_path)
+            .map_err(Error::Io)?
+            .trim()
+            .parse()
+            .map_err(|_| Error::ServerStart {
+                port: self.config.port,
+            })?;
+
         Ok(RedisServerHandle {
             config: self.config,
             cli,
+            pid,
         })
     }
 
@@ -596,6 +606,7 @@ impl Default for RedisServer {
 pub struct RedisServerHandle {
     config: RedisServerConfig,
     cli: RedisCli,
+    pid: u32,
 }
 
 impl RedisServerHandle {
@@ -612,6 +623,11 @@ impl RedisServerHandle {
     /// The server's bind address.
     pub fn host(&self) -> &str {
         &self.config.bind
+    }
+
+    /// The PID of the `redis-server` process.
+    pub fn pid(&self) -> u32 {
+        self.pid
     }
 
     /// Check if the server is alive via PING.

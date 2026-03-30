@@ -161,6 +161,11 @@ impl RedisClusterHandle {
         self.nodes.iter().map(|n| n.addr()).collect()
     }
 
+    /// The PIDs of all `redis-server` processes in the cluster.
+    pub fn pids(&self) -> Vec<u32> {
+        self.nodes.iter().map(|n| n.pid()).collect()
+    }
+
     /// Check if all nodes are alive.
     pub async fn all_alive(&self) -> bool {
         for node in &self.nodes {
