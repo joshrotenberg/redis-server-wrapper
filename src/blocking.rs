@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::runtime::Runtime;
 
 use crate::error::Result;
-use crate::server::{AppendFsync, LogLevel};
+use crate::server::{AppendFsync, LogLevel, ReplDisklessLoad};
 use crate::{cli, cluster, sentinel, server};
 
 // ── RedisCli ──────────────────────────────────────────────────────────────────
@@ -465,6 +465,138 @@ impl RedisServer {
     /// Set the password for authenticating with a master.
     pub fn masterauth(mut self, password: impl Into<String>) -> Self {
         self.inner = self.inner.masterauth(password);
+        self
+    }
+
+    /// Set the username for authenticating with a master (ACL-based auth).
+    pub fn masteruser(mut self, user: impl Into<String>) -> Self {
+        self.inner = self.inner.masteruser(user);
+        self
+    }
+
+    /// Set the replication backlog size (e.g. `"1mb"`).
+    pub fn repl_backlog_size(mut self, size: impl Into<String>) -> Self {
+        self.inner = self.inner.repl_backlog_size(size);
+        self
+    }
+
+    /// Set seconds before the backlog is freed when no replicas are connected.
+    pub fn repl_backlog_ttl(mut self, seconds: u32) -> Self {
+        self.inner = self.inner.repl_backlog_ttl(seconds);
+        self
+    }
+
+    /// Disable TCP_NODELAY on the replication socket.
+    pub fn repl_disable_tcp_nodelay(mut self, disable: bool) -> Self {
+        self.inner = self.inner.repl_disable_tcp_nodelay(disable);
+        self
+    }
+
+    /// Set the diskless load policy for replicas.
+    pub fn repl_diskless_load(mut self, policy: ReplDisklessLoad) -> Self {
+        self.inner = self.inner.repl_diskless_load(policy);
+        self
+    }
+
+    /// Enable or disable diskless sync from master to replicas.
+    pub fn repl_diskless_sync(mut self, enable: bool) -> Self {
+        self.inner = self.inner.repl_diskless_sync(enable);
+        self
+    }
+
+    /// Set the delay in seconds before starting a diskless sync.
+    pub fn repl_diskless_sync_delay(mut self, seconds: u32) -> Self {
+        self.inner = self.inner.repl_diskless_sync_delay(seconds);
+        self
+    }
+
+    /// Set the maximum number of replicas to wait for before starting a diskless sync.
+    pub fn repl_diskless_sync_max_replicas(mut self, n: u32) -> Self {
+        self.inner = self.inner.repl_diskless_sync_max_replicas(n);
+        self
+    }
+
+    /// Set the interval in seconds between PING commands sent to the master.
+    pub fn repl_ping_replica_period(mut self, seconds: u32) -> Self {
+        self.inner = self.inner.repl_ping_replica_period(seconds);
+        self
+    }
+
+    /// Set the replication timeout in seconds.
+    pub fn repl_timeout(mut self, seconds: u32) -> Self {
+        self.inner = self.inner.repl_timeout(seconds);
+        self
+    }
+
+    /// Set the IP address a replica announces to the master.
+    pub fn replica_announce_ip(mut self, ip: impl Into<String>) -> Self {
+        self.inner = self.inner.replica_announce_ip(ip);
+        self
+    }
+
+    /// Set the port a replica announces to the master.
+    pub fn replica_announce_port(mut self, port: u16) -> Self {
+        self.inner = self.inner.replica_announce_port(port);
+        self
+    }
+
+    /// Control whether the replica is announced to clients.
+    pub fn replica_announced(mut self, announced: bool) -> Self {
+        self.inner = self.inner.replica_announced(announced);
+        self
+    }
+
+    /// Set the buffer limit for full synchronization on replicas (e.g. `"256mb"`).
+    pub fn replica_full_sync_buffer_limit(mut self, size: impl Into<String>) -> Self {
+        self.inner = self.inner.replica_full_sync_buffer_limit(size);
+        self
+    }
+
+    /// Control whether replicas ignore disk-write errors.
+    pub fn replica_ignore_disk_write_errors(mut self, ignore: bool) -> Self {
+        self.inner = self.inner.replica_ignore_disk_write_errors(ignore);
+        self
+    }
+
+    /// Control whether replicas ignore the maxmemory setting.
+    pub fn replica_ignore_maxmemory(mut self, ignore: bool) -> Self {
+        self.inner = self.inner.replica_ignore_maxmemory(ignore);
+        self
+    }
+
+    /// Enable or disable lazy flush on replicas during full sync.
+    pub fn replica_lazy_flush(mut self, enable: bool) -> Self {
+        self.inner = self.inner.replica_lazy_flush(enable);
+        self
+    }
+
+    /// Set the replica priority for Sentinel promotion.
+    pub fn replica_priority(mut self, priority: u32) -> Self {
+        self.inner = self.inner.replica_priority(priority);
+        self
+    }
+
+    /// Control whether the replica is read-only.
+    pub fn replica_read_only(mut self, read_only: bool) -> Self {
+        self.inner = self.inner.replica_read_only(read_only);
+        self
+    }
+
+    /// Control whether the replica serves stale data while syncing.
+    pub fn replica_serve_stale_data(mut self, serve: bool) -> Self {
+        self.inner = self.inner.replica_serve_stale_data(serve);
+        self
+    }
+
+    /// Set the minimum number of replicas that must acknowledge writes.
+    pub fn min_replicas_to_write(mut self, n: u32) -> Self {
+        self.inner = self.inner.min_replicas_to_write(n);
+        self
+    }
+
+    /// Set the maximum replication lag (in seconds) for a replica to count toward `min-replicas-to-write`.
+    pub fn min_replicas_max_lag(mut self, seconds: u32) -> Self {
+        self.inner = self.inner.min_replicas_max_lag(seconds);
         self
     }
 

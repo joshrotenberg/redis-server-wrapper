@@ -119,6 +119,50 @@ pub struct RedisServerConfig {
     pub replicaof: Option<(String, u16)>,
     /// Password for authenticating with a master, if set.
     pub masterauth: Option<String>,
+    /// Username for authenticating with a master, if set.
+    pub masteruser: Option<String>,
+    /// Replication backlog size (e.g. `"1mb"`), if set.
+    pub repl_backlog_size: Option<String>,
+    /// Seconds before the backlog is freed when no replicas are connected, if set.
+    pub repl_backlog_ttl: Option<u32>,
+    /// Whether TCP_NODELAY is disabled on the replication socket, if set.
+    pub repl_disable_tcp_nodelay: Option<bool>,
+    /// Diskless load policy for replicas, if set.
+    pub repl_diskless_load: Option<ReplDisklessLoad>,
+    /// Whether the master sends RDB to replicas via diskless transfer, if set.
+    pub repl_diskless_sync: Option<bool>,
+    /// Delay in seconds before starting a diskless sync, if set.
+    pub repl_diskless_sync_delay: Option<u32>,
+    /// Maximum number of replicas to wait for before starting a diskless sync, if set.
+    pub repl_diskless_sync_max_replicas: Option<u32>,
+    /// Interval in seconds between PING commands sent to the master, if set.
+    pub repl_ping_replica_period: Option<u32>,
+    /// Replication timeout in seconds, if set.
+    pub repl_timeout: Option<u32>,
+    /// IP address a replica announces to the master, if set.
+    pub replica_announce_ip: Option<String>,
+    /// Port a replica announces to the master, if set.
+    pub replica_announce_port: Option<u16>,
+    /// Whether the replica is announced to clients, if set.
+    pub replica_announced: Option<bool>,
+    /// Buffer limit for full synchronization on replicas (e.g. `"256mb"`), if set.
+    pub replica_full_sync_buffer_limit: Option<String>,
+    /// Whether replicas ignore disk-write errors, if set.
+    pub replica_ignore_disk_write_errors: Option<bool>,
+    /// Whether replicas ignore the maxmemory setting, if set.
+    pub replica_ignore_maxmemory: Option<bool>,
+    /// Whether replicas perform a lazy flush during full sync, if set.
+    pub replica_lazy_flush: Option<bool>,
+    /// Replica priority for Sentinel promotion, if set.
+    pub replica_priority: Option<u32>,
+    /// Whether the replica is read-only, if set.
+    pub replica_read_only: Option<bool>,
+    /// Whether the replica serves stale data while syncing, if set.
+    pub replica_serve_stale_data: Option<bool>,
+    /// Minimum number of replicas that must acknowledge writes, if set.
+    pub min_replicas_to_write: Option<u32>,
+    /// Maximum replication lag (in seconds) for a replica to count toward `min-replicas-to-write`, if set.
+    pub min_replicas_max_lag: Option<u32>,
 
     // -- security --
     /// `requirepass` password for client connections, if set.
@@ -174,6 +218,30 @@ impl std::fmt::Display for AppendFsync {
             AppendFsync::Always => f.write_str("always"),
             AppendFsync::Everysec => f.write_str("everysec"),
             AppendFsync::No => f.write_str("no"),
+        }
+    }
+}
+
+/// Diskless load policy for replicas.
+///
+/// Controls how a replica loads the RDB payload received from a master during
+/// diskless replication.
+#[derive(Debug, Clone, Copy)]
+pub enum ReplDisklessLoad {
+    /// Never load the RDB directly from the socket (write to disk first).
+    Disabled,
+    /// Load directly from the socket only when the current dataset is empty.
+    OnEmptyDb,
+    /// Load directly from the socket, swapping the dataset atomically.
+    Swapdb,
+}
+
+impl std::fmt::Display for ReplDisklessLoad {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReplDisklessLoad::Disabled => f.write_str("disabled"),
+            ReplDisklessLoad::OnEmptyDb => f.write_str("on-empty-db"),
+            ReplDisklessLoad::Swapdb => f.write_str("swapdb"),
         }
     }
 }
@@ -256,6 +324,28 @@ impl Default for RedisServerConfig {
             no_appendfsync_on_rewrite: None,
             replicaof: None,
             masterauth: None,
+            masteruser: None,
+            repl_backlog_size: None,
+            repl_backlog_ttl: None,
+            repl_disable_tcp_nodelay: None,
+            repl_diskless_load: None,
+            repl_diskless_sync: None,
+            repl_diskless_sync_delay: None,
+            repl_diskless_sync_max_replicas: None,
+            repl_ping_replica_period: None,
+            repl_timeout: None,
+            replica_announce_ip: None,
+            replica_announce_port: None,
+            replica_announced: None,
+            replica_full_sync_buffer_limit: None,
+            replica_ignore_disk_write_errors: None,
+            replica_ignore_maxmemory: None,
+            replica_lazy_flush: None,
+            replica_priority: None,
+            replica_read_only: None,
+            replica_serve_stale_data: None,
+            min_replicas_to_write: None,
+            min_replicas_max_lag: None,
             password: None,
             acl_file: None,
             cluster_enabled: false,
@@ -519,6 +609,138 @@ impl RedisServer {
     /// Set the password for authenticating with a master.
     pub fn masterauth(mut self, password: impl Into<String>) -> Self {
         self.config.masterauth = Some(password.into());
+        self
+    }
+
+    /// Set the username for authenticating with a master (ACL-based auth).
+    pub fn masteruser(mut self, user: impl Into<String>) -> Self {
+        self.config.masteruser = Some(user.into());
+        self
+    }
+
+    /// Set the replication backlog size (e.g. `"1mb"`).
+    pub fn repl_backlog_size(mut self, size: impl Into<String>) -> Self {
+        self.config.repl_backlog_size = Some(size.into());
+        self
+    }
+
+    /// Set seconds before the backlog is freed when no replicas are connected.
+    pub fn repl_backlog_ttl(mut self, seconds: u32) -> Self {
+        self.config.repl_backlog_ttl = Some(seconds);
+        self
+    }
+
+    /// Disable TCP_NODELAY on the replication socket.
+    pub fn repl_disable_tcp_nodelay(mut self, disable: bool) -> Self {
+        self.config.repl_disable_tcp_nodelay = Some(disable);
+        self
+    }
+
+    /// Set the diskless load policy for replicas.
+    pub fn repl_diskless_load(mut self, policy: ReplDisklessLoad) -> Self {
+        self.config.repl_diskless_load = Some(policy);
+        self
+    }
+
+    /// Enable or disable diskless sync from master to replicas.
+    pub fn repl_diskless_sync(mut self, enable: bool) -> Self {
+        self.config.repl_diskless_sync = Some(enable);
+        self
+    }
+
+    /// Set the delay in seconds before starting a diskless sync.
+    pub fn repl_diskless_sync_delay(mut self, seconds: u32) -> Self {
+        self.config.repl_diskless_sync_delay = Some(seconds);
+        self
+    }
+
+    /// Set the maximum number of replicas to wait for before starting a diskless sync.
+    pub fn repl_diskless_sync_max_replicas(mut self, n: u32) -> Self {
+        self.config.repl_diskless_sync_max_replicas = Some(n);
+        self
+    }
+
+    /// Set the interval in seconds between PING commands sent to the master.
+    pub fn repl_ping_replica_period(mut self, seconds: u32) -> Self {
+        self.config.repl_ping_replica_period = Some(seconds);
+        self
+    }
+
+    /// Set the replication timeout in seconds.
+    pub fn repl_timeout(mut self, seconds: u32) -> Self {
+        self.config.repl_timeout = Some(seconds);
+        self
+    }
+
+    /// Set the IP address a replica announces to the master.
+    pub fn replica_announce_ip(mut self, ip: impl Into<String>) -> Self {
+        self.config.replica_announce_ip = Some(ip.into());
+        self
+    }
+
+    /// Set the port a replica announces to the master.
+    pub fn replica_announce_port(mut self, port: u16) -> Self {
+        self.config.replica_announce_port = Some(port);
+        self
+    }
+
+    /// Control whether the replica is announced to clients.
+    pub fn replica_announced(mut self, announced: bool) -> Self {
+        self.config.replica_announced = Some(announced);
+        self
+    }
+
+    /// Set the buffer limit for full synchronization on replicas (e.g. `"256mb"`).
+    pub fn replica_full_sync_buffer_limit(mut self, size: impl Into<String>) -> Self {
+        self.config.replica_full_sync_buffer_limit = Some(size.into());
+        self
+    }
+
+    /// Control whether replicas ignore disk-write errors.
+    pub fn replica_ignore_disk_write_errors(mut self, ignore: bool) -> Self {
+        self.config.replica_ignore_disk_write_errors = Some(ignore);
+        self
+    }
+
+    /// Control whether replicas ignore the maxmemory setting.
+    pub fn replica_ignore_maxmemory(mut self, ignore: bool) -> Self {
+        self.config.replica_ignore_maxmemory = Some(ignore);
+        self
+    }
+
+    /// Enable or disable lazy flush on replicas during full sync.
+    pub fn replica_lazy_flush(mut self, enable: bool) -> Self {
+        self.config.replica_lazy_flush = Some(enable);
+        self
+    }
+
+    /// Set the replica priority for Sentinel promotion.
+    pub fn replica_priority(mut self, priority: u32) -> Self {
+        self.config.replica_priority = Some(priority);
+        self
+    }
+
+    /// Control whether the replica is read-only.
+    pub fn replica_read_only(mut self, read_only: bool) -> Self {
+        self.config.replica_read_only = Some(read_only);
+        self
+    }
+
+    /// Control whether the replica serves stale data while syncing.
+    pub fn replica_serve_stale_data(mut self, serve: bool) -> Self {
+        self.config.replica_serve_stale_data = Some(serve);
+        self
+    }
+
+    /// Set the minimum number of replicas that must acknowledge writes.
+    pub fn min_replicas_to_write(mut self, n: u32) -> Self {
+        self.config.min_replicas_to_write = Some(n);
+        self
+    }
+
+    /// Set the maximum replication lag (in seconds) for a replica to count toward `min-replicas-to-write`.
+    pub fn min_replicas_max_lag(mut self, seconds: u32) -> Self {
+        self.config.min_replicas_max_lag = Some(seconds);
         self
     }
 
@@ -798,6 +1020,72 @@ impl RedisServer {
         if let Some(ref pw) = self.config.masterauth {
             conf.push_str(&format!("masterauth {pw}\n"));
         }
+        if let Some(ref user) = self.config.masteruser {
+            conf.push_str(&format!("masteruser {user}\n"));
+        }
+        if let Some(ref size) = self.config.repl_backlog_size {
+            conf.push_str(&format!("repl-backlog-size {size}\n"));
+        }
+        if let Some(ttl) = self.config.repl_backlog_ttl {
+            conf.push_str(&format!("repl-backlog-ttl {ttl}\n"));
+        }
+        if let Some(v) = self.config.repl_disable_tcp_nodelay {
+            conf.push_str(&format!("repl-disable-tcp-nodelay {}\n", yn(v)));
+        }
+        if let Some(ref policy) = self.config.repl_diskless_load {
+            conf.push_str(&format!("repl-diskless-load {policy}\n"));
+        }
+        if let Some(v) = self.config.repl_diskless_sync {
+            conf.push_str(&format!("repl-diskless-sync {}\n", yn(v)));
+        }
+        if let Some(delay) = self.config.repl_diskless_sync_delay {
+            conf.push_str(&format!("repl-diskless-sync-delay {delay}\n"));
+        }
+        if let Some(n) = self.config.repl_diskless_sync_max_replicas {
+            conf.push_str(&format!("repl-diskless-sync-max-replicas {n}\n"));
+        }
+        if let Some(period) = self.config.repl_ping_replica_period {
+            conf.push_str(&format!("repl-ping-replica-period {period}\n"));
+        }
+        if let Some(t) = self.config.repl_timeout {
+            conf.push_str(&format!("repl-timeout {t}\n"));
+        }
+        if let Some(ref ip) = self.config.replica_announce_ip {
+            conf.push_str(&format!("replica-announce-ip {ip}\n"));
+        }
+        if let Some(port) = self.config.replica_announce_port {
+            conf.push_str(&format!("replica-announce-port {port}\n"));
+        }
+        if let Some(v) = self.config.replica_announced {
+            conf.push_str(&format!("replica-announced {}\n", yn(v)));
+        }
+        if let Some(ref size) = self.config.replica_full_sync_buffer_limit {
+            conf.push_str(&format!("replica-full-sync-buffer-limit {size}\n"));
+        }
+        if let Some(v) = self.config.replica_ignore_disk_write_errors {
+            conf.push_str(&format!("replica-ignore-disk-write-errors {}\n", yn(v)));
+        }
+        if let Some(v) = self.config.replica_ignore_maxmemory {
+            conf.push_str(&format!("replica-ignore-maxmemory {}\n", yn(v)));
+        }
+        if let Some(v) = self.config.replica_lazy_flush {
+            conf.push_str(&format!("replica-lazy-flush {}\n", yn(v)));
+        }
+        if let Some(priority) = self.config.replica_priority {
+            conf.push_str(&format!("replica-priority {priority}\n"));
+        }
+        if let Some(v) = self.config.replica_read_only {
+            conf.push_str(&format!("replica-read-only {}\n", yn(v)));
+        }
+        if let Some(v) = self.config.replica_serve_stale_data {
+            conf.push_str(&format!("replica-serve-stale-data {}\n", yn(v)));
+        }
+        if let Some(n) = self.config.min_replicas_to_write {
+            conf.push_str(&format!("min-replicas-to-write {n}\n"));
+        }
+        if let Some(lag) = self.config.min_replicas_max_lag {
+            conf.push_str(&format!("min-replicas-max-lag {lag}\n"));
+        }
 
         // -- security --
         if let Some(ref pw) = self.config.password {
@@ -983,6 +1271,66 @@ mod tests {
         assert_eq!(s.config.auto_aof_rewrite_percentage, Some(100));
         assert_eq!(s.config.auto_aof_rewrite_min_size.as_deref(), Some("64mb"));
         assert_eq!(s.config.no_appendfsync_on_rewrite, Some(true));
+    }
+
+    #[test]
+    fn replication_tuning() {
+        let s = RedisServer::new()
+            .replicaof("127.0.0.1", 6379)
+            .masterauth("secret")
+            .masteruser("repl-user")
+            .repl_backlog_size("1mb")
+            .repl_backlog_ttl(3600)
+            .repl_disable_tcp_nodelay(true)
+            .repl_diskless_load(ReplDisklessLoad::Swapdb)
+            .repl_diskless_sync(true)
+            .repl_diskless_sync_delay(5)
+            .repl_diskless_sync_max_replicas(3)
+            .repl_ping_replica_period(10)
+            .repl_timeout(60)
+            .replica_announce_ip("10.0.0.1")
+            .replica_announce_port(6380)
+            .replica_announced(true)
+            .replica_full_sync_buffer_limit("256mb")
+            .replica_ignore_disk_write_errors(false)
+            .replica_ignore_maxmemory(true)
+            .replica_lazy_flush(true)
+            .replica_priority(100)
+            .replica_read_only(true)
+            .replica_serve_stale_data(false)
+            .min_replicas_to_write(2)
+            .min_replicas_max_lag(10);
+
+        assert_eq!(s.config.replicaof, Some(("127.0.0.1".into(), 6379)));
+        assert_eq!(s.config.masterauth.as_deref(), Some("secret"));
+        assert_eq!(s.config.masteruser.as_deref(), Some("repl-user"));
+        assert_eq!(s.config.repl_backlog_size.as_deref(), Some("1mb"));
+        assert_eq!(s.config.repl_backlog_ttl, Some(3600));
+        assert_eq!(s.config.repl_disable_tcp_nodelay, Some(true));
+        assert!(matches!(
+            s.config.repl_diskless_load,
+            Some(ReplDisklessLoad::Swapdb)
+        ));
+        assert_eq!(s.config.repl_diskless_sync, Some(true));
+        assert_eq!(s.config.repl_diskless_sync_delay, Some(5));
+        assert_eq!(s.config.repl_diskless_sync_max_replicas, Some(3));
+        assert_eq!(s.config.repl_ping_replica_period, Some(10));
+        assert_eq!(s.config.repl_timeout, Some(60));
+        assert_eq!(s.config.replica_announce_ip.as_deref(), Some("10.0.0.1"));
+        assert_eq!(s.config.replica_announce_port, Some(6380));
+        assert_eq!(s.config.replica_announced, Some(true));
+        assert_eq!(
+            s.config.replica_full_sync_buffer_limit.as_deref(),
+            Some("256mb")
+        );
+        assert_eq!(s.config.replica_ignore_disk_write_errors, Some(false));
+        assert_eq!(s.config.replica_ignore_maxmemory, Some(true));
+        assert_eq!(s.config.replica_lazy_flush, Some(true));
+        assert_eq!(s.config.replica_priority, Some(100));
+        assert_eq!(s.config.replica_read_only, Some(true));
+        assert_eq!(s.config.replica_serve_stale_data, Some(false));
+        assert_eq!(s.config.min_replicas_to_write, Some(2));
+        assert_eq!(s.config.min_replicas_max_lag, Some(10));
     }
 
     #[test]
