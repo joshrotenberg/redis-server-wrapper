@@ -1,0 +1,41 @@
+# forza configuration for redis-server-wrapper
+# Type-safe wrapper for redis-server and redis-cli with builder pattern APIs
+
+[global]
+repo = "joshrotenberg/redis-server-wrapper"
+model = "claude-sonnet-4-6"
+# Issues need this label before forza will process them
+gate_label = "forza:ready"
+branch_pattern = "automation/{issue}-{slug}"
+default_branch = "main"
+
+[security]
+# contributor: forza can create PRs but cannot merge them
+authorization_level = "contributor"
+
+[validation]
+# Commands that must pass before a PR is opened (mirrors CI workflow)
+commands = [
+  "cargo fmt --all -- --check",
+  "cargo clippy --all-targets --all-features -- -D warnings",
+  "cargo test --all-features",
+  "cargo doc --no-deps --all-features",
+]
+
+# Bug fixes: plan -> implement -> test -> review -> open PR
+[routes.bugfix]
+type = "issue"
+label = "bug"
+workflow = "bug"
+
+# New features: plan -> implement -> test -> review -> open PR
+[routes.feature]
+type = "issue"
+label = "enhancement"
+workflow = "feature"
+
+# Documentation and chores: implement -> test -> open PR
+[routes.docs]
+type = "issue"
+label = "documentation"
+workflow = "chore"
