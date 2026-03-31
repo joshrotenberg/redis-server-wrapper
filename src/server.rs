@@ -272,6 +272,36 @@ pub struct RedisServerConfig {
     /// Whether per-slot statistics are enabled, if set.
     pub cluster_slot_stats_enabled: Option<bool>,
 
+    // -- data structures --
+    /// Maximum number of entries in a hash before converting from listpack to hash table, if set.
+    pub hash_max_listpack_entries: Option<u32>,
+    /// Maximum size of a hash entry value before converting from listpack to hash table, if set.
+    pub hash_max_listpack_value: Option<u32>,
+    /// Maximum listpack size for list entries (positive = element count, negative = byte limit), if set.
+    pub list_max_listpack_size: Option<i32>,
+    /// Number of list quicklist nodes at each end that are not compressed, if set.
+    pub list_compress_depth: Option<u32>,
+    /// Maximum number of integer entries in a set before converting from intset to hash table, if set.
+    pub set_max_intset_entries: Option<u32>,
+    /// Maximum number of entries in a set before converting from listpack to hash table, if set.
+    pub set_max_listpack_entries: Option<u32>,
+    /// Maximum size of a set entry value before converting from listpack to hash table, if set.
+    pub set_max_listpack_value: Option<u32>,
+    /// Maximum number of entries in a sorted set before converting from listpack to skiplist, if set.
+    pub zset_max_listpack_entries: Option<u32>,
+    /// Maximum size of a sorted set entry value before converting from listpack to skiplist, if set.
+    pub zset_max_listpack_value: Option<u32>,
+    /// Maximum number of bytes used by the sparse representation of a HyperLogLog, if set.
+    pub hll_sparse_max_bytes: Option<u32>,
+    /// Maximum number of bytes in a single stream listpack node, if set.
+    pub stream_node_max_bytes: Option<u32>,
+    /// Maximum number of entries in a single stream listpack node, if set.
+    pub stream_node_max_entries: Option<u32>,
+    /// Duration in milliseconds for stream ID de-duplication, if set.
+    pub stream_idmp_duration: Option<u64>,
+    /// Maximum number of entries tracked for stream ID de-duplication, if set.
+    pub stream_idmp_maxsize: Option<u64>,
+
     // -- modules --
     /// List of Redis module paths to load at startup.
     pub loadmodule: Vec<PathBuf>,
@@ -493,6 +523,20 @@ impl Default for RedisServerConfig {
             cluster_slot_migration_handoff_max_lag_bytes: None,
             cluster_slot_migration_write_pause_timeout: None,
             cluster_slot_stats_enabled: None,
+            hash_max_listpack_entries: None,
+            hash_max_listpack_value: None,
+            list_max_listpack_size: None,
+            list_compress_depth: None,
+            set_max_intset_entries: None,
+            set_max_listpack_entries: None,
+            set_max_listpack_value: None,
+            zset_max_listpack_entries: None,
+            zset_max_listpack_value: None,
+            hll_sparse_max_bytes: None,
+            stream_node_max_bytes: None,
+            stream_node_max_entries: None,
+            stream_idmp_duration: None,
+            stream_idmp_maxsize: None,
             loadmodule: Vec::new(),
             hz: None,
             io_threads: None,
@@ -1199,6 +1243,97 @@ impl RedisServer {
         self
     }
 
+    // -- data structures --
+
+    /// Set the maximum number of entries in a hash before converting from listpack to hash table.
+    pub fn hash_max_listpack_entries(mut self, n: u32) -> Self {
+        self.config.hash_max_listpack_entries = Some(n);
+        self
+    }
+
+    /// Set the maximum size of a hash entry value before converting from listpack to hash table.
+    pub fn hash_max_listpack_value(mut self, n: u32) -> Self {
+        self.config.hash_max_listpack_value = Some(n);
+        self
+    }
+
+    /// Set the maximum listpack size for list entries.
+    ///
+    /// Positive values limit the number of elements per listpack node.
+    /// Negative values set a byte-size limit: -1 = 4KB, -2 = 8KB, -3 = 16KB, -4 = 32KB, -5 = 64KB.
+    pub fn list_max_listpack_size(mut self, n: i32) -> Self {
+        self.config.list_max_listpack_size = Some(n);
+        self
+    }
+
+    /// Set the number of quicklist nodes at each end of the list that are not compressed.
+    ///
+    /// `0` disables compression. `1` means the head and tail are uncompressed, etc.
+    pub fn list_compress_depth(mut self, n: u32) -> Self {
+        self.config.list_compress_depth = Some(n);
+        self
+    }
+
+    /// Set the maximum number of integer entries in a set before converting from intset to hash table.
+    pub fn set_max_intset_entries(mut self, n: u32) -> Self {
+        self.config.set_max_intset_entries = Some(n);
+        self
+    }
+
+    /// Set the maximum number of entries in a set before converting from listpack to hash table.
+    pub fn set_max_listpack_entries(mut self, n: u32) -> Self {
+        self.config.set_max_listpack_entries = Some(n);
+        self
+    }
+
+    /// Set the maximum size of a set entry value before converting from listpack to hash table.
+    pub fn set_max_listpack_value(mut self, n: u32) -> Self {
+        self.config.set_max_listpack_value = Some(n);
+        self
+    }
+
+    /// Set the maximum number of entries in a sorted set before converting from listpack to skiplist.
+    pub fn zset_max_listpack_entries(mut self, n: u32) -> Self {
+        self.config.zset_max_listpack_entries = Some(n);
+        self
+    }
+
+    /// Set the maximum size of a sorted set entry value before converting from listpack to skiplist.
+    pub fn zset_max_listpack_value(mut self, n: u32) -> Self {
+        self.config.zset_max_listpack_value = Some(n);
+        self
+    }
+
+    /// Set the maximum number of bytes for the sparse representation of a HyperLogLog.
+    pub fn hll_sparse_max_bytes(mut self, n: u32) -> Self {
+        self.config.hll_sparse_max_bytes = Some(n);
+        self
+    }
+
+    /// Set the maximum number of bytes in a single stream listpack node.
+    pub fn stream_node_max_bytes(mut self, n: u32) -> Self {
+        self.config.stream_node_max_bytes = Some(n);
+        self
+    }
+
+    /// Set the maximum number of entries in a single stream listpack node.
+    pub fn stream_node_max_entries(mut self, n: u32) -> Self {
+        self.config.stream_node_max_entries = Some(n);
+        self
+    }
+
+    /// Set the duration in milliseconds for stream ID de-duplication.
+    pub fn stream_idmp_duration(mut self, ms: u64) -> Self {
+        self.config.stream_idmp_duration = Some(ms);
+        self
+    }
+
+    /// Set the maximum number of entries tracked for stream ID de-duplication.
+    pub fn stream_idmp_maxsize(mut self, n: u64) -> Self {
+        self.config.stream_idmp_maxsize = Some(n);
+        self
+    }
+
     // -- modules --
 
     /// Load a Redis module at startup.
@@ -1684,6 +1819,50 @@ impl RedisServer {
             }
         }
 
+        // -- data structures --
+        if let Some(n) = self.config.hash_max_listpack_entries {
+            conf.push_str(&format!("hash-max-listpack-entries {n}\n"));
+        }
+        if let Some(n) = self.config.hash_max_listpack_value {
+            conf.push_str(&format!("hash-max-listpack-value {n}\n"));
+        }
+        if let Some(n) = self.config.list_max_listpack_size {
+            conf.push_str(&format!("list-max-listpack-size {n}\n"));
+        }
+        if let Some(n) = self.config.list_compress_depth {
+            conf.push_str(&format!("list-compress-depth {n}\n"));
+        }
+        if let Some(n) = self.config.set_max_intset_entries {
+            conf.push_str(&format!("set-max-intset-entries {n}\n"));
+        }
+        if let Some(n) = self.config.set_max_listpack_entries {
+            conf.push_str(&format!("set-max-listpack-entries {n}\n"));
+        }
+        if let Some(n) = self.config.set_max_listpack_value {
+            conf.push_str(&format!("set-max-listpack-value {n}\n"));
+        }
+        if let Some(n) = self.config.zset_max_listpack_entries {
+            conf.push_str(&format!("zset-max-listpack-entries {n}\n"));
+        }
+        if let Some(n) = self.config.zset_max_listpack_value {
+            conf.push_str(&format!("zset-max-listpack-value {n}\n"));
+        }
+        if let Some(n) = self.config.hll_sparse_max_bytes {
+            conf.push_str(&format!("hll-sparse-max-bytes {n}\n"));
+        }
+        if let Some(n) = self.config.stream_node_max_bytes {
+            conf.push_str(&format!("stream-node-max-bytes {n}\n"));
+        }
+        if let Some(n) = self.config.stream_node_max_entries {
+            conf.push_str(&format!("stream-node-max-entries {n}\n"));
+        }
+        if let Some(ms) = self.config.stream_idmp_duration {
+            conf.push_str(&format!("stream-idmp-duration {ms}\n"));
+        }
+        if let Some(n) = self.config.stream_idmp_maxsize {
+            conf.push_str(&format!("stream-idmp-maxsize {n}\n"));
+        }
+
         // -- modules --
         for path in &self.config.loadmodule {
             conf.push_str(&format!("loadmodule {}\n", path.display()));
@@ -2011,6 +2190,40 @@ mod tests {
             Some(5000)
         );
         assert_eq!(s.config.cluster_slot_stats_enabled, Some(true));
+    }
+
+    #[test]
+    fn data_structure_tuning() {
+        let s = RedisServer::new()
+            .hash_max_listpack_entries(128)
+            .hash_max_listpack_value(64)
+            .list_max_listpack_size(-2)
+            .list_compress_depth(1)
+            .set_max_intset_entries(512)
+            .set_max_listpack_entries(128)
+            .set_max_listpack_value(64)
+            .zset_max_listpack_entries(128)
+            .zset_max_listpack_value(64)
+            .hll_sparse_max_bytes(3000)
+            .stream_node_max_bytes(4096)
+            .stream_node_max_entries(100)
+            .stream_idmp_duration(5000)
+            .stream_idmp_maxsize(1000);
+
+        assert_eq!(s.config.hash_max_listpack_entries, Some(128));
+        assert_eq!(s.config.hash_max_listpack_value, Some(64));
+        assert_eq!(s.config.list_max_listpack_size, Some(-2));
+        assert_eq!(s.config.list_compress_depth, Some(1));
+        assert_eq!(s.config.set_max_intset_entries, Some(512));
+        assert_eq!(s.config.set_max_listpack_entries, Some(128));
+        assert_eq!(s.config.set_max_listpack_value, Some(64));
+        assert_eq!(s.config.zset_max_listpack_entries, Some(128));
+        assert_eq!(s.config.zset_max_listpack_value, Some(64));
+        assert_eq!(s.config.hll_sparse_max_bytes, Some(3000));
+        assert_eq!(s.config.stream_node_max_bytes, Some(4096));
+        assert_eq!(s.config.stream_node_max_entries, Some(100));
+        assert_eq!(s.config.stream_idmp_duration, Some(5000));
+        assert_eq!(s.config.stream_idmp_maxsize, Some(1000));
     }
 
     #[test]
