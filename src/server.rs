@@ -61,10 +61,40 @@ pub struct RedisServerConfig {
     pub tls_cert_file: Option<PathBuf>,
     /// Path to the TLS private key file, if set.
     pub tls_key_file: Option<PathBuf>,
+    /// Passphrase for the TLS private key file, if set.
+    pub tls_key_file_pass: Option<String>,
     /// Path to the TLS CA certificate file, if set.
     pub tls_ca_cert_file: Option<PathBuf>,
+    /// Path to a directory containing TLS CA certificates, if set.
+    pub tls_ca_cert_dir: Option<PathBuf>,
     /// Whether TLS client authentication is required, if set.
     pub tls_auth_clients: Option<bool>,
+    /// Path to the TLS client certificate file (for outgoing connections), if set.
+    pub tls_client_cert_file: Option<PathBuf>,
+    /// Path to the TLS client private key file (for outgoing connections), if set.
+    pub tls_client_key_file: Option<PathBuf>,
+    /// Passphrase for the TLS client private key file, if set.
+    pub tls_client_key_file_pass: Option<String>,
+    /// Path to the DH parameters file for DHE ciphers, if set.
+    pub tls_dh_params_file: Option<PathBuf>,
+    /// Allowed TLS 1.2 ciphers (OpenSSL cipher list format), if set.
+    pub tls_ciphers: Option<String>,
+    /// Allowed TLS 1.3 ciphersuites (colon-separated), if set.
+    pub tls_ciphersuites: Option<String>,
+    /// Allowed TLS protocol versions (e.g. `"TLSv1.2 TLSv1.3"`), if set.
+    pub tls_protocols: Option<String>,
+    /// Whether the server prefers its own cipher order, if set.
+    pub tls_prefer_server_ciphers: Option<bool>,
+    /// Whether TLS session caching is enabled, if set.
+    pub tls_session_caching: Option<bool>,
+    /// Number of entries in the TLS session cache, if set.
+    pub tls_session_cache_size: Option<u32>,
+    /// Timeout in seconds for cached TLS sessions, if set.
+    pub tls_session_cache_timeout: Option<u32>,
+    /// Whether replication traffic uses TLS, if set.
+    pub tls_replication: Option<bool>,
+    /// Whether cluster bus communication uses TLS, if set.
+    pub tls_cluster: Option<bool>,
 
     // -- general --
     /// Whether the server daemonizes itself (default: `true`).
@@ -341,8 +371,23 @@ impl Default for RedisServerConfig {
             tls_port: None,
             tls_cert_file: None,
             tls_key_file: None,
+            tls_key_file_pass: None,
             tls_ca_cert_file: None,
+            tls_ca_cert_dir: None,
             tls_auth_clients: None,
+            tls_client_cert_file: None,
+            tls_client_key_file: None,
+            tls_client_key_file_pass: None,
+            tls_dh_params_file: None,
+            tls_ciphers: None,
+            tls_ciphersuites: None,
+            tls_protocols: None,
+            tls_prefer_server_ciphers: None,
+            tls_session_caching: None,
+            tls_session_cache_size: None,
+            tls_session_cache_timeout: None,
+            tls_replication: None,
+            tls_cluster: None,
             daemonize: true,
             dir: std::env::temp_dir().join("redis-server-wrapper"),
             logfile: None,
@@ -517,6 +562,96 @@ impl RedisServer {
     /// Require TLS client authentication.
     pub fn tls_auth_clients(mut self, require: bool) -> Self {
         self.config.tls_auth_clients = Some(require);
+        self
+    }
+
+    /// Set the passphrase for the TLS private key file.
+    pub fn tls_key_file_pass(mut self, pass: impl Into<String>) -> Self {
+        self.config.tls_key_file_pass = Some(pass.into());
+        self
+    }
+
+    /// Set the TLS CA certificate directory path.
+    pub fn tls_ca_cert_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.tls_ca_cert_dir = Some(path.into());
+        self
+    }
+
+    /// Set the TLS client certificate file path (for outgoing connections).
+    pub fn tls_client_cert_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.tls_client_cert_file = Some(path.into());
+        self
+    }
+
+    /// Set the TLS client private key file path (for outgoing connections).
+    pub fn tls_client_key_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.tls_client_key_file = Some(path.into());
+        self
+    }
+
+    /// Set the passphrase for the TLS client private key file.
+    pub fn tls_client_key_file_pass(mut self, pass: impl Into<String>) -> Self {
+        self.config.tls_client_key_file_pass = Some(pass.into());
+        self
+    }
+
+    /// Set the DH parameters file path for DHE ciphers.
+    pub fn tls_dh_params_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.tls_dh_params_file = Some(path.into());
+        self
+    }
+
+    /// Set the allowed TLS 1.2 ciphers (OpenSSL cipher list format).
+    pub fn tls_ciphers(mut self, ciphers: impl Into<String>) -> Self {
+        self.config.tls_ciphers = Some(ciphers.into());
+        self
+    }
+
+    /// Set the allowed TLS 1.3 ciphersuites (colon-separated).
+    pub fn tls_ciphersuites(mut self, suites: impl Into<String>) -> Self {
+        self.config.tls_ciphersuites = Some(suites.into());
+        self
+    }
+
+    /// Set the allowed TLS protocol versions (e.g. `"TLSv1.2 TLSv1.3"`).
+    pub fn tls_protocols(mut self, protocols: impl Into<String>) -> Self {
+        self.config.tls_protocols = Some(protocols.into());
+        self
+    }
+
+    /// Prefer the server's cipher order over the client's.
+    pub fn tls_prefer_server_ciphers(mut self, prefer: bool) -> Self {
+        self.config.tls_prefer_server_ciphers = Some(prefer);
+        self
+    }
+
+    /// Enable or disable TLS session caching.
+    pub fn tls_session_caching(mut self, enable: bool) -> Self {
+        self.config.tls_session_caching = Some(enable);
+        self
+    }
+
+    /// Set the number of entries in the TLS session cache.
+    pub fn tls_session_cache_size(mut self, size: u32) -> Self {
+        self.config.tls_session_cache_size = Some(size);
+        self
+    }
+
+    /// Set the timeout in seconds for cached TLS sessions.
+    pub fn tls_session_cache_timeout(mut self, seconds: u32) -> Self {
+        self.config.tls_session_cache_timeout = Some(seconds);
+        self
+    }
+
+    /// Enable TLS for replication traffic.
+    pub fn tls_replication(mut self, enable: bool) -> Self {
+        self.config.tls_replication = Some(enable);
+        self
+    }
+
+    /// Enable TLS for cluster bus communication.
+    pub fn tls_cluster(mut self, enable: bool) -> Self {
+        self.config.tls_cluster = Some(enable);
         self
     }
 
@@ -1132,11 +1267,56 @@ impl RedisServer {
         if let Some(ref path) = self.config.tls_key_file {
             conf.push_str(&format!("tls-key-file {}\n", path.display()));
         }
+        if let Some(ref pass) = self.config.tls_key_file_pass {
+            conf.push_str(&format!("tls-key-file-pass {pass}\n"));
+        }
         if let Some(ref path) = self.config.tls_ca_cert_file {
             conf.push_str(&format!("tls-ca-cert-file {}\n", path.display()));
         }
+        if let Some(ref path) = self.config.tls_ca_cert_dir {
+            conf.push_str(&format!("tls-ca-cert-dir {}\n", path.display()));
+        }
         if let Some(auth) = self.config.tls_auth_clients {
             conf.push_str(&format!("tls-auth-clients {}\n", yn(auth)));
+        }
+        if let Some(ref path) = self.config.tls_client_cert_file {
+            conf.push_str(&format!("tls-client-cert-file {}\n", path.display()));
+        }
+        if let Some(ref path) = self.config.tls_client_key_file {
+            conf.push_str(&format!("tls-client-key-file {}\n", path.display()));
+        }
+        if let Some(ref pass) = self.config.tls_client_key_file_pass {
+            conf.push_str(&format!("tls-client-key-file-pass {pass}\n"));
+        }
+        if let Some(ref path) = self.config.tls_dh_params_file {
+            conf.push_str(&format!("tls-dh-params-file {}\n", path.display()));
+        }
+        if let Some(ref ciphers) = self.config.tls_ciphers {
+            conf.push_str(&format!("tls-ciphers {ciphers}\n"));
+        }
+        if let Some(ref suites) = self.config.tls_ciphersuites {
+            conf.push_str(&format!("tls-ciphersuites {suites}\n"));
+        }
+        if let Some(ref protocols) = self.config.tls_protocols {
+            conf.push_str(&format!("tls-protocols {protocols}\n"));
+        }
+        if let Some(v) = self.config.tls_prefer_server_ciphers {
+            conf.push_str(&format!("tls-prefer-server-ciphers {}\n", yn(v)));
+        }
+        if let Some(v) = self.config.tls_session_caching {
+            conf.push_str(&format!("tls-session-caching {}\n", yn(v)));
+        }
+        if let Some(size) = self.config.tls_session_cache_size {
+            conf.push_str(&format!("tls-session-cache-size {size}\n"));
+        }
+        if let Some(timeout) = self.config.tls_session_cache_timeout {
+            conf.push_str(&format!("tls-session-cache-timeout {timeout}\n"));
+        }
+        if let Some(v) = self.config.tls_replication {
+            conf.push_str(&format!("tls-replication {}\n", yn(v)));
+        }
+        if let Some(v) = self.config.tls_cluster {
+            conf.push_str(&format!("tls-cluster {}\n", yn(v)));
         }
 
         // -- general --
@@ -1661,5 +1841,82 @@ mod tests {
             Some(5000)
         );
         assert_eq!(s.config.cluster_slot_stats_enabled, Some(true));
+    }
+
+    #[test]
+    fn tls_config() {
+        let s = RedisServer::new()
+            .port(6400)
+            .tls_port(6401)
+            .tls_cert_file("/etc/tls/redis.crt")
+            .tls_key_file("/etc/tls/redis.key")
+            .tls_key_file_pass("keypass")
+            .tls_ca_cert_file("/etc/tls/ca.crt")
+            .tls_ca_cert_dir("/etc/tls/certs")
+            .tls_auth_clients(true)
+            .tls_client_cert_file("/etc/tls/client.crt")
+            .tls_client_key_file("/etc/tls/client.key")
+            .tls_client_key_file_pass("clientpass")
+            .tls_dh_params_file("/etc/tls/dhparams.pem")
+            .tls_ciphers("ECDHE-RSA-AES256-GCM-SHA384")
+            .tls_ciphersuites("TLS_AES_256_GCM_SHA384")
+            .tls_protocols("TLSv1.2 TLSv1.3")
+            .tls_prefer_server_ciphers(true)
+            .tls_session_caching(true)
+            .tls_session_cache_size(20480)
+            .tls_session_cache_timeout(300)
+            .tls_replication(true)
+            .tls_cluster(true);
+
+        assert_eq!(s.config.tls_port, Some(6401));
+        assert_eq!(
+            s.config.tls_cert_file.as_deref(),
+            Some(std::path::Path::new("/etc/tls/redis.crt"))
+        );
+        assert_eq!(
+            s.config.tls_key_file.as_deref(),
+            Some(std::path::Path::new("/etc/tls/redis.key"))
+        );
+        assert_eq!(s.config.tls_key_file_pass.as_deref(), Some("keypass"));
+        assert_eq!(
+            s.config.tls_ca_cert_file.as_deref(),
+            Some(std::path::Path::new("/etc/tls/ca.crt"))
+        );
+        assert_eq!(
+            s.config.tls_ca_cert_dir.as_deref(),
+            Some(std::path::Path::new("/etc/tls/certs"))
+        );
+        assert_eq!(s.config.tls_auth_clients, Some(true));
+        assert_eq!(
+            s.config.tls_client_cert_file.as_deref(),
+            Some(std::path::Path::new("/etc/tls/client.crt"))
+        );
+        assert_eq!(
+            s.config.tls_client_key_file.as_deref(),
+            Some(std::path::Path::new("/etc/tls/client.key"))
+        );
+        assert_eq!(
+            s.config.tls_client_key_file_pass.as_deref(),
+            Some("clientpass")
+        );
+        assert_eq!(
+            s.config.tls_dh_params_file.as_deref(),
+            Some(std::path::Path::new("/etc/tls/dhparams.pem"))
+        );
+        assert_eq!(
+            s.config.tls_ciphers.as_deref(),
+            Some("ECDHE-RSA-AES256-GCM-SHA384")
+        );
+        assert_eq!(
+            s.config.tls_ciphersuites.as_deref(),
+            Some("TLS_AES_256_GCM_SHA384")
+        );
+        assert_eq!(s.config.tls_protocols.as_deref(), Some("TLSv1.2 TLSv1.3"));
+        assert_eq!(s.config.tls_prefer_server_ciphers, Some(true));
+        assert_eq!(s.config.tls_session_caching, Some(true));
+        assert_eq!(s.config.tls_session_cache_size, Some(20480));
+        assert_eq!(s.config.tls_session_cache_timeout, Some(300));
+        assert_eq!(s.config.tls_replication, Some(true));
+        assert_eq!(s.config.tls_cluster, Some(true));
     }
 }

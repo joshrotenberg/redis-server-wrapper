@@ -322,6 +322,96 @@ impl RedisServer {
         self
     }
 
+    /// Set the passphrase for the TLS private key file.
+    pub fn tls_key_file_pass(mut self, pass: impl Into<String>) -> Self {
+        self.inner = self.inner.tls_key_file_pass(pass);
+        self
+    }
+
+    /// Set the TLS CA certificate directory path.
+    pub fn tls_ca_cert_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.tls_ca_cert_dir(path);
+        self
+    }
+
+    /// Set the TLS client certificate file path (for outgoing connections).
+    pub fn tls_client_cert_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.tls_client_cert_file(path);
+        self
+    }
+
+    /// Set the TLS client private key file path (for outgoing connections).
+    pub fn tls_client_key_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.tls_client_key_file(path);
+        self
+    }
+
+    /// Set the passphrase for the TLS client private key file.
+    pub fn tls_client_key_file_pass(mut self, pass: impl Into<String>) -> Self {
+        self.inner = self.inner.tls_client_key_file_pass(pass);
+        self
+    }
+
+    /// Set the DH parameters file path for DHE ciphers.
+    pub fn tls_dh_params_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.tls_dh_params_file(path);
+        self
+    }
+
+    /// Set the allowed TLS 1.2 ciphers (OpenSSL cipher list format).
+    pub fn tls_ciphers(mut self, ciphers: impl Into<String>) -> Self {
+        self.inner = self.inner.tls_ciphers(ciphers);
+        self
+    }
+
+    /// Set the allowed TLS 1.3 ciphersuites (colon-separated).
+    pub fn tls_ciphersuites(mut self, suites: impl Into<String>) -> Self {
+        self.inner = self.inner.tls_ciphersuites(suites);
+        self
+    }
+
+    /// Set the allowed TLS protocol versions (e.g. `"TLSv1.2 TLSv1.3"`).
+    pub fn tls_protocols(mut self, protocols: impl Into<String>) -> Self {
+        self.inner = self.inner.tls_protocols(protocols);
+        self
+    }
+
+    /// Prefer the server's cipher order over the client's.
+    pub fn tls_prefer_server_ciphers(mut self, prefer: bool) -> Self {
+        self.inner = self.inner.tls_prefer_server_ciphers(prefer);
+        self
+    }
+
+    /// Enable or disable TLS session caching.
+    pub fn tls_session_caching(mut self, enable: bool) -> Self {
+        self.inner = self.inner.tls_session_caching(enable);
+        self
+    }
+
+    /// Set the number of entries in the TLS session cache.
+    pub fn tls_session_cache_size(mut self, size: u32) -> Self {
+        self.inner = self.inner.tls_session_cache_size(size);
+        self
+    }
+
+    /// Set the timeout in seconds for cached TLS sessions.
+    pub fn tls_session_cache_timeout(mut self, seconds: u32) -> Self {
+        self.inner = self.inner.tls_session_cache_timeout(seconds);
+        self
+    }
+
+    /// Enable TLS for replication traffic.
+    pub fn tls_replication(mut self, enable: bool) -> Self {
+        self.inner = self.inner.tls_replication(enable);
+        self
+    }
+
+    /// Enable TLS for cluster bus communication.
+    pub fn tls_cluster(mut self, enable: bool) -> Self {
+        self.inner = self.inner.tls_cluster(enable);
+        self
+    }
+
     // -- general --
 
     /// Set the working directory for data files.
