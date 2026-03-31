@@ -113,8 +113,32 @@ pub struct RedisServerConfig {
     pub maxmemory: Option<String>,
     /// Eviction policy when `maxmemory` is reached, if set.
     pub maxmemory_policy: Option<String>,
+    /// Number of keys sampled per eviction round, if set (Redis default: `5`).
+    pub maxmemory_samples: Option<u32>,
+    /// Per-client memory limit (e.g. `"0"` = disabled), if set.
+    pub maxmemory_clients: Option<String>,
+    /// Eviction processing effort (1-100), if set (Redis default: `10`).
+    pub maxmemory_eviction_tenacity: Option<u32>,
     /// Maximum number of simultaneous client connections, if set.
     pub maxclients: Option<u32>,
+    /// Logarithmic factor for the LFU frequency counter, if set (Redis default: `10`).
+    pub lfu_log_factor: Option<u32>,
+    /// LFU counter decay time in minutes, if set (Redis default: `1`).
+    pub lfu_decay_time: Option<u32>,
+    /// Effort spent on active key expiration (1-100), if set (Redis default: `10`).
+    pub active_expire_effort: Option<u32>,
+
+    // -- lazyfree --
+    /// Whether eviction uses background deletion, if set.
+    pub lazyfree_lazy_eviction: Option<bool>,
+    /// Whether expired-key deletion uses background threads, if set.
+    pub lazyfree_lazy_expire: Option<bool>,
+    /// Whether implicit `DEL` commands (e.g. `RENAME`) use background deletion, if set.
+    pub lazyfree_lazy_server_del: Option<bool>,
+    /// Whether explicit `DEL` behaves like `UNLINK`, if set.
+    pub lazyfree_lazy_user_del: Option<bool>,
+    /// Whether `FLUSHDB`/`FLUSHALL` default to `ASYNC`, if set.
+    pub lazyfree_lazy_user_flush: Option<bool>,
 
     // -- persistence --
     /// RDB save policy (default: [`SavePolicy::Disabled`]).
@@ -395,7 +419,18 @@ impl Default for RedisServerConfig {
             databases: None,
             maxmemory: None,
             maxmemory_policy: None,
+            maxmemory_samples: None,
+            maxmemory_clients: None,
+            maxmemory_eviction_tenacity: None,
             maxclients: None,
+            lfu_log_factor: None,
+            lfu_decay_time: None,
+            active_expire_effort: None,
+            lazyfree_lazy_eviction: None,
+            lazyfree_lazy_expire: None,
+            lazyfree_lazy_server_del: None,
+            lazyfree_lazy_user_del: None,
+            lazyfree_lazy_user_flush: None,
             save: SavePolicy::Disabled,
             appendonly: false,
             appendfsync: None,
@@ -695,9 +730,77 @@ impl RedisServer {
         self
     }
 
+    /// Set the number of keys sampled per eviction round (Redis default: 5).
+    pub fn maxmemory_samples(mut self, n: u32) -> Self {
+        self.config.maxmemory_samples = Some(n);
+        self
+    }
+
+    /// Set per-client memory limit (e.g. `"0"` to disable).
+    pub fn maxmemory_clients(mut self, limit: impl Into<String>) -> Self {
+        self.config.maxmemory_clients = Some(limit.into());
+        self
+    }
+
+    /// Set eviction processing effort (1-100, Redis default: 10).
+    pub fn maxmemory_eviction_tenacity(mut self, tenacity: u32) -> Self {
+        self.config.maxmemory_eviction_tenacity = Some(tenacity);
+        self
+    }
+
     /// Set the maximum number of simultaneous client connections.
     pub fn maxclients(mut self, n: u32) -> Self {
         self.config.maxclients = Some(n);
+        self
+    }
+
+    /// Set the logarithmic factor for the LFU frequency counter (Redis default: 10).
+    pub fn lfu_log_factor(mut self, factor: u32) -> Self {
+        self.config.lfu_log_factor = Some(factor);
+        self
+    }
+
+    /// Set the LFU counter decay time in minutes (Redis default: 1).
+    pub fn lfu_decay_time(mut self, minutes: u32) -> Self {
+        self.config.lfu_decay_time = Some(minutes);
+        self
+    }
+
+    /// Set the effort spent on active key expiration (1-100, Redis default: 10).
+    pub fn active_expire_effort(mut self, effort: u32) -> Self {
+        self.config.active_expire_effort = Some(effort);
+        self
+    }
+
+    // -- lazyfree --
+
+    /// Enable or disable background deletion during eviction.
+    pub fn lazyfree_lazy_eviction(mut self, enable: bool) -> Self {
+        self.config.lazyfree_lazy_eviction = Some(enable);
+        self
+    }
+
+    /// Enable or disable background deletion of expired keys.
+    pub fn lazyfree_lazy_expire(mut self, enable: bool) -> Self {
+        self.config.lazyfree_lazy_expire = Some(enable);
+        self
+    }
+
+    /// Enable or disable background deletion for implicit `DEL` (e.g. `RENAME`).
+    pub fn lazyfree_lazy_server_del(mut self, enable: bool) -> Self {
+        self.config.lazyfree_lazy_server_del = Some(enable);
+        self
+    }
+
+    /// Make explicit `DEL` behave like `UNLINK` (background deletion).
+    pub fn lazyfree_lazy_user_del(mut self, enable: bool) -> Self {
+        self.config.lazyfree_lazy_user_del = Some(enable);
+        self
+    }
+
+    /// Make `FLUSHDB`/`FLUSHALL` default to `ASYNC`.
+    pub fn lazyfree_lazy_user_flush(mut self, enable: bool) -> Self {
+        self.config.lazyfree_lazy_user_flush = Some(enable);
         self
     }
 
@@ -1331,8 +1434,43 @@ impl RedisServer {
         if let Some(ref policy) = self.config.maxmemory_policy {
             conf.push_str(&format!("maxmemory-policy {policy}\n"));
         }
+        if let Some(n) = self.config.maxmemory_samples {
+            conf.push_str(&format!("maxmemory-samples {n}\n"));
+        }
+        if let Some(ref limit) = self.config.maxmemory_clients {
+            conf.push_str(&format!("maxmemory-clients {limit}\n"));
+        }
+        if let Some(n) = self.config.maxmemory_eviction_tenacity {
+            conf.push_str(&format!("maxmemory-eviction-tenacity {n}\n"));
+        }
         if let Some(n) = self.config.maxclients {
             conf.push_str(&format!("maxclients {n}\n"));
+        }
+        if let Some(n) = self.config.lfu_log_factor {
+            conf.push_str(&format!("lfu-log-factor {n}\n"));
+        }
+        if let Some(n) = self.config.lfu_decay_time {
+            conf.push_str(&format!("lfu-decay-time {n}\n"));
+        }
+        if let Some(n) = self.config.active_expire_effort {
+            conf.push_str(&format!("active-expire-effort {n}\n"));
+        }
+
+        // -- lazyfree --
+        if let Some(v) = self.config.lazyfree_lazy_eviction {
+            conf.push_str(&format!("lazyfree-lazy-eviction {}\n", yn(v)));
+        }
+        if let Some(v) = self.config.lazyfree_lazy_expire {
+            conf.push_str(&format!("lazyfree-lazy-expire {}\n", yn(v)));
+        }
+        if let Some(v) = self.config.lazyfree_lazy_server_del {
+            conf.push_str(&format!("lazyfree-lazy-server-del {}\n", yn(v)));
+        }
+        if let Some(v) = self.config.lazyfree_lazy_user_del {
+            conf.push_str(&format!("lazyfree-lazy-user-del {}\n", yn(v)));
+        }
+        if let Some(v) = self.config.lazyfree_lazy_user_flush {
+            conf.push_str(&format!("lazyfree-lazy-user-flush {}\n", yn(v)));
         }
 
         // -- persistence --
@@ -1710,6 +1848,38 @@ mod tests {
         assert_eq!(s.config.auto_aof_rewrite_percentage, Some(100));
         assert_eq!(s.config.auto_aof_rewrite_min_size.as_deref(), Some("64mb"));
         assert_eq!(s.config.no_appendfsync_on_rewrite, Some(true));
+    }
+
+    #[test]
+    fn memory_eviction_and_lazyfree() {
+        let s = RedisServer::new()
+            .maxmemory("256mb")
+            .maxmemory_policy("allkeys-lfu")
+            .maxmemory_samples(10)
+            .maxmemory_clients("0")
+            .maxmemory_eviction_tenacity(50)
+            .lfu_log_factor(10)
+            .lfu_decay_time(1)
+            .active_expire_effort(25)
+            .lazyfree_lazy_eviction(true)
+            .lazyfree_lazy_expire(true)
+            .lazyfree_lazy_server_del(true)
+            .lazyfree_lazy_user_del(false)
+            .lazyfree_lazy_user_flush(true);
+
+        assert_eq!(s.config.maxmemory.as_deref(), Some("256mb"));
+        assert_eq!(s.config.maxmemory_policy.as_deref(), Some("allkeys-lfu"));
+        assert_eq!(s.config.maxmemory_samples, Some(10));
+        assert_eq!(s.config.maxmemory_clients.as_deref(), Some("0"));
+        assert_eq!(s.config.maxmemory_eviction_tenacity, Some(50));
+        assert_eq!(s.config.lfu_log_factor, Some(10));
+        assert_eq!(s.config.lfu_decay_time, Some(1));
+        assert_eq!(s.config.active_expire_effort, Some(25));
+        assert_eq!(s.config.lazyfree_lazy_eviction, Some(true));
+        assert_eq!(s.config.lazyfree_lazy_expire, Some(true));
+        assert_eq!(s.config.lazyfree_lazy_server_del, Some(true));
+        assert_eq!(s.config.lazyfree_lazy_user_del, Some(false));
+        assert_eq!(s.config.lazyfree_lazy_user_flush, Some(true));
     }
 
     #[test]
