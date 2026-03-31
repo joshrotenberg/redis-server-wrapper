@@ -175,6 +175,48 @@ pub struct RedisServerConfig {
     pub cluster_enabled: bool,
     /// Cluster node timeout in milliseconds, if set.
     pub cluster_node_timeout: Option<u64>,
+    /// Path to the cluster config file, if set. Overrides the auto-generated default.
+    pub cluster_config_file: Option<PathBuf>,
+    /// Whether full hash slot coverage is required for the cluster to accept writes, if set.
+    pub cluster_require_full_coverage: Option<bool>,
+    /// Whether reads are allowed when the cluster is down, if set.
+    pub cluster_allow_reads_when_down: Option<bool>,
+    /// Whether pubsub shard channels are allowed when the cluster is down, if set.
+    pub cluster_allow_pubsubshard_when_down: Option<bool>,
+    /// Whether automatic replica migration is allowed, if set.
+    pub cluster_allow_replica_migration: Option<bool>,
+    /// Minimum number of replicas a master must have before one can migrate, if set.
+    pub cluster_migration_barrier: Option<u32>,
+    /// Whether this replica will never attempt a failover, if set.
+    pub cluster_replica_no_failover: Option<bool>,
+    /// Factor multiplied by node timeout to determine replica validity, if set.
+    pub cluster_replica_validity_factor: Option<u32>,
+    /// IP address this node announces to the cluster bus, if set.
+    pub cluster_announce_ip: Option<String>,
+    /// Client port this node announces to the cluster, if set.
+    pub cluster_announce_port: Option<u16>,
+    /// Cluster bus port this node announces, if set.
+    pub cluster_announce_bus_port: Option<u16>,
+    /// TLS port this node announces to the cluster, if set.
+    pub cluster_announce_tls_port: Option<u16>,
+    /// Hostname this node announces to the cluster, if set.
+    pub cluster_announce_hostname: Option<String>,
+    /// Human-readable node name announced to the cluster, if set.
+    pub cluster_announce_human_nodename: Option<String>,
+    /// Dedicated cluster bus port, if set (0 = auto, default offset +10000).
+    pub cluster_port: Option<u16>,
+    /// Preferred endpoint type for cluster redirections, if set (e.g. `"ip"`, `"hostname"`).
+    pub cluster_preferred_endpoint_type: Option<String>,
+    /// Send buffer limit in bytes for cluster bus links, if set.
+    pub cluster_link_sendbuf_limit: Option<u64>,
+    /// Compatibility sample ratio percentage, if set.
+    pub cluster_compatibility_sample_ratio: Option<u32>,
+    /// Maximum lag in bytes before slot migration handoff, if set.
+    pub cluster_slot_migration_handoff_max_lag_bytes: Option<u64>,
+    /// Write pause timeout in milliseconds during slot migration, if set.
+    pub cluster_slot_migration_write_pause_timeout: Option<u64>,
+    /// Whether per-slot statistics are enabled, if set.
+    pub cluster_slot_stats_enabled: Option<bool>,
 
     // -- modules --
     /// List of Redis module paths to load at startup.
@@ -350,6 +392,27 @@ impl Default for RedisServerConfig {
             acl_file: None,
             cluster_enabled: false,
             cluster_node_timeout: None,
+            cluster_config_file: None,
+            cluster_require_full_coverage: None,
+            cluster_allow_reads_when_down: None,
+            cluster_allow_pubsubshard_when_down: None,
+            cluster_allow_replica_migration: None,
+            cluster_migration_barrier: None,
+            cluster_replica_no_failover: None,
+            cluster_replica_validity_factor: None,
+            cluster_announce_ip: None,
+            cluster_announce_port: None,
+            cluster_announce_bus_port: None,
+            cluster_announce_tls_port: None,
+            cluster_announce_hostname: None,
+            cluster_announce_human_nodename: None,
+            cluster_port: None,
+            cluster_preferred_endpoint_type: None,
+            cluster_link_sendbuf_limit: None,
+            cluster_compatibility_sample_ratio: None,
+            cluster_slot_migration_handoff_max_lag_bytes: None,
+            cluster_slot_migration_write_pause_timeout: None,
+            cluster_slot_stats_enabled: None,
             loadmodule: Vec::new(),
             hz: None,
             io_threads: None,
@@ -772,6 +835,132 @@ impl RedisServer {
         self
     }
 
+    /// Set a custom cluster config file path (overrides auto-generated default).
+    pub fn cluster_config_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.cluster_config_file = Some(path.into());
+        self
+    }
+
+    /// Require full hash slot coverage for the cluster to accept writes.
+    pub fn cluster_require_full_coverage(mut self, require: bool) -> Self {
+        self.config.cluster_require_full_coverage = Some(require);
+        self
+    }
+
+    /// Allow reads when the cluster is down.
+    pub fn cluster_allow_reads_when_down(mut self, allow: bool) -> Self {
+        self.config.cluster_allow_reads_when_down = Some(allow);
+        self
+    }
+
+    /// Allow pubsub shard channels when the cluster is down.
+    pub fn cluster_allow_pubsubshard_when_down(mut self, allow: bool) -> Self {
+        self.config.cluster_allow_pubsubshard_when_down = Some(allow);
+        self
+    }
+
+    /// Allow automatic replica migration between masters.
+    pub fn cluster_allow_replica_migration(mut self, allow: bool) -> Self {
+        self.config.cluster_allow_replica_migration = Some(allow);
+        self
+    }
+
+    /// Set the minimum number of replicas a master must retain before one can migrate.
+    pub fn cluster_migration_barrier(mut self, barrier: u32) -> Self {
+        self.config.cluster_migration_barrier = Some(barrier);
+        self
+    }
+
+    /// Prevent this replica from ever attempting a failover.
+    pub fn cluster_replica_no_failover(mut self, no_failover: bool) -> Self {
+        self.config.cluster_replica_no_failover = Some(no_failover);
+        self
+    }
+
+    /// Set the replica validity factor (multiplied by node timeout).
+    pub fn cluster_replica_validity_factor(mut self, factor: u32) -> Self {
+        self.config.cluster_replica_validity_factor = Some(factor);
+        self
+    }
+
+    /// Set the IP address this node announces to the cluster bus.
+    pub fn cluster_announce_ip(mut self, ip: impl Into<String>) -> Self {
+        self.config.cluster_announce_ip = Some(ip.into());
+        self
+    }
+
+    /// Set the client port this node announces to the cluster.
+    pub fn cluster_announce_port(mut self, port: u16) -> Self {
+        self.config.cluster_announce_port = Some(port);
+        self
+    }
+
+    /// Set the cluster bus port this node announces.
+    pub fn cluster_announce_bus_port(mut self, port: u16) -> Self {
+        self.config.cluster_announce_bus_port = Some(port);
+        self
+    }
+
+    /// Set the TLS port this node announces to the cluster.
+    pub fn cluster_announce_tls_port(mut self, port: u16) -> Self {
+        self.config.cluster_announce_tls_port = Some(port);
+        self
+    }
+
+    /// Set the hostname this node announces to the cluster.
+    pub fn cluster_announce_hostname(mut self, hostname: impl Into<String>) -> Self {
+        self.config.cluster_announce_hostname = Some(hostname.into());
+        self
+    }
+
+    /// Set the human-readable node name announced to the cluster.
+    pub fn cluster_announce_human_nodename(mut self, name: impl Into<String>) -> Self {
+        self.config.cluster_announce_human_nodename = Some(name.into());
+        self
+    }
+
+    /// Set the dedicated cluster bus port (0 = auto with +10000 offset).
+    pub fn cluster_port(mut self, port: u16) -> Self {
+        self.config.cluster_port = Some(port);
+        self
+    }
+
+    /// Set the preferred endpoint type for cluster redirections (e.g. `"ip"`, `"hostname"`).
+    pub fn cluster_preferred_endpoint_type(mut self, endpoint_type: impl Into<String>) -> Self {
+        self.config.cluster_preferred_endpoint_type = Some(endpoint_type.into());
+        self
+    }
+
+    /// Set the send buffer limit in bytes for cluster bus links.
+    pub fn cluster_link_sendbuf_limit(mut self, limit: u64) -> Self {
+        self.config.cluster_link_sendbuf_limit = Some(limit);
+        self
+    }
+
+    /// Set the compatibility sample ratio percentage.
+    pub fn cluster_compatibility_sample_ratio(mut self, ratio: u32) -> Self {
+        self.config.cluster_compatibility_sample_ratio = Some(ratio);
+        self
+    }
+
+    /// Set the maximum lag in bytes before slot migration handoff.
+    pub fn cluster_slot_migration_handoff_max_lag_bytes(mut self, bytes: u64) -> Self {
+        self.config.cluster_slot_migration_handoff_max_lag_bytes = Some(bytes);
+        self
+    }
+
+    /// Set the write pause timeout in milliseconds during slot migration.
+    pub fn cluster_slot_migration_write_pause_timeout(mut self, ms: u64) -> Self {
+        self.config.cluster_slot_migration_write_pause_timeout = Some(ms);
+        self
+    }
+
+    /// Enable per-slot statistics collection.
+    pub fn cluster_slot_stats_enabled(mut self, enable: bool) -> Self {
+        self.config.cluster_slot_stats_enabled = Some(enable);
+        self
+    }
+
     // -- modules --
 
     /// Load a Redis module at startup.
@@ -1098,12 +1287,82 @@ impl RedisServer {
         // -- cluster --
         if self.config.cluster_enabled {
             conf.push_str("cluster-enabled yes\n");
-            conf.push_str(&format!(
-                "cluster-config-file {}/nodes.conf\n",
-                node_dir.display()
-            ));
+            if let Some(ref path) = self.config.cluster_config_file {
+                conf.push_str(&format!("cluster-config-file {}\n", path.display()));
+            } else {
+                conf.push_str(&format!(
+                    "cluster-config-file {}/nodes.conf\n",
+                    node_dir.display()
+                ));
+            }
             if let Some(timeout) = self.config.cluster_node_timeout {
                 conf.push_str(&format!("cluster-node-timeout {timeout}\n"));
+            }
+            if let Some(v) = self.config.cluster_require_full_coverage {
+                conf.push_str(&format!("cluster-require-full-coverage {}\n", yn(v)));
+            }
+            if let Some(v) = self.config.cluster_allow_reads_when_down {
+                conf.push_str(&format!("cluster-allow-reads-when-down {}\n", yn(v)));
+            }
+            if let Some(v) = self.config.cluster_allow_pubsubshard_when_down {
+                conf.push_str(&format!("cluster-allow-pubsubshard-when-down {}\n", yn(v)));
+            }
+            if let Some(v) = self.config.cluster_allow_replica_migration {
+                conf.push_str(&format!("cluster-allow-replica-migration {}\n", yn(v)));
+            }
+            if let Some(barrier) = self.config.cluster_migration_barrier {
+                conf.push_str(&format!("cluster-migration-barrier {barrier}\n"));
+            }
+            if let Some(v) = self.config.cluster_replica_no_failover {
+                conf.push_str(&format!("cluster-replica-no-failover {}\n", yn(v)));
+            }
+            if let Some(factor) = self.config.cluster_replica_validity_factor {
+                conf.push_str(&format!("cluster-replica-validity-factor {factor}\n"));
+            }
+            if let Some(ref ip) = self.config.cluster_announce_ip {
+                conf.push_str(&format!("cluster-announce-ip {ip}\n"));
+            }
+            if let Some(port) = self.config.cluster_announce_port {
+                conf.push_str(&format!("cluster-announce-port {port}\n"));
+            }
+            if let Some(port) = self.config.cluster_announce_bus_port {
+                conf.push_str(&format!("cluster-announce-bus-port {port}\n"));
+            }
+            if let Some(port) = self.config.cluster_announce_tls_port {
+                conf.push_str(&format!("cluster-announce-tls-port {port}\n"));
+            }
+            if let Some(ref hostname) = self.config.cluster_announce_hostname {
+                conf.push_str(&format!("cluster-announce-hostname {hostname}\n"));
+            }
+            if let Some(ref name) = self.config.cluster_announce_human_nodename {
+                conf.push_str(&format!("cluster-announce-human-nodename {name}\n"));
+            }
+            if let Some(port) = self.config.cluster_port {
+                conf.push_str(&format!("cluster-port {port}\n"));
+            }
+            if let Some(ref endpoint_type) = self.config.cluster_preferred_endpoint_type {
+                conf.push_str(&format!(
+                    "cluster-preferred-endpoint-type {endpoint_type}\n"
+                ));
+            }
+            if let Some(limit) = self.config.cluster_link_sendbuf_limit {
+                conf.push_str(&format!("cluster-link-sendbuf-limit {limit}\n"));
+            }
+            if let Some(ratio) = self.config.cluster_compatibility_sample_ratio {
+                conf.push_str(&format!("cluster-compatibility-sample-ratio {ratio}\n"));
+            }
+            if let Some(bytes) = self.config.cluster_slot_migration_handoff_max_lag_bytes {
+                conf.push_str(&format!(
+                    "cluster-slot-migration-handoff-max-lag-bytes {bytes}\n"
+                ));
+            }
+            if let Some(ms) = self.config.cluster_slot_migration_write_pause_timeout {
+                conf.push_str(&format!(
+                    "cluster-slot-migration-write-pause-timeout {ms}\n"
+                ));
+            }
+            if let Some(v) = self.config.cluster_slot_stats_enabled {
+                conf.push_str(&format!("cluster-slot-stats-enabled {}\n", yn(v)));
             }
         }
 
@@ -1338,9 +1597,69 @@ mod tests {
         let s = RedisServer::new()
             .port(7000)
             .cluster_enabled(true)
-            .cluster_node_timeout(5000);
+            .cluster_node_timeout(5000)
+            .cluster_config_file("/tmp/nodes.conf")
+            .cluster_require_full_coverage(false)
+            .cluster_allow_reads_when_down(true)
+            .cluster_allow_pubsubshard_when_down(true)
+            .cluster_allow_replica_migration(true)
+            .cluster_migration_barrier(1)
+            .cluster_replica_no_failover(false)
+            .cluster_replica_validity_factor(10)
+            .cluster_announce_ip("10.0.0.1")
+            .cluster_announce_port(7000)
+            .cluster_announce_bus_port(17000)
+            .cluster_announce_tls_port(7100)
+            .cluster_announce_hostname("node1.example.com")
+            .cluster_announce_human_nodename("node-1")
+            .cluster_port(17000)
+            .cluster_preferred_endpoint_type("ip")
+            .cluster_link_sendbuf_limit(67108864)
+            .cluster_compatibility_sample_ratio(50)
+            .cluster_slot_migration_handoff_max_lag_bytes(1048576)
+            .cluster_slot_migration_write_pause_timeout(5000)
+            .cluster_slot_stats_enabled(true);
 
         assert!(s.config.cluster_enabled);
         assert_eq!(s.config.cluster_node_timeout, Some(5000));
+        assert_eq!(
+            s.config.cluster_config_file,
+            Some(PathBuf::from("/tmp/nodes.conf"))
+        );
+        assert_eq!(s.config.cluster_require_full_coverage, Some(false));
+        assert_eq!(s.config.cluster_allow_reads_when_down, Some(true));
+        assert_eq!(s.config.cluster_allow_pubsubshard_when_down, Some(true));
+        assert_eq!(s.config.cluster_allow_replica_migration, Some(true));
+        assert_eq!(s.config.cluster_migration_barrier, Some(1));
+        assert_eq!(s.config.cluster_replica_no_failover, Some(false));
+        assert_eq!(s.config.cluster_replica_validity_factor, Some(10));
+        assert_eq!(s.config.cluster_announce_ip.as_deref(), Some("10.0.0.1"));
+        assert_eq!(s.config.cluster_announce_port, Some(7000));
+        assert_eq!(s.config.cluster_announce_bus_port, Some(17000));
+        assert_eq!(s.config.cluster_announce_tls_port, Some(7100));
+        assert_eq!(
+            s.config.cluster_announce_hostname.as_deref(),
+            Some("node1.example.com")
+        );
+        assert_eq!(
+            s.config.cluster_announce_human_nodename.as_deref(),
+            Some("node-1")
+        );
+        assert_eq!(s.config.cluster_port, Some(17000));
+        assert_eq!(
+            s.config.cluster_preferred_endpoint_type.as_deref(),
+            Some("ip")
+        );
+        assert_eq!(s.config.cluster_link_sendbuf_limit, Some(67108864));
+        assert_eq!(s.config.cluster_compatibility_sample_ratio, Some(50));
+        assert_eq!(
+            s.config.cluster_slot_migration_handoff_max_lag_bytes,
+            Some(1048576)
+        );
+        assert_eq!(
+            s.config.cluster_slot_migration_write_pause_timeout,
+            Some(5000)
+        );
+        assert_eq!(s.config.cluster_slot_stats_enabled, Some(true));
     }
 }
