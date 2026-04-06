@@ -43,7 +43,26 @@ pub struct RedisClusterBuilder {
     cluster_allow_replica_migration: Option<bool>,
     cluster_migration_barrier: Option<u32>,
     cluster_announce_hostname: Option<String>,
+    cluster_announce_human_nodename: Option<String>,
     cluster_preferred_endpoint_type: Option<String>,
+    cluster_replica_no_failover: Option<bool>,
+    cluster_replica_validity_factor: Option<u32>,
+    cluster_announce_ip: Option<String>,
+    cluster_announce_port: Option<u16>,
+    cluster_announce_bus_port: Option<u16>,
+    cluster_announce_tls_port: Option<u16>,
+    cluster_port: Option<u16>,
+    cluster_link_sendbuf_limit: Option<u64>,
+    cluster_compatibility_sample_ratio: Option<u32>,
+    cluster_slot_migration_handoff_max_lag_bytes: Option<u64>,
+    cluster_slot_migration_write_pause_timeout: Option<u64>,
+    cluster_slot_stats_enabled: Option<bool>,
+    min_replicas_to_write: Option<u32>,
+    min_replicas_max_lag: Option<u32>,
+    repl_diskless_sync: Option<bool>,
+    repl_diskless_sync_delay: Option<u32>,
+    repl_ping_replica_period: Option<u32>,
+    repl_timeout: Option<u32>,
     extra: HashMap<String, String>,
     redis_server_bin: String,
     redis_cli_bin: String,
@@ -161,6 +180,144 @@ impl RedisClusterBuilder {
         self
     }
 
+    /// Prevent replicas from attempting automatic failover.
+    ///
+    /// Manual failover via `CLUSTER FAILOVER` still works.
+    pub fn cluster_replica_no_failover(mut self, no_failover: bool) -> Self {
+        self.cluster_replica_no_failover = Some(no_failover);
+        self
+    }
+
+    /// Set the replica validity factor for failover eligibility.
+    ///
+    /// A replica will not failover if it has been disconnected from the master
+    /// for more than `(node-timeout * factor) + repl-ping-replica-period` seconds.
+    /// Set to `0` to allow any replica to failover regardless of staleness.
+    pub fn cluster_replica_validity_factor(mut self, factor: u32) -> Self {
+        self.cluster_replica_validity_factor = Some(factor);
+        self
+    }
+
+    /// Set the IP address nodes announce for client redirects (MOVED/ASKING).
+    pub fn cluster_announce_ip(mut self, ip: impl Into<String>) -> Self {
+        self.cluster_announce_ip = Some(ip.into());
+        self
+    }
+
+    /// Set the client port nodes announce for redirects.
+    pub fn cluster_announce_port(mut self, port: u16) -> Self {
+        self.cluster_announce_port = Some(port);
+        self
+    }
+
+    /// Set the cluster bus port nodes announce for gossip.
+    pub fn cluster_announce_bus_port(mut self, port: u16) -> Self {
+        self.cluster_announce_bus_port = Some(port);
+        self
+    }
+
+    /// Set the TLS client port nodes announce for redirects.
+    pub fn cluster_announce_tls_port(mut self, port: u16) -> Self {
+        self.cluster_announce_tls_port = Some(port);
+        self
+    }
+
+    /// Set a friendly node name broadcast for debugging/admin display.
+    pub fn cluster_announce_human_nodename(mut self, name: impl Into<String>) -> Self {
+        self.cluster_announce_human_nodename = Some(name.into());
+        self
+    }
+
+    /// Set a dedicated cluster bus port (default: client port + 10000).
+    pub fn cluster_port(mut self, port: u16) -> Self {
+        self.cluster_port = Some(port);
+        self
+    }
+
+    /// Set the maximum memory for a cluster bus link's output buffer.
+    ///
+    /// When exceeded, the link is disconnected. Set to `0` for unlimited.
+    pub fn cluster_link_sendbuf_limit(mut self, limit: u64) -> Self {
+        self.cluster_link_sendbuf_limit = Some(limit);
+        self
+    }
+
+    /// Set the cluster compatibility sample ratio.
+    pub fn cluster_compatibility_sample_ratio(mut self, ratio: u32) -> Self {
+        self.cluster_compatibility_sample_ratio = Some(ratio);
+        self
+    }
+
+    /// Set the maximum replication lag in bytes before slot migration handoff.
+    pub fn cluster_slot_migration_handoff_max_lag_bytes(mut self, bytes: u64) -> Self {
+        self.cluster_slot_migration_handoff_max_lag_bytes = Some(bytes);
+        self
+    }
+
+    /// Set the write pause timeout in milliseconds during slot migration.
+    pub fn cluster_slot_migration_write_pause_timeout(mut self, ms: u64) -> Self {
+        self.cluster_slot_migration_write_pause_timeout = Some(ms);
+        self
+    }
+
+    /// Enable per-slot statistics tracking.
+    pub fn cluster_slot_stats_enabled(mut self, enable: bool) -> Self {
+        self.cluster_slot_stats_enabled = Some(enable);
+        self
+    }
+
+    // -- replication directives relevant in cluster mode --
+
+    /// Set the minimum number of connected replicas before the master accepts writes.
+    ///
+    /// Useful for split-brain protection: a partitioned master with no reachable
+    /// replicas stops accepting writes, reducing data loss during partitions.
+    pub fn min_replicas_to_write(mut self, n: u32) -> Self {
+        self.min_replicas_to_write = Some(n);
+        self
+    }
+
+    /// Set the maximum replication lag (seconds) before a replica is considered disconnected.
+    ///
+    /// Used with `min_replicas_to_write` to determine if enough replicas are connected.
+    pub fn min_replicas_max_lag(mut self, seconds: u32) -> Self {
+        self.min_replicas_max_lag = Some(seconds);
+        self
+    }
+
+    /// Enable or disable diskless replication sync.
+    ///
+    /// Diskless sync is faster but uses more memory during transfer.
+    pub fn repl_diskless_sync(mut self, enable: bool) -> Self {
+        self.repl_diskless_sync = Some(enable);
+        self
+    }
+
+    /// Set the delay in seconds before starting a diskless replication transfer.
+    ///
+    /// Allows batching multiple replicas syncing at once.
+    pub fn repl_diskless_sync_delay(mut self, seconds: u32) -> Self {
+        self.repl_diskless_sync_delay = Some(seconds);
+        self
+    }
+
+    /// Set how often replicas ping the master (seconds).
+    ///
+    /// Used in the replica validity calculation:
+    /// `(node-timeout * validity-factor) + repl-ping-replica-period`.
+    pub fn repl_ping_replica_period(mut self, seconds: u32) -> Self {
+        self.repl_ping_replica_period = Some(seconds);
+        self
+    }
+
+    /// Set the replication timeout in seconds.
+    ///
+    /// If a replica doesn't hear from master for this long, it considers the link dead.
+    pub fn repl_timeout(mut self, seconds: u32) -> Self {
+        self.repl_timeout = Some(seconds);
+        self
+    }
+
     /// Set an arbitrary config directive for all cluster nodes.
     pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.extra.insert(key.into(), value.into());
@@ -237,6 +394,63 @@ impl RedisClusterBuilder {
             }
             if let Some(ref endpoint_type) = self.cluster_preferred_endpoint_type {
                 server = server.cluster_preferred_endpoint_type(endpoint_type.clone());
+            }
+            if let Some(v) = self.cluster_replica_no_failover {
+                server = server.cluster_replica_no_failover(v);
+            }
+            if let Some(factor) = self.cluster_replica_validity_factor {
+                server = server.cluster_replica_validity_factor(factor);
+            }
+            if let Some(ref ip) = self.cluster_announce_ip {
+                server = server.cluster_announce_ip(ip.clone());
+            }
+            if let Some(port) = self.cluster_announce_port {
+                server = server.cluster_announce_port(port);
+            }
+            if let Some(port) = self.cluster_announce_bus_port {
+                server = server.cluster_announce_bus_port(port);
+            }
+            if let Some(port) = self.cluster_announce_tls_port {
+                server = server.cluster_announce_tls_port(port);
+            }
+            if let Some(ref name) = self.cluster_announce_human_nodename {
+                server = server.cluster_announce_human_nodename(name.clone());
+            }
+            if let Some(port) = self.cluster_port {
+                server = server.cluster_port(port);
+            }
+            if let Some(limit) = self.cluster_link_sendbuf_limit {
+                server = server.cluster_link_sendbuf_limit(limit);
+            }
+            if let Some(ratio) = self.cluster_compatibility_sample_ratio {
+                server = server.cluster_compatibility_sample_ratio(ratio);
+            }
+            if let Some(bytes) = self.cluster_slot_migration_handoff_max_lag_bytes {
+                server = server.cluster_slot_migration_handoff_max_lag_bytes(bytes);
+            }
+            if let Some(ms) = self.cluster_slot_migration_write_pause_timeout {
+                server = server.cluster_slot_migration_write_pause_timeout(ms);
+            }
+            if let Some(v) = self.cluster_slot_stats_enabled {
+                server = server.cluster_slot_stats_enabled(v);
+            }
+            if let Some(n) = self.min_replicas_to_write {
+                server = server.min_replicas_to_write(n);
+            }
+            if let Some(seconds) = self.min_replicas_max_lag {
+                server = server.min_replicas_max_lag(seconds);
+            }
+            if let Some(v) = self.repl_diskless_sync {
+                server = server.repl_diskless_sync(v);
+            }
+            if let Some(seconds) = self.repl_diskless_sync_delay {
+                server = server.repl_diskless_sync_delay(seconds);
+            }
+            if let Some(seconds) = self.repl_ping_replica_period {
+                server = server.repl_ping_replica_period(seconds);
+            }
+            if let Some(seconds) = self.repl_timeout {
+                server = server.repl_timeout(seconds);
             }
             if let Some(ref password) = self.password {
                 server = server.password(password).masterauth(password);
@@ -322,7 +536,26 @@ impl RedisCluster {
             cluster_allow_replica_migration: None,
             cluster_migration_barrier: None,
             cluster_announce_hostname: None,
+            cluster_announce_human_nodename: None,
             cluster_preferred_endpoint_type: None,
+            cluster_replica_no_failover: None,
+            cluster_replica_validity_factor: None,
+            cluster_announce_ip: None,
+            cluster_announce_port: None,
+            cluster_announce_bus_port: None,
+            cluster_announce_tls_port: None,
+            cluster_port: None,
+            cluster_link_sendbuf_limit: None,
+            cluster_compatibility_sample_ratio: None,
+            cluster_slot_migration_handoff_max_lag_bytes: None,
+            cluster_slot_migration_write_pause_timeout: None,
+            cluster_slot_stats_enabled: None,
+            min_replicas_to_write: None,
+            min_replicas_max_lag: None,
+            repl_diskless_sync: None,
+            repl_diskless_sync_delay: None,
+            repl_ping_replica_period: None,
+            repl_timeout: None,
             extra: HashMap::new(),
             redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),
@@ -451,7 +684,20 @@ mod tests {
             .cluster_allow_replica_migration(false)
             .cluster_migration_barrier(2)
             .cluster_announce_hostname("node.example.com")
-            .cluster_preferred_endpoint_type("hostname");
+            .cluster_preferred_endpoint_type("hostname")
+            .cluster_replica_no_failover(true)
+            .cluster_replica_validity_factor(0)
+            .cluster_announce_ip("10.0.0.1")
+            .cluster_announce_port(7000)
+            .cluster_announce_bus_port(17000)
+            .cluster_announce_tls_port(7100)
+            .cluster_announce_human_nodename("node-1")
+            .cluster_port(17000)
+            .cluster_link_sendbuf_limit(67108864)
+            .cluster_compatibility_sample_ratio(50)
+            .cluster_slot_migration_handoff_max_lag_bytes(1048576)
+            .cluster_slot_migration_write_pause_timeout(5000)
+            .cluster_slot_stats_enabled(true);
         assert_eq!(b.cluster_node_timeout, Some(10000));
         assert_eq!(b.cluster_require_full_coverage, Some(false));
         assert_eq!(b.cluster_allow_reads_when_down, Some(true));
@@ -466,6 +712,39 @@ mod tests {
             b.cluster_preferred_endpoint_type.as_deref(),
             Some("hostname")
         );
+        assert_eq!(b.cluster_replica_no_failover, Some(true));
+        assert_eq!(b.cluster_replica_validity_factor, Some(0));
+        assert_eq!(b.cluster_announce_ip.as_deref(), Some("10.0.0.1"));
+        assert_eq!(b.cluster_announce_port, Some(7000));
+        assert_eq!(b.cluster_announce_bus_port, Some(17000));
+        assert_eq!(b.cluster_announce_tls_port, Some(7100));
+        assert_eq!(b.cluster_announce_human_nodename.as_deref(), Some("node-1"));
+        assert_eq!(b.cluster_port, Some(17000));
+        assert_eq!(b.cluster_link_sendbuf_limit, Some(67108864));
+        assert_eq!(b.cluster_compatibility_sample_ratio, Some(50));
+        assert_eq!(
+            b.cluster_slot_migration_handoff_max_lag_bytes,
+            Some(1048576)
+        );
+        assert_eq!(b.cluster_slot_migration_write_pause_timeout, Some(5000));
+        assert_eq!(b.cluster_slot_stats_enabled, Some(true));
+    }
+
+    #[test]
+    fn builder_replication_directives() {
+        let b = RedisCluster::builder()
+            .min_replicas_to_write(1)
+            .min_replicas_max_lag(10)
+            .repl_diskless_sync(true)
+            .repl_diskless_sync_delay(0)
+            .repl_ping_replica_period(5)
+            .repl_timeout(30);
+        assert_eq!(b.min_replicas_to_write, Some(1));
+        assert_eq!(b.min_replicas_max_lag, Some(10));
+        assert_eq!(b.repl_diskless_sync, Some(true));
+        assert_eq!(b.repl_diskless_sync_delay, Some(0));
+        assert_eq!(b.repl_ping_replica_period, Some(5));
+        assert_eq!(b.repl_timeout, Some(30));
     }
 
     #[test]
