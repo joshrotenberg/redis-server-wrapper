@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::runtime::Runtime;
 
 use crate::error::Result;
-use crate::server::LogLevel;
+use crate::server::{AppendFsync, LogLevel, ReplDisklessLoad};
 use crate::{cli, cluster, sentinel, server};
 
 // ── RedisCli ──────────────────────────────────────────────────────────────────
@@ -67,6 +67,132 @@ impl RedisCli {
     /// Select a database number.
     pub fn db(mut self, db: u32) -> Self {
         self.inner = self.inner.db(db);
+        self
+    }
+
+    /// Connect via a Unix socket instead of TCP.
+    pub fn unixsocket(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.unixsocket(path);
+        self
+    }
+
+    /// Enable TLS for the connection.
+    pub fn tls(mut self, enable: bool) -> Self {
+        self.inner = self.inner.tls(enable);
+        self
+    }
+
+    /// Set the SNI hostname for TLS.
+    pub fn sni(mut self, hostname: impl Into<String>) -> Self {
+        self.inner = self.inner.sni(hostname);
+        self
+    }
+
+    /// Set the CA certificate file for TLS verification.
+    pub fn cacert(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.cacert(path);
+        self
+    }
+
+    /// Set the CA certificate directory for TLS verification.
+    pub fn cacertdir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.cacertdir(path);
+        self
+    }
+
+    /// Set the client certificate file for TLS.
+    pub fn cert(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.cert(path);
+        self
+    }
+
+    /// Set the client private key file for TLS.
+    pub fn key(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.key(path);
+        self
+    }
+
+    /// Skip TLS certificate verification (`--insecure`).
+    pub fn insecure(mut self, enable: bool) -> Self {
+        self.inner = self.inner.insecure(enable);
+        self
+    }
+
+    /// Set the allowed TLS 1.2 ciphers (`--tls-ciphers`).
+    pub fn tls_ciphers(mut self, ciphers: impl Into<String>) -> Self {
+        self.inner = self.inner.tls_ciphers(ciphers);
+        self
+    }
+
+    /// Set the allowed TLS 1.3 ciphersuites (`--tls-ciphersuites`).
+    pub fn tls_ciphersuites(mut self, ciphersuites: impl Into<String>) -> Self {
+        self.inner = self.inner.tls_ciphersuites(ciphersuites);
+        self
+    }
+
+    /// Set the RESP protocol version.
+    pub fn resp(mut self, protocol: cli::RespProtocol) -> Self {
+        self.inner = self.inner.resp(protocol);
+        self
+    }
+
+    /// Enable cluster mode (`-c` flag) for following redirects.
+    pub fn cluster_mode(mut self, enable: bool) -> Self {
+        self.inner = self.inner.cluster_mode(enable);
+        self
+    }
+
+    /// Set the output format.
+    pub fn output_format(mut self, format: cli::OutputFormat) -> Self {
+        self.inner = self.inner.output_format(format);
+        self
+    }
+
+    /// Suppress the AUTH password warning.
+    pub fn no_auth_warning(mut self, suppress: bool) -> Self {
+        self.inner = self.inner.no_auth_warning(suppress);
+        self
+    }
+
+    /// Set the server URI (`-u`), e.g. `redis://user:pass@host:port/db`.
+    pub fn uri(mut self, uri: impl Into<String>) -> Self {
+        self.inner = self.inner.uri(uri);
+        self
+    }
+
+    /// Set the connection timeout in seconds (`-t`).
+    pub fn timeout(mut self, seconds: f64) -> Self {
+        self.inner = self.inner.timeout(seconds);
+        self
+    }
+
+    /// Prompt for password from stdin (`--askpass`).
+    pub fn askpass(mut self, enable: bool) -> Self {
+        self.inner = self.inner.askpass(enable);
+        self
+    }
+
+    /// Set the client connection name (`--name`).
+    pub fn client_name(mut self, name: impl Into<String>) -> Self {
+        self.inner = self.inner.client_name(name);
+        self
+    }
+
+    /// Set IP version preference for connections.
+    pub fn ip_preference(mut self, preference: cli::IpPreference) -> Self {
+        self.inner = self.inner.ip_preference(preference);
+        self
+    }
+
+    /// Execute the command N times (`-r`).
+    pub fn repeat(mut self, count: u32) -> Self {
+        self.inner = self.inner.repeat(count);
+        self
+    }
+
+    /// Set interval in seconds between repeated commands (`-i`).
+    pub fn interval(mut self, seconds: f64) -> Self {
+        self.inner = self.inner.interval(seconds);
         self
     }
 
@@ -421,6 +547,96 @@ impl RedisServer {
         self
     }
 
+    /// Set the passphrase for the TLS private key file.
+    pub fn tls_key_file_pass(mut self, pass: impl Into<String>) -> Self {
+        self.inner = self.inner.tls_key_file_pass(pass);
+        self
+    }
+
+    /// Set the TLS CA certificate directory path.
+    pub fn tls_ca_cert_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.tls_ca_cert_dir(path);
+        self
+    }
+
+    /// Set the TLS client certificate file path (for outgoing connections).
+    pub fn tls_client_cert_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.tls_client_cert_file(path);
+        self
+    }
+
+    /// Set the TLS client private key file path (for outgoing connections).
+    pub fn tls_client_key_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.tls_client_key_file(path);
+        self
+    }
+
+    /// Set the passphrase for the TLS client private key file.
+    pub fn tls_client_key_file_pass(mut self, pass: impl Into<String>) -> Self {
+        self.inner = self.inner.tls_client_key_file_pass(pass);
+        self
+    }
+
+    /// Set the DH parameters file path for DHE ciphers.
+    pub fn tls_dh_params_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.tls_dh_params_file(path);
+        self
+    }
+
+    /// Set the allowed TLS 1.2 ciphers (OpenSSL cipher list format).
+    pub fn tls_ciphers(mut self, ciphers: impl Into<String>) -> Self {
+        self.inner = self.inner.tls_ciphers(ciphers);
+        self
+    }
+
+    /// Set the allowed TLS 1.3 ciphersuites (colon-separated).
+    pub fn tls_ciphersuites(mut self, suites: impl Into<String>) -> Self {
+        self.inner = self.inner.tls_ciphersuites(suites);
+        self
+    }
+
+    /// Set the allowed TLS protocol versions (e.g. `"TLSv1.2 TLSv1.3"`).
+    pub fn tls_protocols(mut self, protocols: impl Into<String>) -> Self {
+        self.inner = self.inner.tls_protocols(protocols);
+        self
+    }
+
+    /// Prefer the server's cipher order over the client's.
+    pub fn tls_prefer_server_ciphers(mut self, prefer: bool) -> Self {
+        self.inner = self.inner.tls_prefer_server_ciphers(prefer);
+        self
+    }
+
+    /// Enable or disable TLS session caching.
+    pub fn tls_session_caching(mut self, enable: bool) -> Self {
+        self.inner = self.inner.tls_session_caching(enable);
+        self
+    }
+
+    /// Set the number of entries in the TLS session cache.
+    pub fn tls_session_cache_size(mut self, size: u32) -> Self {
+        self.inner = self.inner.tls_session_cache_size(size);
+        self
+    }
+
+    /// Set the timeout in seconds for cached TLS sessions.
+    pub fn tls_session_cache_timeout(mut self, seconds: u32) -> Self {
+        self.inner = self.inner.tls_session_cache_timeout(seconds);
+        self
+    }
+
+    /// Enable TLS for replication traffic.
+    pub fn tls_replication(mut self, enable: bool) -> Self {
+        self.inner = self.inner.tls_replication(enable);
+        self
+    }
+
+    /// Enable TLS for cluster bus communication.
+    pub fn tls_cluster(mut self, enable: bool) -> Self {
+        self.inner = self.inner.tls_cluster(enable);
+        self
+    }
+
     // -- general --
 
     /// Set the working directory for data files.
@@ -475,9 +691,81 @@ impl RedisServer {
         self
     }
 
+    /// Set a custom RDB save schedule.
+    pub fn save_schedule(mut self, schedule: Vec<(u64, u64)>) -> Self {
+        self.inner = self.inner.save_schedule(schedule);
+        self
+    }
+
     /// Enable or disable AOF persistence.
     pub fn appendonly(mut self, appendonly: bool) -> Self {
         self.inner = self.inner.appendonly(appendonly);
+        self
+    }
+
+    /// Set the AOF fsync policy.
+    pub fn appendfsync(mut self, policy: AppendFsync) -> Self {
+        self.inner = self.inner.appendfsync(policy);
+        self
+    }
+
+    /// Set the AOF filename.
+    pub fn appendfilename(mut self, name: impl Into<String>) -> Self {
+        self.inner = self.inner.appendfilename(name);
+        self
+    }
+
+    /// Set the AOF directory name.
+    pub fn appenddirname(mut self, name: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.appenddirname(name);
+        self
+    }
+
+    /// Enable or disable the RDB preamble in AOF files.
+    pub fn aof_use_rdb_preamble(mut self, enable: bool) -> Self {
+        self.inner = self.inner.aof_use_rdb_preamble(enable);
+        self
+    }
+
+    /// Control whether truncated AOF files are loaded.
+    pub fn aof_load_truncated(mut self, enable: bool) -> Self {
+        self.inner = self.inner.aof_load_truncated(enable);
+        self
+    }
+
+    /// Set the maximum allowed size of a corrupt AOF tail (e.g. `"32mb"`).
+    pub fn aof_load_corrupt_tail_max_size(mut self, size: impl Into<String>) -> Self {
+        self.inner = self.inner.aof_load_corrupt_tail_max_size(size);
+        self
+    }
+
+    /// Enable or disable incremental fsync during AOF rewrites.
+    pub fn aof_rewrite_incremental_fsync(mut self, enable: bool) -> Self {
+        self.inner = self.inner.aof_rewrite_incremental_fsync(enable);
+        self
+    }
+
+    /// Enable or disable timestamps in the AOF file.
+    pub fn aof_timestamp_enabled(mut self, enable: bool) -> Self {
+        self.inner = self.inner.aof_timestamp_enabled(enable);
+        self
+    }
+
+    /// Set the percentage growth that triggers an automatic AOF rewrite.
+    pub fn auto_aof_rewrite_percentage(mut self, pct: u32) -> Self {
+        self.inner = self.inner.auto_aof_rewrite_percentage(pct);
+        self
+    }
+
+    /// Set the minimum AOF size before an automatic rewrite is triggered (e.g. `"64mb"`).
+    pub fn auto_aof_rewrite_min_size(mut self, size: impl Into<String>) -> Self {
+        self.inner = self.inner.auto_aof_rewrite_min_size(size);
+        self
+    }
+
+    /// Control whether fsync is suppressed during AOF rewrites.
+    pub fn no_appendfsync_on_rewrite(mut self, enable: bool) -> Self {
+        self.inner = self.inner.no_appendfsync_on_rewrite(enable);
         self
     }
 
@@ -492,6 +780,138 @@ impl RedisServer {
     /// Set the password for authenticating with a master.
     pub fn masterauth(mut self, password: impl Into<String>) -> Self {
         self.inner = self.inner.masterauth(password);
+        self
+    }
+
+    /// Set the username for authenticating with a master (ACL-based auth).
+    pub fn masteruser(mut self, user: impl Into<String>) -> Self {
+        self.inner = self.inner.masteruser(user);
+        self
+    }
+
+    /// Set the replication backlog size (e.g. `"1mb"`).
+    pub fn repl_backlog_size(mut self, size: impl Into<String>) -> Self {
+        self.inner = self.inner.repl_backlog_size(size);
+        self
+    }
+
+    /// Set seconds before the backlog is freed when no replicas are connected.
+    pub fn repl_backlog_ttl(mut self, seconds: u32) -> Self {
+        self.inner = self.inner.repl_backlog_ttl(seconds);
+        self
+    }
+
+    /// Disable TCP_NODELAY on the replication socket.
+    pub fn repl_disable_tcp_nodelay(mut self, disable: bool) -> Self {
+        self.inner = self.inner.repl_disable_tcp_nodelay(disable);
+        self
+    }
+
+    /// Set the diskless load policy for replicas.
+    pub fn repl_diskless_load(mut self, policy: ReplDisklessLoad) -> Self {
+        self.inner = self.inner.repl_diskless_load(policy);
+        self
+    }
+
+    /// Enable or disable diskless sync from master to replicas.
+    pub fn repl_diskless_sync(mut self, enable: bool) -> Self {
+        self.inner = self.inner.repl_diskless_sync(enable);
+        self
+    }
+
+    /// Set the delay in seconds before starting a diskless sync.
+    pub fn repl_diskless_sync_delay(mut self, seconds: u32) -> Self {
+        self.inner = self.inner.repl_diskless_sync_delay(seconds);
+        self
+    }
+
+    /// Set the maximum number of replicas to wait for before starting a diskless sync.
+    pub fn repl_diskless_sync_max_replicas(mut self, n: u32) -> Self {
+        self.inner = self.inner.repl_diskless_sync_max_replicas(n);
+        self
+    }
+
+    /// Set the interval in seconds between PING commands sent to the master.
+    pub fn repl_ping_replica_period(mut self, seconds: u32) -> Self {
+        self.inner = self.inner.repl_ping_replica_period(seconds);
+        self
+    }
+
+    /// Set the replication timeout in seconds.
+    pub fn repl_timeout(mut self, seconds: u32) -> Self {
+        self.inner = self.inner.repl_timeout(seconds);
+        self
+    }
+
+    /// Set the IP address a replica announces to the master.
+    pub fn replica_announce_ip(mut self, ip: impl Into<String>) -> Self {
+        self.inner = self.inner.replica_announce_ip(ip);
+        self
+    }
+
+    /// Set the port a replica announces to the master.
+    pub fn replica_announce_port(mut self, port: u16) -> Self {
+        self.inner = self.inner.replica_announce_port(port);
+        self
+    }
+
+    /// Control whether the replica is announced to clients.
+    pub fn replica_announced(mut self, announced: bool) -> Self {
+        self.inner = self.inner.replica_announced(announced);
+        self
+    }
+
+    /// Set the buffer limit for full synchronization on replicas (e.g. `"256mb"`).
+    pub fn replica_full_sync_buffer_limit(mut self, size: impl Into<String>) -> Self {
+        self.inner = self.inner.replica_full_sync_buffer_limit(size);
+        self
+    }
+
+    /// Control whether replicas ignore disk-write errors.
+    pub fn replica_ignore_disk_write_errors(mut self, ignore: bool) -> Self {
+        self.inner = self.inner.replica_ignore_disk_write_errors(ignore);
+        self
+    }
+
+    /// Control whether replicas ignore the maxmemory setting.
+    pub fn replica_ignore_maxmemory(mut self, ignore: bool) -> Self {
+        self.inner = self.inner.replica_ignore_maxmemory(ignore);
+        self
+    }
+
+    /// Enable or disable lazy flush on replicas during full sync.
+    pub fn replica_lazy_flush(mut self, enable: bool) -> Self {
+        self.inner = self.inner.replica_lazy_flush(enable);
+        self
+    }
+
+    /// Set the replica priority for Sentinel promotion.
+    pub fn replica_priority(mut self, priority: u32) -> Self {
+        self.inner = self.inner.replica_priority(priority);
+        self
+    }
+
+    /// Control whether the replica is read-only.
+    pub fn replica_read_only(mut self, read_only: bool) -> Self {
+        self.inner = self.inner.replica_read_only(read_only);
+        self
+    }
+
+    /// Control whether the replica serves stale data while syncing.
+    pub fn replica_serve_stale_data(mut self, serve: bool) -> Self {
+        self.inner = self.inner.replica_serve_stale_data(serve);
+        self
+    }
+
+    /// Set the minimum number of replicas that must acknowledge writes.
+    pub fn min_replicas_to_write(mut self, n: u32) -> Self {
+        self.inner = self.inner.min_replicas_to_write(n);
+        self
+    }
+
+    /// Set the maximum replication lag (in seconds) for a replica to count toward `min-replicas-to-write`.
+    pub fn min_replicas_max_lag(mut self, seconds: u32) -> Self {
+        self.inner = self.inner.min_replicas_max_lag(seconds);
         self
     }
 
@@ -1070,6 +1490,24 @@ impl RedisClusterBuilder {
         self
     }
 
+    /// Set the RDB save policy for all cluster nodes.
+    pub fn save(mut self, save: bool) -> Self {
+        self.inner = self.inner.save(save);
+        self
+    }
+
+    /// Set a custom RDB save schedule for all cluster nodes.
+    pub fn save_schedule(mut self, schedule: Vec<(u64, u64)>) -> Self {
+        self.inner = self.inner.save_schedule(schedule);
+        self
+    }
+
+    /// Enable or disable AOF persistence for all cluster nodes.
+    pub fn appendonly(mut self, appendonly: bool) -> Self {
+        self.inner = self.inner.appendonly(appendonly);
+        self
+    }
+
     /// Set an arbitrary config directive for all cluster nodes.
     pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.inner = self.inner.extra(key, value);
@@ -1237,6 +1675,24 @@ impl RedisSentinelBuilder {
         self.inner = self
             .inner
             .monitor_with_replicas(name, host, port, expected_replicas);
+        self
+    }
+
+    /// Set the RDB save policy for all data-bearing processes in the topology.
+    pub fn save(mut self, save: bool) -> Self {
+        self.inner = self.inner.save(save);
+        self
+    }
+
+    /// Set a custom RDB save schedule for all data-bearing processes in the topology.
+    pub fn save_schedule(mut self, schedule: Vec<(u64, u64)>) -> Self {
+        self.inner = self.inner.save_schedule(schedule);
+        self
+    }
+
+    /// Enable or disable AOF persistence for all data-bearing processes in the topology.
+    pub fn appendonly(mut self, appendonly: bool) -> Self {
+        self.inner = self.inner.appendonly(appendonly);
         self
     }
 

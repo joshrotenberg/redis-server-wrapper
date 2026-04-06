@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crate::cli::RedisCli;
 use crate::error::{Error, Result};
-use crate::server::{RedisServer, RedisServerHandle};
+use crate::server::{RedisServer, RedisServerHandle, SavePolicy};
 
 /// Builder for a Redis Cluster.
 ///
@@ -34,6 +34,16 @@ pub struct RedisClusterBuilder {
     bind: String,
     password: Option<String>,
     logfile: Option<String>,
+    save: Option<SavePolicy>,
+    appendonly: Option<bool>,
+    cluster_node_timeout: Option<u64>,
+    cluster_require_full_coverage: Option<bool>,
+    cluster_allow_reads_when_down: Option<bool>,
+    cluster_allow_pubsubshard_when_down: Option<bool>,
+    cluster_allow_replica_migration: Option<bool>,
+    cluster_migration_barrier: Option<u32>,
+    cluster_announce_hostname: Option<String>,
+    cluster_preferred_endpoint_type: Option<String>,
     extra: HashMap<String, String>,
     redis_server_bin: String,
     redis_cli_bin: String,
@@ -75,6 +85,79 @@ impl RedisClusterBuilder {
     /// Set the log file path for all cluster nodes.
     pub fn logfile(mut self, path: impl Into<String>) -> Self {
         self.logfile = Some(path.into());
+        self
+    }
+
+    /// Set the RDB save policy for all cluster nodes.
+    ///
+    /// `true` omits the `save` directive (Redis defaults apply).
+    /// `false` emits `save ""` to disable RDB entirely.
+    pub fn save(mut self, save: bool) -> Self {
+        self.save = Some(if save {
+            SavePolicy::Default
+        } else {
+            SavePolicy::Disabled
+        });
+        self
+    }
+
+    /// Set a custom RDB save schedule for all cluster nodes.
+    pub fn save_schedule(mut self, schedule: Vec<(u64, u64)>) -> Self {
+        self.save = Some(SavePolicy::Custom(schedule));
+        self
+    }
+
+    /// Enable or disable AOF persistence for all cluster nodes.
+    pub fn appendonly(mut self, appendonly: bool) -> Self {
+        self.appendonly = Some(appendonly);
+        self
+    }
+
+    /// Set the cluster node timeout in milliseconds for all nodes (default: `5000`).
+    pub fn cluster_node_timeout(mut self, ms: u64) -> Self {
+        self.cluster_node_timeout = Some(ms);
+        self
+    }
+
+    /// Require full hash slot coverage for the cluster to accept writes.
+    pub fn cluster_require_full_coverage(mut self, require: bool) -> Self {
+        self.cluster_require_full_coverage = Some(require);
+        self
+    }
+
+    /// Allow reads when the cluster is down.
+    pub fn cluster_allow_reads_when_down(mut self, allow: bool) -> Self {
+        self.cluster_allow_reads_when_down = Some(allow);
+        self
+    }
+
+    /// Allow pubsub shard channels when the cluster is down.
+    pub fn cluster_allow_pubsubshard_when_down(mut self, allow: bool) -> Self {
+        self.cluster_allow_pubsubshard_when_down = Some(allow);
+        self
+    }
+
+    /// Allow automatic replica migration between masters.
+    pub fn cluster_allow_replica_migration(mut self, allow: bool) -> Self {
+        self.cluster_allow_replica_migration = Some(allow);
+        self
+    }
+
+    /// Set the minimum number of replicas a master must retain before one can migrate.
+    pub fn cluster_migration_barrier(mut self, barrier: u32) -> Self {
+        self.cluster_migration_barrier = Some(barrier);
+        self
+    }
+
+    /// Set the hostname each node announces to the cluster.
+    pub fn cluster_announce_hostname(mut self, hostname: impl Into<String>) -> Self {
+        self.cluster_announce_hostname = Some(hostname.into());
+        self
+    }
+
+    /// Set the preferred endpoint type for cluster redirections (e.g. `"ip"`, `"hostname"`).
+    pub fn cluster_preferred_endpoint_type(mut self, endpoint_type: impl Into<String>) -> Self {
+        self.cluster_preferred_endpoint_type = Some(endpoint_type.into());
         self
     }
 
@@ -131,14 +214,47 @@ impl RedisClusterBuilder {
                 .bind(&self.bind)
                 .dir(node_dir)
                 .cluster_enabled(true)
-                .cluster_node_timeout(5000)
+                .cluster_node_timeout(self.cluster_node_timeout.unwrap_or(5000))
                 .redis_server_bin(&self.redis_server_bin)
                 .redis_cli_bin(&self.redis_cli_bin);
+            if let Some(v) = self.cluster_require_full_coverage {
+                server = server.cluster_require_full_coverage(v);
+            }
+            if let Some(v) = self.cluster_allow_reads_when_down {
+                server = server.cluster_allow_reads_when_down(v);
+            }
+            if let Some(v) = self.cluster_allow_pubsubshard_when_down {
+                server = server.cluster_allow_pubsubshard_when_down(v);
+            }
+            if let Some(v) = self.cluster_allow_replica_migration {
+                server = server.cluster_allow_replica_migration(v);
+            }
+            if let Some(barrier) = self.cluster_migration_barrier {
+                server = server.cluster_migration_barrier(barrier);
+            }
+            if let Some(ref hostname) = self.cluster_announce_hostname {
+                server = server.cluster_announce_hostname(hostname.clone());
+            }
+            if let Some(ref endpoint_type) = self.cluster_preferred_endpoint_type {
+                server = server.cluster_preferred_endpoint_type(endpoint_type.clone());
+            }
             if let Some(ref password) = self.password {
                 server = server.password(password).masterauth(password);
             }
             if let Some(ref logfile) = self.logfile {
                 server = server.logfile(logfile.clone());
+            }
+            if let Some(ref save) = self.save {
+                match save {
+                    SavePolicy::Disabled => server = server.save(false),
+                    SavePolicy::Default => server = server.save(true),
+                    SavePolicy::Custom(pairs) => {
+                        server = server.save_schedule(pairs.clone());
+                    }
+                }
+            }
+            if let Some(appendonly) = self.appendonly {
+                server = server.appendonly(appendonly);
             }
             for (key, value) in &self.extra {
                 server = server.extra(key.clone(), value.clone());
@@ -197,6 +313,16 @@ impl RedisCluster {
             bind: "127.0.0.1".into(),
             password: None,
             logfile: None,
+            save: None,
+            appendonly: None,
+            cluster_node_timeout: None,
+            cluster_require_full_coverage: None,
+            cluster_allow_reads_when_down: None,
+            cluster_allow_pubsubshard_when_down: None,
+            cluster_allow_replica_migration: None,
+            cluster_migration_barrier: None,
+            cluster_announce_hostname: None,
+            cluster_preferred_endpoint_type: None,
             extra: HashMap::new(),
             redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),
@@ -291,6 +417,14 @@ mod tests {
         assert!(b.logfile.is_none());
         assert!(b.extra.is_empty());
         assert_eq!(b.total_nodes(), 3);
+        assert!(b.cluster_node_timeout.is_none());
+        assert!(b.cluster_require_full_coverage.is_none());
+        assert!(b.cluster_allow_reads_when_down.is_none());
+        assert!(b.cluster_allow_pubsubshard_when_down.is_none());
+        assert!(b.cluster_allow_replica_migration.is_none());
+        assert!(b.cluster_migration_barrier.is_none());
+        assert!(b.cluster_announce_hostname.is_none());
+        assert!(b.cluster_preferred_endpoint_type.is_none());
     }
 
     #[test]
@@ -305,6 +439,33 @@ mod tests {
     fn builder_password() {
         let b = RedisCluster::builder().password("secret");
         assert_eq!(b.password.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn builder_cluster_directives() {
+        let b = RedisCluster::builder()
+            .cluster_node_timeout(10000)
+            .cluster_require_full_coverage(false)
+            .cluster_allow_reads_when_down(true)
+            .cluster_allow_pubsubshard_when_down(true)
+            .cluster_allow_replica_migration(false)
+            .cluster_migration_barrier(2)
+            .cluster_announce_hostname("node.example.com")
+            .cluster_preferred_endpoint_type("hostname");
+        assert_eq!(b.cluster_node_timeout, Some(10000));
+        assert_eq!(b.cluster_require_full_coverage, Some(false));
+        assert_eq!(b.cluster_allow_reads_when_down, Some(true));
+        assert_eq!(b.cluster_allow_pubsubshard_when_down, Some(true));
+        assert_eq!(b.cluster_allow_replica_migration, Some(false));
+        assert_eq!(b.cluster_migration_barrier, Some(2));
+        assert_eq!(
+            b.cluster_announce_hostname.as_deref(),
+            Some("node.example.com")
+        );
+        assert_eq!(
+            b.cluster_preferred_endpoint_type.as_deref(),
+            Some("hostname")
+        );
     }
 
     #[test]

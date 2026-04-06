@@ -168,11 +168,14 @@ pub mod server;
 pub mod blocking;
 
 #[cfg(feature = "tokio")]
-pub use cli::{OutputFormat, RedisCli, RespProtocol};
+pub use cli::{IpPreference, OutputFormat, RedisCli, RespProtocol};
 #[cfg(feature = "tokio")]
 pub use cluster::{RedisCluster, RedisClusterBuilder, RedisClusterHandle};
 pub use error::{Error, Result};
 #[cfg(feature = "tokio")]
 pub use sentinel::{RedisSentinel, RedisSentinelBuilder, RedisSentinelHandle};
 #[cfg(feature = "tokio")]
-pub use server::{LogLevel, RedisServer, RedisServerConfig, RedisServerHandle};
+pub use server::{
+    AppendFsync, LogLevel, RedisServer, RedisServerConfig, RedisServerHandle, ReplDisklessLoad,
+    SavePolicy,
+};
