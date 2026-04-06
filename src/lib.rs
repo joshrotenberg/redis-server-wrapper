@@ -170,7 +170,7 @@ pub mod blocking;
 #[cfg(feature = "tokio")]
 pub use cli::{IpPreference, OutputFormat, RedisCli, RespProtocol};
 #[cfg(feature = "tokio")]
-pub use cluster::{RedisCluster, RedisClusterBuilder, RedisClusterHandle};
+pub use cluster::{NodeContext, RedisCluster, RedisClusterBuilder, RedisClusterHandle};
 pub use error::{Error, Result};
 #[cfg(feature = "tokio")]
 pub use sentinel::{RedisSentinel, RedisSentinelBuilder, RedisSentinelHandle};

@@ -7,6 +7,44 @@ use crate::cli::RedisCli;
 use crate::error::{Error, Result};
 use crate::server::{RedisServer, RedisServerHandle, SavePolicy};
 
+/// Context passed to the per-node configuration callback.
+///
+/// Provides information about the node being configured so the callback
+/// can make per-node decisions (e.g., different config for masters vs. replicas,
+/// or for a specific node index).
+pub struct NodeContext {
+    /// The pre-configured [`RedisServer`] builder for this node.
+    ///
+    /// All uniform cluster-level settings have already been applied.
+    /// The callback should modify and return this builder.
+    pub server: RedisServer,
+    /// Zero-based index of this node in the cluster.
+    ///
+    /// Nodes are ordered by port: masters occupy indices `0..masters`,
+    /// replicas occupy indices `masters..total`.
+    pub index: usize,
+    /// The port assigned to this node.
+    pub port: u16,
+    /// Total number of nodes in the cluster.
+    pub total_nodes: u16,
+    /// Number of master nodes.
+    pub masters: u16,
+    /// Number of replicas per master.
+    pub replicas_per_master: u16,
+}
+
+impl NodeContext {
+    /// Whether this node is a master (by initial topology order).
+    pub fn is_master(&self) -> bool {
+        self.index < self.masters as usize
+    }
+
+    /// Whether this node is a replica (by initial topology order).
+    pub fn is_replica(&self) -> bool {
+        !self.is_master()
+    }
+}
+
 /// Builder for a Redis Cluster.
 ///
 /// # Example
@@ -66,6 +104,7 @@ pub struct RedisClusterBuilder {
     extra: HashMap<String, String>,
     redis_server_bin: String,
     redis_cli_bin: String,
+    node_config_fn: Option<Box<dyn FnMut(NodeContext) -> RedisServer + Send>>,
 }
 
 impl RedisClusterBuilder {
@@ -318,6 +357,48 @@ impl RedisClusterBuilder {
         self
     }
 
+    /// Set a per-node configuration callback.
+    ///
+    /// The callback receives a [`NodeContext`] containing the pre-configured
+    /// [`RedisServer`] builder (with all uniform settings already applied) and
+    /// metadata about the node's position in the cluster. It must return the
+    /// (possibly modified) `RedisServer` builder.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use redis_server_wrapper::RedisCluster;
+    ///
+    /// # async fn example() {
+    /// let cluster = RedisCluster::builder()
+    ///     .masters(3)
+    ///     .replicas_per_master(1)
+    ///     .base_port(7000)
+    ///     .with_node_config(|ctx| {
+    ///         let is_replica = ctx.is_replica();
+    ///         let index = ctx.index;
+    ///         let mut server = ctx.server;
+    ///         if is_replica {
+    ///             server = server.cluster_replica_no_failover(true);
+    ///         }
+    ///         if index == 0 {
+    ///             server = server.maxmemory("512mb");
+    ///         }
+    ///         server
+    ///     })
+    ///     .start()
+    ///     .await
+    ///     .unwrap();
+    /// # }
+    /// ```
+    pub fn with_node_config(
+        mut self,
+        f: impl FnMut(NodeContext) -> RedisServer + Send + 'static,
+    ) -> Self {
+        self.node_config_fn = Some(Box::new(f));
+        self
+    }
+
     /// Set an arbitrary config directive for all cluster nodes.
     pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.extra.insert(key.into(), value.into());
@@ -347,7 +428,7 @@ impl RedisClusterBuilder {
     }
 
     /// Start all nodes and form the cluster.
-    pub async fn start(self) -> Result<RedisClusterHandle> {
+    pub async fn start(mut self) -> Result<RedisClusterHandle> {
         // Stop any leftover nodes from previous runs.
         for port in self.ports() {
             let mut cli = RedisCli::new()
@@ -362,8 +443,10 @@ impl RedisClusterBuilder {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Start each node.
+        let total_nodes = self.total_nodes();
+        let ports: Vec<u16> = self.ports().collect();
         let mut nodes = Vec::new();
-        for port in self.ports() {
+        for (index, port) in ports.into_iter().enumerate() {
             let node_dir = std::env::temp_dir().join(format!("redis-cluster-wrapper/node-{port}"));
             let _ = std::fs::remove_dir_all(&node_dir);
             let mut server = RedisServer::new()
@@ -473,6 +556,17 @@ impl RedisClusterBuilder {
             for (key, value) in &self.extra {
                 server = server.extra(key.clone(), value.clone());
             }
+            // Apply per-node customization if configured.
+            if let Some(ref mut f) = self.node_config_fn {
+                server = f(NodeContext {
+                    server,
+                    index,
+                    port,
+                    total_nodes,
+                    masters: self.masters,
+                    replicas_per_master: self.replicas_per_master,
+                });
+            }
             let handle = server.start().await?;
             nodes.push(handle);
         }
@@ -561,6 +655,7 @@ impl RedisCluster {
             extra: HashMap::new(),
             redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),
+            node_config_fn: None,
         }
     }
 }
