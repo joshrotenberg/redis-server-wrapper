@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.2.0...v0.3.0) - 2026-04-06
+
+### Added
+
+- *(cluster)* add per-node configuration callback ([#61](https://github.com/joshrotenberg/redis-server-wrapper/pull/61))
+- *(cluster)* add per-node access and CONFIG SET helpers on handle ([#60](https://github.com/joshrotenberg/redis-server-wrapper/pull/60))
+- *(cluster)* forward all cluster and replication directives to builder ([#59](https://github.com/joshrotenberg/redis-server-wrapper/pull/59))
+- add remaining server directives and CLI arguments ([#58](https://github.com/joshrotenberg/redis-server-wrapper/pull/58))
+- *(redis-server)* add data structure tuning directives closes #42 ([#57](https://github.com/joshrotenberg/redis-server-wrapper/pull/57))
+- *(redis-server)* add memory, eviction, and lazyfree directives closes #41 ([#56](https://github.com/joshrotenberg/redis-server-wrapper/pull/56))
+- *(redis-server)* add advanced TLS directives closes #40 ([#55](https://github.com/joshrotenberg/redis-server-wrapper/pull/55))
+- *(redis-server)* add advanced cluster directives closes #39 ([#54](https://github.com/joshrotenberg/redis-server-wrapper/pull/54))
+- *(redis-server)* add replication tuning directives closes #38 ([#53](https://github.com/joshrotenberg/redis-server-wrapper/pull/53))
+- *(cli)* add advanced TLS and connection arguments ([#51](https://github.com/joshrotenberg/redis-server-wrapper/pull/51))
+- redis-server: add aof tuning directives ([#50](https://github.com/joshrotenberg/redis-server-wrapper/pull/50))
+
 ## [0.2.0](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.1.0...v0.2.0) - 2026-03-30
 
 ### Added
