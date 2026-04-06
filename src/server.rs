@@ -316,6 +316,140 @@ pub struct RedisServerConfig {
     /// Keyspace notification event mask (e.g. `"KEA"`), if set.
     pub notify_keyspace_events: Option<String>,
 
+    // -- slow log --
+    /// Log queries slower than this many microseconds (`0` = log everything, `-1` = disabled).
+    pub slowlog_log_slower_than: Option<i64>,
+    /// Maximum number of entries in the slow log.
+    pub slowlog_max_len: Option<u32>,
+
+    // -- latency tracking --
+    /// Latency monitor threshold in milliseconds (`0` = disabled).
+    pub latency_monitor_threshold: Option<u64>,
+    /// Enable the extended latency tracking system.
+    pub latency_tracking: Option<bool>,
+    /// Percentiles reported by the latency tracking system (e.g. `"50 99 99.9"`).
+    pub latency_tracking_info_percentiles: Option<String>,
+
+    // -- active defragmentation --
+    /// Enable active defragmentation.
+    pub activedefrag: Option<bool>,
+    /// Minimum amount of fragmentation waste to start defragmentation.
+    pub active_defrag_ignore_bytes: Option<String>,
+    /// Minimum percentage of fragmentation to start defragmentation.
+    pub active_defrag_threshold_lower: Option<u32>,
+    /// Maximum percentage of fragmentation at which we use maximum effort.
+    pub active_defrag_threshold_upper: Option<u32>,
+    /// Minimal effort for defragmentation as a percentage of CPU time.
+    pub active_defrag_cycle_min: Option<u32>,
+    /// Maximum effort for defragmentation as a percentage of CPU time.
+    pub active_defrag_cycle_max: Option<u32>,
+    /// Maximum number of set/hash/zset/list fields processed per defrag scan step.
+    pub active_defrag_max_scan_fields: Option<u32>,
+
+    // -- logging and process --
+    /// Enable logging to syslog.
+    pub syslog_enabled: Option<bool>,
+    /// Syslog identity string.
+    pub syslog_ident: Option<String>,
+    /// Syslog facility (e.g. `"local0"`).
+    pub syslog_facility: Option<String>,
+    /// Supervision mode (`"upstart"`, `"systemd"`, `"auto"`, or `"no"`).
+    pub supervised: Option<String>,
+    /// Show the Redis logo on startup.
+    pub always_show_logo: Option<bool>,
+    /// Set the process title.
+    pub set_proc_title: Option<bool>,
+    /// Template for the process title.
+    pub proc_title_template: Option<String>,
+
+    // -- security and ACL --
+    /// Default pub/sub permissions for ACL users (`"allchannels"` or `"resetchannels"`).
+    pub acl_pubsub_default: Option<String>,
+    /// Maximum length of the ACL log.
+    pub acllog_max_len: Option<u32>,
+    /// Enable the DEBUG command (`"yes"`, `"local"`, or `"no"`).
+    pub enable_debug_command: Option<String>,
+    /// Enable the MODULE command (`"yes"`, `"local"`, or `"no"`).
+    pub enable_module_command: Option<String>,
+    /// Allow CONFIG SET to modify protected configs.
+    pub enable_protected_configs: Option<String>,
+    /// Rename a command (command, new-name). Empty new-name disables the command.
+    pub rename_command: Vec<(String, String)>,
+    /// Sanitize dump payload on restore (`"yes"`, `"no"`, or `"clients"`).
+    pub sanitize_dump_payload: Option<String>,
+    /// Hide user data from log messages.
+    pub hide_user_data_from_log: Option<bool>,
+
+    // -- networking (additional) --
+    /// Source address for outgoing connections.
+    pub bind_source_addr: Option<String>,
+    /// Busy reply threshold in milliseconds.
+    pub busy_reply_threshold: Option<u64>,
+    /// Client output buffer limits (e.g. `"normal 0 0 0"`, `"replica 256mb 64mb 60"`).
+    pub client_output_buffer_limit: Vec<String>,
+    /// Maximum size of a single client query buffer.
+    pub client_query_buffer_limit: Option<String>,
+    /// Maximum size of a single protocol bulk request.
+    pub proto_max_bulk_len: Option<String>,
+    /// Maximum number of new connections per event loop cycle.
+    pub max_new_connections_per_cycle: Option<u32>,
+    /// Maximum number of new TLS connections per event loop cycle.
+    pub max_new_tls_connections_per_cycle: Option<u32>,
+    /// Socket mark ID for outgoing connections.
+    pub socket_mark_id: Option<u32>,
+
+    // -- RDB (additional) --
+    /// RDB dump filename.
+    pub dbfilename: Option<String>,
+    /// Enable RDB compression.
+    pub rdbcompression: Option<bool>,
+    /// Enable RDB checksum.
+    pub rdbchecksum: Option<bool>,
+    /// Incremental fsync during RDB save.
+    pub rdb_save_incremental_fsync: Option<bool>,
+    /// Delete RDB sync files used by diskless replication.
+    pub rdb_del_sync_files: Option<bool>,
+    /// Stop accepting writes when bgsave fails.
+    pub stop_writes_on_bgsave_error: Option<bool>,
+
+    // -- shutdown --
+    /// Shutdown behavior on SIGINT (e.g. `"default"`, `"save"`, `"nosave"`, `"now"`, `"force"`).
+    pub shutdown_on_sigint: Option<String>,
+    /// Shutdown behavior on SIGTERM.
+    pub shutdown_on_sigterm: Option<String>,
+    /// Maximum seconds to wait during shutdown for lagging replicas.
+    pub shutdown_timeout: Option<u32>,
+
+    // -- other --
+    /// Enable active rehashing.
+    pub activerehashing: Option<bool>,
+    /// Enable crash log on crash.
+    pub crash_log_enabled: Option<bool>,
+    /// Enable crash memory check on crash.
+    pub crash_memcheck_enabled: Option<bool>,
+    /// Disable transparent huge pages.
+    pub disable_thp: Option<bool>,
+    /// Enable dynamic Hz adjustment.
+    pub dynamic_hz: Option<bool>,
+    /// Ignore specific warnings (e.g. `"ARM64-COW-BUG"`).
+    pub ignore_warnings: Option<String>,
+    /// Include another config file.
+    pub include: Vec<PathBuf>,
+    /// Enable jemalloc background thread.
+    pub jemalloc_bg_thread: Option<bool>,
+    /// Locale collation setting.
+    pub locale_collate: Option<String>,
+    /// Lua script time limit in milliseconds.
+    pub lua_time_limit: Option<u64>,
+    /// OOM score adjustment mode (`"yes"`, `"no"`, or `"absolute"`).
+    pub oom_score_adj: Option<String>,
+    /// OOM score adjustment values (e.g. `"0 200 800"`).
+    pub oom_score_adj_values: Option<String>,
+    /// Propagation error behavior (`"panic"` or `"ignore"`).
+    pub propagation_error_behavior: Option<String>,
+    /// Maximum number of keys in the tracking table.
+    pub tracking_table_max_keys: Option<u64>,
+
     // -- catch-all for anything not covered above --
     /// Arbitrary key/value directives forwarded verbatim to the config file.
     pub extra: HashMap<String, String>,
@@ -542,6 +676,64 @@ impl Default for RedisServerConfig {
             io_threads: None,
             io_threads_do_reads: None,
             notify_keyspace_events: None,
+            slowlog_log_slower_than: None,
+            slowlog_max_len: None,
+            latency_monitor_threshold: None,
+            latency_tracking: None,
+            latency_tracking_info_percentiles: None,
+            activedefrag: None,
+            active_defrag_ignore_bytes: None,
+            active_defrag_threshold_lower: None,
+            active_defrag_threshold_upper: None,
+            active_defrag_cycle_min: None,
+            active_defrag_cycle_max: None,
+            active_defrag_max_scan_fields: None,
+            syslog_enabled: None,
+            syslog_ident: None,
+            syslog_facility: None,
+            supervised: None,
+            always_show_logo: None,
+            set_proc_title: None,
+            proc_title_template: None,
+            acl_pubsub_default: None,
+            acllog_max_len: None,
+            enable_debug_command: None,
+            enable_module_command: None,
+            enable_protected_configs: None,
+            rename_command: Vec::new(),
+            sanitize_dump_payload: None,
+            hide_user_data_from_log: None,
+            bind_source_addr: None,
+            busy_reply_threshold: None,
+            client_output_buffer_limit: Vec::new(),
+            client_query_buffer_limit: None,
+            proto_max_bulk_len: None,
+            max_new_connections_per_cycle: None,
+            max_new_tls_connections_per_cycle: None,
+            socket_mark_id: None,
+            dbfilename: None,
+            rdbcompression: None,
+            rdbchecksum: None,
+            rdb_save_incremental_fsync: None,
+            rdb_del_sync_files: None,
+            stop_writes_on_bgsave_error: None,
+            shutdown_on_sigint: None,
+            shutdown_on_sigterm: None,
+            shutdown_timeout: None,
+            activerehashing: None,
+            crash_log_enabled: None,
+            crash_memcheck_enabled: None,
+            disable_thp: None,
+            dynamic_hz: None,
+            ignore_warnings: None,
+            include: Vec::new(),
+            jemalloc_bg_thread: None,
+            locale_collate: None,
+            lua_time_limit: None,
+            oom_score_adj: None,
+            oom_score_adj_values: None,
+            propagation_error_behavior: None,
+            tracking_table_max_keys: None,
             extra: HashMap::new(),
             redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),
@@ -1368,6 +1560,378 @@ impl RedisServer {
         self
     }
 
+    // -- slow log --
+
+    /// Set the slow log threshold in microseconds (`0` = log everything, `-1` = disabled).
+    pub fn slowlog_log_slower_than(mut self, us: i64) -> Self {
+        self.config.slowlog_log_slower_than = Some(us);
+        self
+    }
+
+    /// Set the maximum number of slow log entries.
+    pub fn slowlog_max_len(mut self, n: u32) -> Self {
+        self.config.slowlog_max_len = Some(n);
+        self
+    }
+
+    // -- latency tracking --
+
+    /// Set the latency monitor threshold in milliseconds (`0` = disabled).
+    pub fn latency_monitor_threshold(mut self, ms: u64) -> Self {
+        self.config.latency_monitor_threshold = Some(ms);
+        self
+    }
+
+    /// Enable or disable the extended latency tracking system.
+    pub fn latency_tracking(mut self, enable: bool) -> Self {
+        self.config.latency_tracking = Some(enable);
+        self
+    }
+
+    /// Set percentiles reported by the latency tracking system (e.g. `"50 99 99.9"`).
+    pub fn latency_tracking_info_percentiles(mut self, percentiles: impl Into<String>) -> Self {
+        self.config.latency_tracking_info_percentiles = Some(percentiles.into());
+        self
+    }
+
+    // -- active defragmentation --
+
+    /// Enable or disable active defragmentation.
+    pub fn activedefrag(mut self, enable: bool) -> Self {
+        self.config.activedefrag = Some(enable);
+        self
+    }
+
+    /// Set the minimum fragmentation waste to start defragmentation (e.g. `"100mb"`).
+    pub fn active_defrag_ignore_bytes(mut self, bytes: impl Into<String>) -> Self {
+        self.config.active_defrag_ignore_bytes = Some(bytes.into());
+        self
+    }
+
+    /// Set the minimum fragmentation percentage to start defragmentation.
+    pub fn active_defrag_threshold_lower(mut self, pct: u32) -> Self {
+        self.config.active_defrag_threshold_lower = Some(pct);
+        self
+    }
+
+    /// Set the fragmentation percentage at which maximum effort is used.
+    pub fn active_defrag_threshold_upper(mut self, pct: u32) -> Self {
+        self.config.active_defrag_threshold_upper = Some(pct);
+        self
+    }
+
+    /// Set the minimal CPU effort for defragmentation (percentage).
+    pub fn active_defrag_cycle_min(mut self, pct: u32) -> Self {
+        self.config.active_defrag_cycle_min = Some(pct);
+        self
+    }
+
+    /// Set the maximum CPU effort for defragmentation (percentage).
+    pub fn active_defrag_cycle_max(mut self, pct: u32) -> Self {
+        self.config.active_defrag_cycle_max = Some(pct);
+        self
+    }
+
+    /// Set the maximum fields processed per defrag scan step.
+    pub fn active_defrag_max_scan_fields(mut self, n: u32) -> Self {
+        self.config.active_defrag_max_scan_fields = Some(n);
+        self
+    }
+
+    // -- logging and process --
+
+    /// Enable logging to syslog.
+    pub fn syslog_enabled(mut self, enable: bool) -> Self {
+        self.config.syslog_enabled = Some(enable);
+        self
+    }
+
+    /// Set the syslog identity string.
+    pub fn syslog_ident(mut self, ident: impl Into<String>) -> Self {
+        self.config.syslog_ident = Some(ident.into());
+        self
+    }
+
+    /// Set the syslog facility (e.g. `"local0"`).
+    pub fn syslog_facility(mut self, facility: impl Into<String>) -> Self {
+        self.config.syslog_facility = Some(facility.into());
+        self
+    }
+
+    /// Set the supervision mode (`"upstart"`, `"systemd"`, `"auto"`, or `"no"`).
+    pub fn supervised(mut self, mode: impl Into<String>) -> Self {
+        self.config.supervised = Some(mode.into());
+        self
+    }
+
+    /// Show the Redis logo on startup.
+    pub fn always_show_logo(mut self, enable: bool) -> Self {
+        self.config.always_show_logo = Some(enable);
+        self
+    }
+
+    /// Enable setting the process title.
+    pub fn set_proc_title(mut self, enable: bool) -> Self {
+        self.config.set_proc_title = Some(enable);
+        self
+    }
+
+    /// Set the process title template.
+    pub fn proc_title_template(mut self, template: impl Into<String>) -> Self {
+        self.config.proc_title_template = Some(template.into());
+        self
+    }
+
+    // -- security and ACL --
+
+    /// Set the default pub/sub ACL permissions (`"allchannels"` or `"resetchannels"`).
+    pub fn acl_pubsub_default(mut self, default: impl Into<String>) -> Self {
+        self.config.acl_pubsub_default = Some(default.into());
+        self
+    }
+
+    /// Set the maximum length of the ACL log.
+    pub fn acllog_max_len(mut self, n: u32) -> Self {
+        self.config.acllog_max_len = Some(n);
+        self
+    }
+
+    /// Enable the DEBUG command (`"yes"`, `"local"`, or `"no"`).
+    pub fn enable_debug_command(mut self, mode: impl Into<String>) -> Self {
+        self.config.enable_debug_command = Some(mode.into());
+        self
+    }
+
+    /// Enable the MODULE command (`"yes"`, `"local"`, or `"no"`).
+    pub fn enable_module_command(mut self, mode: impl Into<String>) -> Self {
+        self.config.enable_module_command = Some(mode.into());
+        self
+    }
+
+    /// Allow CONFIG SET to modify protected configs (`"yes"`, `"local"`, or `"no"`).
+    pub fn enable_protected_configs(mut self, mode: impl Into<String>) -> Self {
+        self.config.enable_protected_configs = Some(mode.into());
+        self
+    }
+
+    /// Rename a command. Pass an empty new name to disable the command entirely.
+    pub fn rename_command(
+        mut self,
+        command: impl Into<String>,
+        new_name: impl Into<String>,
+    ) -> Self {
+        self.config
+            .rename_command
+            .push((command.into(), new_name.into()));
+        self
+    }
+
+    /// Set dump payload sanitization mode (`"yes"`, `"no"`, or `"clients"`).
+    pub fn sanitize_dump_payload(mut self, mode: impl Into<String>) -> Self {
+        self.config.sanitize_dump_payload = Some(mode.into());
+        self
+    }
+
+    /// Hide user data from log messages.
+    pub fn hide_user_data_from_log(mut self, enable: bool) -> Self {
+        self.config.hide_user_data_from_log = Some(enable);
+        self
+    }
+
+    // -- networking (additional) --
+
+    /// Set the source address for outgoing connections.
+    pub fn bind_source_addr(mut self, addr: impl Into<String>) -> Self {
+        self.config.bind_source_addr = Some(addr.into());
+        self
+    }
+
+    /// Set the busy reply threshold in milliseconds.
+    pub fn busy_reply_threshold(mut self, ms: u64) -> Self {
+        self.config.busy_reply_threshold = Some(ms);
+        self
+    }
+
+    /// Add a client output buffer limit (e.g. `"normal 0 0 0"` or `"replica 256mb 64mb 60"`).
+    pub fn client_output_buffer_limit(mut self, limit: impl Into<String>) -> Self {
+        self.config.client_output_buffer_limit.push(limit.into());
+        self
+    }
+
+    /// Set the maximum size of a single client query buffer.
+    pub fn client_query_buffer_limit(mut self, limit: impl Into<String>) -> Self {
+        self.config.client_query_buffer_limit = Some(limit.into());
+        self
+    }
+
+    /// Set the maximum size of a single protocol bulk request.
+    pub fn proto_max_bulk_len(mut self, len: impl Into<String>) -> Self {
+        self.config.proto_max_bulk_len = Some(len.into());
+        self
+    }
+
+    /// Set the maximum number of new connections per event loop cycle.
+    pub fn max_new_connections_per_cycle(mut self, n: u32) -> Self {
+        self.config.max_new_connections_per_cycle = Some(n);
+        self
+    }
+
+    /// Set the maximum number of new TLS connections per event loop cycle.
+    pub fn max_new_tls_connections_per_cycle(mut self, n: u32) -> Self {
+        self.config.max_new_tls_connections_per_cycle = Some(n);
+        self
+    }
+
+    /// Set the socket mark ID for outgoing connections.
+    pub fn socket_mark_id(mut self, id: u32) -> Self {
+        self.config.socket_mark_id = Some(id);
+        self
+    }
+
+    // -- RDB (additional) --
+
+    /// Set the RDB dump filename.
+    pub fn dbfilename(mut self, name: impl Into<String>) -> Self {
+        self.config.dbfilename = Some(name.into());
+        self
+    }
+
+    /// Enable or disable RDB compression.
+    pub fn rdbcompression(mut self, enable: bool) -> Self {
+        self.config.rdbcompression = Some(enable);
+        self
+    }
+
+    /// Enable or disable RDB checksum.
+    pub fn rdbchecksum(mut self, enable: bool) -> Self {
+        self.config.rdbchecksum = Some(enable);
+        self
+    }
+
+    /// Enable incremental fsync during RDB save.
+    pub fn rdb_save_incremental_fsync(mut self, enable: bool) -> Self {
+        self.config.rdb_save_incremental_fsync = Some(enable);
+        self
+    }
+
+    /// Delete RDB sync files used by diskless replication.
+    pub fn rdb_del_sync_files(mut self, enable: bool) -> Self {
+        self.config.rdb_del_sync_files = Some(enable);
+        self
+    }
+
+    /// Stop accepting writes when bgsave fails.
+    pub fn stop_writes_on_bgsave_error(mut self, enable: bool) -> Self {
+        self.config.stop_writes_on_bgsave_error = Some(enable);
+        self
+    }
+
+    // -- shutdown --
+
+    /// Set shutdown behavior on SIGINT (e.g. `"default"`, `"save"`, `"nosave"`).
+    pub fn shutdown_on_sigint(mut self, behavior: impl Into<String>) -> Self {
+        self.config.shutdown_on_sigint = Some(behavior.into());
+        self
+    }
+
+    /// Set shutdown behavior on SIGTERM.
+    pub fn shutdown_on_sigterm(mut self, behavior: impl Into<String>) -> Self {
+        self.config.shutdown_on_sigterm = Some(behavior.into());
+        self
+    }
+
+    /// Set the maximum seconds to wait during shutdown for lagging replicas.
+    pub fn shutdown_timeout(mut self, seconds: u32) -> Self {
+        self.config.shutdown_timeout = Some(seconds);
+        self
+    }
+
+    // -- other --
+
+    /// Enable or disable active rehashing.
+    pub fn activerehashing(mut self, enable: bool) -> Self {
+        self.config.activerehashing = Some(enable);
+        self
+    }
+
+    /// Enable crash log on crash.
+    pub fn crash_log_enabled(mut self, enable: bool) -> Self {
+        self.config.crash_log_enabled = Some(enable);
+        self
+    }
+
+    /// Enable crash memory check on crash.
+    pub fn crash_memcheck_enabled(mut self, enable: bool) -> Self {
+        self.config.crash_memcheck_enabled = Some(enable);
+        self
+    }
+
+    /// Disable transparent huge pages.
+    pub fn disable_thp(mut self, enable: bool) -> Self {
+        self.config.disable_thp = Some(enable);
+        self
+    }
+
+    /// Enable dynamic Hz adjustment.
+    pub fn dynamic_hz(mut self, enable: bool) -> Self {
+        self.config.dynamic_hz = Some(enable);
+        self
+    }
+
+    /// Ignore specific warnings (e.g. `"ARM64-COW-BUG"`).
+    pub fn ignore_warnings(mut self, warning: impl Into<String>) -> Self {
+        self.config.ignore_warnings = Some(warning.into());
+        self
+    }
+
+    /// Include another config file.
+    pub fn include(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.include.push(path.into());
+        self
+    }
+
+    /// Enable or disable jemalloc background thread.
+    pub fn jemalloc_bg_thread(mut self, enable: bool) -> Self {
+        self.config.jemalloc_bg_thread = Some(enable);
+        self
+    }
+
+    /// Set the locale collation setting.
+    pub fn locale_collate(mut self, locale: impl Into<String>) -> Self {
+        self.config.locale_collate = Some(locale.into());
+        self
+    }
+
+    /// Set the Lua script time limit in milliseconds.
+    pub fn lua_time_limit(mut self, ms: u64) -> Self {
+        self.config.lua_time_limit = Some(ms);
+        self
+    }
+
+    /// Set the OOM score adjustment mode (`"yes"`, `"no"`, or `"absolute"`).
+    pub fn oom_score_adj(mut self, mode: impl Into<String>) -> Self {
+        self.config.oom_score_adj = Some(mode.into());
+        self
+    }
+
+    /// Set the OOM score adjustment values (e.g. `"0 200 800"`).
+    pub fn oom_score_adj_values(mut self, values: impl Into<String>) -> Self {
+        self.config.oom_score_adj_values = Some(values.into());
+        self
+    }
+
+    /// Set the propagation error behavior (`"panic"` or `"ignore"`).
+    pub fn propagation_error_behavior(mut self, behavior: impl Into<String>) -> Self {
+        self.config.propagation_error_behavior = Some(behavior.into());
+        self
+    }
+
+    /// Set the maximum number of keys in the tracking table.
+    pub fn tracking_table_max_keys(mut self, n: u64) -> Self {
+        self.config.tracking_table_max_keys = Some(n);
+        self
+    }
+
     // -- binary paths --
 
     /// Set a custom `redis-server` binary path.
@@ -1880,6 +2444,198 @@ impl RedisServer {
         }
         if let Some(ref events) = self.config.notify_keyspace_events {
             conf.push_str(&format!("notify-keyspace-events {events}\n"));
+        }
+
+        // -- slow log --
+        if let Some(us) = self.config.slowlog_log_slower_than {
+            conf.push_str(&format!("slowlog-log-slower-than {us}\n"));
+        }
+        if let Some(n) = self.config.slowlog_max_len {
+            conf.push_str(&format!("slowlog-max-len {n}\n"));
+        }
+
+        // -- latency tracking --
+        if let Some(ms) = self.config.latency_monitor_threshold {
+            conf.push_str(&format!("latency-monitor-threshold {ms}\n"));
+        }
+        if let Some(enable) = self.config.latency_tracking {
+            conf.push_str(&format!("latency-tracking {}\n", yn(enable)));
+        }
+        if let Some(ref pcts) = self.config.latency_tracking_info_percentiles {
+            conf.push_str(&format!("latency-tracking-info-percentiles \"{pcts}\"\n"));
+        }
+
+        // -- active defragmentation --
+        if let Some(enable) = self.config.activedefrag {
+            conf.push_str(&format!("activedefrag {}\n", yn(enable)));
+        }
+        if let Some(ref bytes) = self.config.active_defrag_ignore_bytes {
+            conf.push_str(&format!("active-defrag-ignore-bytes {bytes}\n"));
+        }
+        if let Some(pct) = self.config.active_defrag_threshold_lower {
+            conf.push_str(&format!("active-defrag-threshold-lower {pct}\n"));
+        }
+        if let Some(pct) = self.config.active_defrag_threshold_upper {
+            conf.push_str(&format!("active-defrag-threshold-upper {pct}\n"));
+        }
+        if let Some(pct) = self.config.active_defrag_cycle_min {
+            conf.push_str(&format!("active-defrag-cycle-min {pct}\n"));
+        }
+        if let Some(pct) = self.config.active_defrag_cycle_max {
+            conf.push_str(&format!("active-defrag-cycle-max {pct}\n"));
+        }
+        if let Some(n) = self.config.active_defrag_max_scan_fields {
+            conf.push_str(&format!("active-defrag-max-scan-fields {n}\n"));
+        }
+
+        // -- logging and process --
+        if let Some(enable) = self.config.syslog_enabled {
+            conf.push_str(&format!("syslog-enabled {}\n", yn(enable)));
+        }
+        if let Some(ref ident) = self.config.syslog_ident {
+            conf.push_str(&format!("syslog-ident {ident}\n"));
+        }
+        if let Some(ref facility) = self.config.syslog_facility {
+            conf.push_str(&format!("syslog-facility {facility}\n"));
+        }
+        if let Some(ref mode) = self.config.supervised {
+            conf.push_str(&format!("supervised {mode}\n"));
+        }
+        if let Some(enable) = self.config.always_show_logo {
+            conf.push_str(&format!("always-show-logo {}\n", yn(enable)));
+        }
+        if let Some(enable) = self.config.set_proc_title {
+            conf.push_str(&format!("set-proc-title {}\n", yn(enable)));
+        }
+        if let Some(ref template) = self.config.proc_title_template {
+            conf.push_str(&format!("proc-title-template \"{template}\"\n"));
+        }
+
+        // -- security and ACL --
+        if let Some(ref default) = self.config.acl_pubsub_default {
+            conf.push_str(&format!("acl-pubsub-default {default}\n"));
+        }
+        if let Some(n) = self.config.acllog_max_len {
+            conf.push_str(&format!("acllog-max-len {n}\n"));
+        }
+        if let Some(ref mode) = self.config.enable_debug_command {
+            conf.push_str(&format!("enable-debug-command {mode}\n"));
+        }
+        if let Some(ref mode) = self.config.enable_module_command {
+            conf.push_str(&format!("enable-module-command {mode}\n"));
+        }
+        if let Some(ref mode) = self.config.enable_protected_configs {
+            conf.push_str(&format!("enable-protected-configs {mode}\n"));
+        }
+        for (cmd, new_name) in &self.config.rename_command {
+            conf.push_str(&format!("rename-command {cmd} \"{new_name}\"\n"));
+        }
+        if let Some(ref mode) = self.config.sanitize_dump_payload {
+            conf.push_str(&format!("sanitize-dump-payload {mode}\n"));
+        }
+        if let Some(enable) = self.config.hide_user_data_from_log {
+            conf.push_str(&format!("hide-user-data-from-log {}\n", yn(enable)));
+        }
+
+        // -- networking (additional) --
+        if let Some(ref addr) = self.config.bind_source_addr {
+            conf.push_str(&format!("bind-source-addr {addr}\n"));
+        }
+        if let Some(ms) = self.config.busy_reply_threshold {
+            conf.push_str(&format!("busy-reply-threshold {ms}\n"));
+        }
+        for limit in &self.config.client_output_buffer_limit {
+            conf.push_str(&format!("client-output-buffer-limit {limit}\n"));
+        }
+        if let Some(ref limit) = self.config.client_query_buffer_limit {
+            conf.push_str(&format!("client-query-buffer-limit {limit}\n"));
+        }
+        if let Some(ref len) = self.config.proto_max_bulk_len {
+            conf.push_str(&format!("proto-max-bulk-len {len}\n"));
+        }
+        if let Some(n) = self.config.max_new_connections_per_cycle {
+            conf.push_str(&format!("max-new-connections-per-cycle {n}\n"));
+        }
+        if let Some(n) = self.config.max_new_tls_connections_per_cycle {
+            conf.push_str(&format!("max-new-tls-connections-per-cycle {n}\n"));
+        }
+        if let Some(id) = self.config.socket_mark_id {
+            conf.push_str(&format!("socket-mark-id {id}\n"));
+        }
+
+        // -- RDB (additional) --
+        if let Some(ref name) = self.config.dbfilename {
+            conf.push_str(&format!("dbfilename {name}\n"));
+        }
+        if let Some(enable) = self.config.rdbcompression {
+            conf.push_str(&format!("rdbcompression {}\n", yn(enable)));
+        }
+        if let Some(enable) = self.config.rdbchecksum {
+            conf.push_str(&format!("rdbchecksum {}\n", yn(enable)));
+        }
+        if let Some(enable) = self.config.rdb_save_incremental_fsync {
+            conf.push_str(&format!("rdb-save-incremental-fsync {}\n", yn(enable)));
+        }
+        if let Some(enable) = self.config.rdb_del_sync_files {
+            conf.push_str(&format!("rdb-del-sync-files {}\n", yn(enable)));
+        }
+        if let Some(enable) = self.config.stop_writes_on_bgsave_error {
+            conf.push_str(&format!("stop-writes-on-bgsave-error {}\n", yn(enable)));
+        }
+
+        // -- shutdown --
+        if let Some(ref behavior) = self.config.shutdown_on_sigint {
+            conf.push_str(&format!("shutdown-on-sigint {behavior}\n"));
+        }
+        if let Some(ref behavior) = self.config.shutdown_on_sigterm {
+            conf.push_str(&format!("shutdown-on-sigterm {behavior}\n"));
+        }
+        if let Some(seconds) = self.config.shutdown_timeout {
+            conf.push_str(&format!("shutdown-timeout {seconds}\n"));
+        }
+
+        // -- other --
+        if let Some(enable) = self.config.activerehashing {
+            conf.push_str(&format!("activerehashing {}\n", yn(enable)));
+        }
+        if let Some(enable) = self.config.crash_log_enabled {
+            conf.push_str(&format!("crash-log-enabled {}\n", yn(enable)));
+        }
+        if let Some(enable) = self.config.crash_memcheck_enabled {
+            conf.push_str(&format!("crash-memcheck-enabled {}\n", yn(enable)));
+        }
+        if let Some(enable) = self.config.disable_thp {
+            conf.push_str(&format!("disable-thp {}\n", yn(enable)));
+        }
+        if let Some(enable) = self.config.dynamic_hz {
+            conf.push_str(&format!("dynamic-hz {}\n", yn(enable)));
+        }
+        if let Some(ref warning) = self.config.ignore_warnings {
+            conf.push_str(&format!("ignore-warnings {warning}\n"));
+        }
+        for path in &self.config.include {
+            conf.push_str(&format!("include {}\n", path.display()));
+        }
+        if let Some(enable) = self.config.jemalloc_bg_thread {
+            conf.push_str(&format!("jemalloc-bg-thread {}\n", yn(enable)));
+        }
+        if let Some(ref locale) = self.config.locale_collate {
+            conf.push_str(&format!("locale-collate {locale}\n"));
+        }
+        if let Some(ms) = self.config.lua_time_limit {
+            conf.push_str(&format!("lua-time-limit {ms}\n"));
+        }
+        if let Some(ref mode) = self.config.oom_score_adj {
+            conf.push_str(&format!("oom-score-adj {mode}\n"));
+        }
+        if let Some(ref values) = self.config.oom_score_adj_values {
+            conf.push_str(&format!("oom-score-adj-values {values}\n"));
+        }
+        if let Some(ref behavior) = self.config.propagation_error_behavior {
+            conf.push_str(&format!("propagation-error-behavior {behavior}\n"));
+        }
+        if let Some(n) = self.config.tracking_table_max_keys {
+            conf.push_str(&format!("tracking-table-max-keys {n}\n"));
         }
 
         // -- catch-all --
