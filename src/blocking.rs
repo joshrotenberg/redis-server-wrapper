@@ -1724,6 +1724,31 @@ impl RedisClusterHandle {
         self.inner.pids()
     }
 
+    /// The number of master nodes in the cluster.
+    pub fn num_masters(&self) -> u16 {
+        self.inner.num_masters()
+    }
+
+    /// Run a command against a specific node by index.
+    pub fn node_run(&self, index: usize, args: &[&str]) -> Result<String> {
+        self.rt.block_on(self.inner.node(index).run(args))
+    }
+
+    /// Run `CONFIG SET` on all nodes.
+    pub fn config_set_all(&self, key: &str, value: &str) -> Result<()> {
+        self.rt.block_on(self.inner.config_set_all(key, value))
+    }
+
+    /// Run `CONFIG SET` on master nodes only (initial topology).
+    pub fn config_set_masters(&self, key: &str, value: &str) -> Result<()> {
+        self.rt.block_on(self.inner.config_set_masters(key, value))
+    }
+
+    /// Run `CONFIG SET` on replica nodes only (initial topology).
+    pub fn config_set_replicas(&self, key: &str, value: &str) -> Result<()> {
+        self.rt.block_on(self.inner.config_set_replicas(key, value))
+    }
+
     /// Check if all nodes are alive.
     pub fn all_alive(&self) -> bool {
         self.rt.block_on(self.inner.all_alive())
