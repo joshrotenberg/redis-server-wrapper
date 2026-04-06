@@ -70,6 +70,231 @@ impl RedisCli {
         self
     }
 
+    // -- input/output modifiers --
+
+    /// Read last argument from stdin (`-x`).
+    pub fn stdin_last_arg(mut self, enable: bool) -> Self {
+        self.inner = self.inner.stdin_last_arg(enable);
+        self
+    }
+
+    /// Read tag argument from stdin (`-X`).
+    pub fn stdin_tag_arg(mut self, enable: bool) -> Self {
+        self.inner = self.inner.stdin_tag_arg(enable);
+        self
+    }
+
+    /// Set the multi-bulk delimiter.
+    pub fn multi_bulk_delimiter(mut self, delim: impl Into<String>) -> Self {
+        self.inner = self.inner.multi_bulk_delimiter(delim);
+        self
+    }
+
+    /// Set the output delimiter between responses.
+    pub fn output_delimiter(mut self, delim: impl Into<String>) -> Self {
+        self.inner = self.inner.output_delimiter(delim);
+        self
+    }
+
+    /// Return exit error code on server errors.
+    pub fn exit_error_code(mut self, enable: bool) -> Self {
+        self.inner = self.inner.exit_error_code(enable);
+        self
+    }
+
+    /// Force formatted output even with pipe.
+    pub fn no_raw(mut self, enable: bool) -> Self {
+        self.inner = self.inner.no_raw(enable);
+        self
+    }
+
+    /// Force input to be processed as quoted strings.
+    pub fn quoted_input(mut self, enable: bool) -> Self {
+        self.inner = self.inner.quoted_input(enable);
+        self
+    }
+
+    /// Show or hide push messages.
+    pub fn show_pushes(mut self, enable: bool) -> Self {
+        self.inner = self.inner.show_pushes(enable);
+        self
+    }
+
+    // -- diagnostic/analysis modes --
+
+    /// Enable continuous stat mode.
+    pub fn stat(mut self, enable: bool) -> Self {
+        self.inner = self.inner.stat(enable);
+        self
+    }
+
+    /// Enable latency mode.
+    pub fn latency(mut self, enable: bool) -> Self {
+        self.inner = self.inner.latency(enable);
+        self
+    }
+
+    /// Enable latency history mode.
+    pub fn latency_history(mut self, enable: bool) -> Self {
+        self.inner = self.inner.latency_history(enable);
+        self
+    }
+
+    /// Enable latency distribution mode.
+    pub fn latency_dist(mut self, enable: bool) -> Self {
+        self.inner = self.inner.latency_dist(enable);
+        self
+    }
+
+    /// Scan for big keys.
+    pub fn bigkeys(mut self, enable: bool) -> Self {
+        self.inner = self.inner.bigkeys(enable);
+        self
+    }
+
+    /// Scan for keys by memory usage.
+    pub fn memkeys(mut self, enable: bool) -> Self {
+        self.inner = self.inner.memkeys(enable);
+        self
+    }
+
+    /// Set the sample count for memkeys.
+    pub fn memkeys_samples(mut self, n: u32) -> Self {
+        self.inner = self.inner.memkeys_samples(n);
+        self
+    }
+
+    /// Enable key statistics.
+    pub fn keystats(mut self, enable: bool) -> Self {
+        self.inner = self.inner.keystats(enable);
+        self
+    }
+
+    /// Set the sample count for keystats.
+    pub fn keystats_samples(mut self, n: u32) -> Self {
+        self.inner = self.inner.keystats_samples(n);
+        self
+    }
+
+    /// Scan for hot keys.
+    pub fn hotkeys(mut self, enable: bool) -> Self {
+        self.inner = self.inner.hotkeys(enable);
+        self
+    }
+
+    /// Enable scan mode.
+    pub fn scan(mut self, enable: bool) -> Self {
+        self.inner = self.inner.scan(enable);
+        self
+    }
+
+    /// Set a pattern filter for scan.
+    pub fn pattern(mut self, pat: impl Into<String>) -> Self {
+        self.inner = self.inner.pattern(pat);
+        self
+    }
+
+    /// Set a count hint for scan.
+    pub fn count(mut self, n: u32) -> Self {
+        self.inner = self.inner.count(n);
+        self
+    }
+
+    /// Set a quoted pattern for scan.
+    pub fn quoted_pattern(mut self, pat: impl Into<String>) -> Self {
+        self.inner = self.inner.quoted_pattern(pat);
+        self
+    }
+
+    /// Set the starting cursor for scan.
+    pub fn cursor(mut self, n: u64) -> Self {
+        self.inner = self.inner.cursor(n);
+        self
+    }
+
+    /// Set the top N for keystats.
+    pub fn top(mut self, n: u32) -> Self {
+        self.inner = self.inner.top(n);
+        self
+    }
+
+    /// Measure intrinsic system latency for the given number of seconds.
+    pub fn intrinsic_latency(mut self, seconds: u32) -> Self {
+        self.inner = self.inner.intrinsic_latency(seconds);
+        self
+    }
+
+    /// Run LRU simulation test with the given number of keys.
+    pub fn lru_test(mut self, keys: u64) -> Self {
+        self.inner = self.inner.lru_test(keys);
+        self
+    }
+
+    /// Enable verbose mode.
+    pub fn verbose(mut self, enable: bool) -> Self {
+        self.inner = self.inner.verbose(enable);
+        self
+    }
+
+    // -- scripting --
+
+    /// Evaluate a Lua script file.
+    pub fn eval_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.eval_file(path);
+        self
+    }
+
+    /// Enable Lua debugger.
+    pub fn ldb(mut self, enable: bool) -> Self {
+        self.inner = self.inner.ldb(enable);
+        self
+    }
+
+    /// Enable Lua debugger in synchronous mode.
+    pub fn ldb_sync_mode(mut self, enable: bool) -> Self {
+        self.inner = self.inner.ldb_sync_mode(enable);
+        self
+    }
+
+    // -- persistence tools --
+
+    /// Enable pipe mode for mass-insert.
+    pub fn pipe(mut self, enable: bool) -> Self {
+        self.inner = self.inner.pipe(enable);
+        self
+    }
+
+    /// Set the pipe mode timeout in seconds.
+    pub fn pipe_timeout(mut self, seconds: u32) -> Self {
+        self.inner = self.inner.pipe_timeout(seconds);
+        self
+    }
+
+    /// Transfer an RDB dump to a file.
+    pub fn rdb(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.rdb(path);
+        self
+    }
+
+    /// Transfer a functions-only RDB dump.
+    pub fn functions_rdb(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.functions_rdb(path);
+        self
+    }
+
+    // -- other --
+
+    /// Simulate a replica for replication stream.
+    pub fn replica(mut self, enable: bool) -> Self {
+        self.inner = self.inner.replica(enable);
+        self
+    }
+
+    /// Run a `redis-cli --cluster <command>` subcommand.
+    pub fn cluster_command(&self, command: &str, args: &[&str]) -> Result<String> {
+        Runtime::new()?.block_on(self.inner.cluster_command(command, args))
+    }
+
     /// Run a command and return stdout on success.
     pub fn run(&self, args: &[&str]) -> Result<String> {
         Runtime::new()?.block_on(self.inner.run(args))
@@ -329,6 +554,376 @@ impl RedisServer {
     /// Set keyspace notification events.
     pub fn notify_keyspace_events(mut self, events: impl Into<String>) -> Self {
         self.inner = self.inner.notify_keyspace_events(events);
+        self
+    }
+
+    // -- slow log --
+
+    /// Set the slow log threshold in microseconds.
+    pub fn slowlog_log_slower_than(mut self, us: i64) -> Self {
+        self.inner = self.inner.slowlog_log_slower_than(us);
+        self
+    }
+
+    /// Set the maximum number of slow log entries.
+    pub fn slowlog_max_len(mut self, n: u32) -> Self {
+        self.inner = self.inner.slowlog_max_len(n);
+        self
+    }
+
+    // -- latency tracking --
+
+    /// Set the latency monitor threshold in milliseconds.
+    pub fn latency_monitor_threshold(mut self, ms: u64) -> Self {
+        self.inner = self.inner.latency_monitor_threshold(ms);
+        self
+    }
+
+    /// Enable or disable the extended latency tracking system.
+    pub fn latency_tracking(mut self, enable: bool) -> Self {
+        self.inner = self.inner.latency_tracking(enable);
+        self
+    }
+
+    /// Set percentiles reported by the latency tracking system.
+    pub fn latency_tracking_info_percentiles(mut self, percentiles: impl Into<String>) -> Self {
+        self.inner = self.inner.latency_tracking_info_percentiles(percentiles);
+        self
+    }
+
+    // -- active defragmentation --
+
+    /// Enable or disable active defragmentation.
+    pub fn activedefrag(mut self, enable: bool) -> Self {
+        self.inner = self.inner.activedefrag(enable);
+        self
+    }
+
+    /// Set the minimum fragmentation waste to start defragmentation.
+    pub fn active_defrag_ignore_bytes(mut self, bytes: impl Into<String>) -> Self {
+        self.inner = self.inner.active_defrag_ignore_bytes(bytes);
+        self
+    }
+
+    /// Set the minimum fragmentation percentage to start defragmentation.
+    pub fn active_defrag_threshold_lower(mut self, pct: u32) -> Self {
+        self.inner = self.inner.active_defrag_threshold_lower(pct);
+        self
+    }
+
+    /// Set the fragmentation percentage at which maximum effort is used.
+    pub fn active_defrag_threshold_upper(mut self, pct: u32) -> Self {
+        self.inner = self.inner.active_defrag_threshold_upper(pct);
+        self
+    }
+
+    /// Set the minimal CPU effort for defragmentation (percentage).
+    pub fn active_defrag_cycle_min(mut self, pct: u32) -> Self {
+        self.inner = self.inner.active_defrag_cycle_min(pct);
+        self
+    }
+
+    /// Set the maximum CPU effort for defragmentation (percentage).
+    pub fn active_defrag_cycle_max(mut self, pct: u32) -> Self {
+        self.inner = self.inner.active_defrag_cycle_max(pct);
+        self
+    }
+
+    /// Set the maximum fields processed per defrag scan step.
+    pub fn active_defrag_max_scan_fields(mut self, n: u32) -> Self {
+        self.inner = self.inner.active_defrag_max_scan_fields(n);
+        self
+    }
+
+    // -- logging and process --
+
+    /// Enable logging to syslog.
+    pub fn syslog_enabled(mut self, enable: bool) -> Self {
+        self.inner = self.inner.syslog_enabled(enable);
+        self
+    }
+
+    /// Set the syslog identity string.
+    pub fn syslog_ident(mut self, ident: impl Into<String>) -> Self {
+        self.inner = self.inner.syslog_ident(ident);
+        self
+    }
+
+    /// Set the syslog facility.
+    pub fn syslog_facility(mut self, facility: impl Into<String>) -> Self {
+        self.inner = self.inner.syslog_facility(facility);
+        self
+    }
+
+    /// Set the supervision mode.
+    pub fn supervised(mut self, mode: impl Into<String>) -> Self {
+        self.inner = self.inner.supervised(mode);
+        self
+    }
+
+    /// Show the Redis logo on startup.
+    pub fn always_show_logo(mut self, enable: bool) -> Self {
+        self.inner = self.inner.always_show_logo(enable);
+        self
+    }
+
+    /// Enable setting the process title.
+    pub fn set_proc_title(mut self, enable: bool) -> Self {
+        self.inner = self.inner.set_proc_title(enable);
+        self
+    }
+
+    /// Set the process title template.
+    pub fn proc_title_template(mut self, template: impl Into<String>) -> Self {
+        self.inner = self.inner.proc_title_template(template);
+        self
+    }
+
+    // -- security and ACL --
+
+    /// Set the default pub/sub ACL permissions.
+    pub fn acl_pubsub_default(mut self, default: impl Into<String>) -> Self {
+        self.inner = self.inner.acl_pubsub_default(default);
+        self
+    }
+
+    /// Set the maximum length of the ACL log.
+    pub fn acllog_max_len(mut self, n: u32) -> Self {
+        self.inner = self.inner.acllog_max_len(n);
+        self
+    }
+
+    /// Enable the DEBUG command.
+    pub fn enable_debug_command(mut self, mode: impl Into<String>) -> Self {
+        self.inner = self.inner.enable_debug_command(mode);
+        self
+    }
+
+    /// Enable the MODULE command.
+    pub fn enable_module_command(mut self, mode: impl Into<String>) -> Self {
+        self.inner = self.inner.enable_module_command(mode);
+        self
+    }
+
+    /// Allow CONFIG SET to modify protected configs.
+    pub fn enable_protected_configs(mut self, mode: impl Into<String>) -> Self {
+        self.inner = self.inner.enable_protected_configs(mode);
+        self
+    }
+
+    /// Rename a command. Pass an empty new name to disable it.
+    pub fn rename_command(
+        mut self,
+        command: impl Into<String>,
+        new_name: impl Into<String>,
+    ) -> Self {
+        self.inner = self.inner.rename_command(command, new_name);
+        self
+    }
+
+    /// Set dump payload sanitization mode.
+    pub fn sanitize_dump_payload(mut self, mode: impl Into<String>) -> Self {
+        self.inner = self.inner.sanitize_dump_payload(mode);
+        self
+    }
+
+    /// Hide user data from log messages.
+    pub fn hide_user_data_from_log(mut self, enable: bool) -> Self {
+        self.inner = self.inner.hide_user_data_from_log(enable);
+        self
+    }
+
+    // -- networking (additional) --
+
+    /// Set the source address for outgoing connections.
+    pub fn bind_source_addr(mut self, addr: impl Into<String>) -> Self {
+        self.inner = self.inner.bind_source_addr(addr);
+        self
+    }
+
+    /// Set the busy reply threshold in milliseconds.
+    pub fn busy_reply_threshold(mut self, ms: u64) -> Self {
+        self.inner = self.inner.busy_reply_threshold(ms);
+        self
+    }
+
+    /// Add a client output buffer limit.
+    pub fn client_output_buffer_limit(mut self, limit: impl Into<String>) -> Self {
+        self.inner = self.inner.client_output_buffer_limit(limit);
+        self
+    }
+
+    /// Set the maximum size of a single client query buffer.
+    pub fn client_query_buffer_limit(mut self, limit: impl Into<String>) -> Self {
+        self.inner = self.inner.client_query_buffer_limit(limit);
+        self
+    }
+
+    /// Set the maximum size of a single protocol bulk request.
+    pub fn proto_max_bulk_len(mut self, len: impl Into<String>) -> Self {
+        self.inner = self.inner.proto_max_bulk_len(len);
+        self
+    }
+
+    /// Set the maximum number of new connections per event loop cycle.
+    pub fn max_new_connections_per_cycle(mut self, n: u32) -> Self {
+        self.inner = self.inner.max_new_connections_per_cycle(n);
+        self
+    }
+
+    /// Set the maximum number of new TLS connections per event loop cycle.
+    pub fn max_new_tls_connections_per_cycle(mut self, n: u32) -> Self {
+        self.inner = self.inner.max_new_tls_connections_per_cycle(n);
+        self
+    }
+
+    /// Set the socket mark ID for outgoing connections.
+    pub fn socket_mark_id(mut self, id: u32) -> Self {
+        self.inner = self.inner.socket_mark_id(id);
+        self
+    }
+
+    // -- RDB (additional) --
+
+    /// Set the RDB dump filename.
+    pub fn dbfilename(mut self, name: impl Into<String>) -> Self {
+        self.inner = self.inner.dbfilename(name);
+        self
+    }
+
+    /// Enable or disable RDB compression.
+    pub fn rdbcompression(mut self, enable: bool) -> Self {
+        self.inner = self.inner.rdbcompression(enable);
+        self
+    }
+
+    /// Enable or disable RDB checksum.
+    pub fn rdbchecksum(mut self, enable: bool) -> Self {
+        self.inner = self.inner.rdbchecksum(enable);
+        self
+    }
+
+    /// Enable incremental fsync during RDB save.
+    pub fn rdb_save_incremental_fsync(mut self, enable: bool) -> Self {
+        self.inner = self.inner.rdb_save_incremental_fsync(enable);
+        self
+    }
+
+    /// Delete RDB sync files used by diskless replication.
+    pub fn rdb_del_sync_files(mut self, enable: bool) -> Self {
+        self.inner = self.inner.rdb_del_sync_files(enable);
+        self
+    }
+
+    /// Stop accepting writes when bgsave fails.
+    pub fn stop_writes_on_bgsave_error(mut self, enable: bool) -> Self {
+        self.inner = self.inner.stop_writes_on_bgsave_error(enable);
+        self
+    }
+
+    // -- shutdown --
+
+    /// Set shutdown behavior on SIGINT.
+    pub fn shutdown_on_sigint(mut self, behavior: impl Into<String>) -> Self {
+        self.inner = self.inner.shutdown_on_sigint(behavior);
+        self
+    }
+
+    /// Set shutdown behavior on SIGTERM.
+    pub fn shutdown_on_sigterm(mut self, behavior: impl Into<String>) -> Self {
+        self.inner = self.inner.shutdown_on_sigterm(behavior);
+        self
+    }
+
+    /// Set the maximum seconds to wait during shutdown for lagging replicas.
+    pub fn shutdown_timeout(mut self, seconds: u32) -> Self {
+        self.inner = self.inner.shutdown_timeout(seconds);
+        self
+    }
+
+    // -- other --
+
+    /// Enable or disable active rehashing.
+    pub fn activerehashing(mut self, enable: bool) -> Self {
+        self.inner = self.inner.activerehashing(enable);
+        self
+    }
+
+    /// Enable crash log on crash.
+    pub fn crash_log_enabled(mut self, enable: bool) -> Self {
+        self.inner = self.inner.crash_log_enabled(enable);
+        self
+    }
+
+    /// Enable crash memory check on crash.
+    pub fn crash_memcheck_enabled(mut self, enable: bool) -> Self {
+        self.inner = self.inner.crash_memcheck_enabled(enable);
+        self
+    }
+
+    /// Disable transparent huge pages.
+    pub fn disable_thp(mut self, enable: bool) -> Self {
+        self.inner = self.inner.disable_thp(enable);
+        self
+    }
+
+    /// Enable dynamic Hz adjustment.
+    pub fn dynamic_hz(mut self, enable: bool) -> Self {
+        self.inner = self.inner.dynamic_hz(enable);
+        self
+    }
+
+    /// Ignore specific warnings.
+    pub fn ignore_warnings(mut self, warning: impl Into<String>) -> Self {
+        self.inner = self.inner.ignore_warnings(warning);
+        self
+    }
+
+    /// Include another config file.
+    pub fn include(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.include(path);
+        self
+    }
+
+    /// Enable or disable jemalloc background thread.
+    pub fn jemalloc_bg_thread(mut self, enable: bool) -> Self {
+        self.inner = self.inner.jemalloc_bg_thread(enable);
+        self
+    }
+
+    /// Set the locale collation setting.
+    pub fn locale_collate(mut self, locale: impl Into<String>) -> Self {
+        self.inner = self.inner.locale_collate(locale);
+        self
+    }
+
+    /// Set the Lua script time limit in milliseconds.
+    pub fn lua_time_limit(mut self, ms: u64) -> Self {
+        self.inner = self.inner.lua_time_limit(ms);
+        self
+    }
+
+    /// Set the OOM score adjustment mode.
+    pub fn oom_score_adj(mut self, mode: impl Into<String>) -> Self {
+        self.inner = self.inner.oom_score_adj(mode);
+        self
+    }
+
+    /// Set the OOM score adjustment values.
+    pub fn oom_score_adj_values(mut self, values: impl Into<String>) -> Self {
+        self.inner = self.inner.oom_score_adj_values(values);
+        self
+    }
+
+    /// Set the propagation error behavior.
+    pub fn propagation_error_behavior(mut self, behavior: impl Into<String>) -> Self {
+        self.inner = self.inner.propagation_error_behavior(behavior);
+        self
+    }
+
+    /// Set the maximum number of keys in the tracking table.
+    pub fn tracking_table_max_keys(mut self, n: u64) -> Self {
+        self.inner = self.inner.tracking_table_max_keys(n);
         self
     }
 
