@@ -61,3 +61,65 @@ async fn cluster_password_auth() {
     let pong = cluster.cli().run(&["PING"]).await.unwrap();
     assert_eq!(pong.trim(), "PONG");
 }
+
+#[tokio::test]
+async fn cluster_node_access_and_config_set() {
+    let cluster = RedisCluster::builder()
+        .masters(3)
+        .replicas_per_master(1)
+        .base_port(17020)
+        .start()
+        .await
+        .expect("failed to start cluster");
+
+    cluster
+        .wait_for_healthy(std::time::Duration::from_secs(30))
+        .await
+        .expect("cluster did not become healthy");
+
+    // Verify topology counts.
+    assert_eq!(cluster.nodes().len(), 6);
+    assert_eq!(cluster.num_masters(), 3);
+    assert_eq!(cluster.master_nodes().len(), 3);
+    assert_eq!(cluster.replica_nodes().len(), 3);
+
+    // Access individual node by index.
+    let node0 = cluster.node(0);
+    assert!(node0.is_alive().await);
+
+    // CONFIG SET on all nodes.
+    cluster
+        .config_set_all("hz", "20")
+        .await
+        .expect("config_set_all failed");
+    for node in cluster.nodes() {
+        let val = node.run(&["CONFIG", "GET", "hz"]).await.unwrap();
+        assert!(val.contains("20"));
+    }
+
+    // CONFIG SET on masters only.
+    cluster
+        .config_set_masters("slowlog-log-slower-than", "5000")
+        .await
+        .expect("config_set_masters failed");
+    for node in cluster.master_nodes() {
+        let val = node
+            .run(&["CONFIG", "GET", "slowlog-log-slower-than"])
+            .await
+            .unwrap();
+        assert!(val.contains("5000"));
+    }
+
+    // CONFIG SET on replicas only.
+    cluster
+        .config_set_replicas("slowlog-max-len", "256")
+        .await
+        .expect("config_set_replicas failed");
+    for node in cluster.replica_nodes() {
+        let val = node
+            .run(&["CONFIG", "GET", "slowlog-max-len"])
+            .await
+            .unwrap();
+        assert!(val.contains("256"));
+    }
+}
