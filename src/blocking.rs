@@ -1508,6 +1508,174 @@ impl RedisClusterBuilder {
         self
     }
 
+    // -- cluster directives --
+
+    /// Set the cluster node timeout in milliseconds for all nodes.
+    pub fn cluster_node_timeout(mut self, ms: u64) -> Self {
+        self.inner = self.inner.cluster_node_timeout(ms);
+        self
+    }
+
+    /// Require full hash slot coverage for the cluster to accept writes.
+    pub fn cluster_require_full_coverage(mut self, require: bool) -> Self {
+        self.inner = self.inner.cluster_require_full_coverage(require);
+        self
+    }
+
+    /// Allow reads when the cluster is down.
+    pub fn cluster_allow_reads_when_down(mut self, allow: bool) -> Self {
+        self.inner = self.inner.cluster_allow_reads_when_down(allow);
+        self
+    }
+
+    /// Allow pubsub shard channels when the cluster is down.
+    pub fn cluster_allow_pubsubshard_when_down(mut self, allow: bool) -> Self {
+        self.inner = self.inner.cluster_allow_pubsubshard_when_down(allow);
+        self
+    }
+
+    /// Allow automatic replica migration between masters.
+    pub fn cluster_allow_replica_migration(mut self, allow: bool) -> Self {
+        self.inner = self.inner.cluster_allow_replica_migration(allow);
+        self
+    }
+
+    /// Set the minimum replicas a master must retain before one can migrate.
+    pub fn cluster_migration_barrier(mut self, barrier: u32) -> Self {
+        self.inner = self.inner.cluster_migration_barrier(barrier);
+        self
+    }
+
+    /// Set the hostname each node announces to the cluster.
+    pub fn cluster_announce_hostname(mut self, hostname: impl Into<String>) -> Self {
+        self.inner = self.inner.cluster_announce_hostname(hostname);
+        self
+    }
+
+    /// Set a friendly node name broadcast for debugging/admin display.
+    pub fn cluster_announce_human_nodename(mut self, name: impl Into<String>) -> Self {
+        self.inner = self.inner.cluster_announce_human_nodename(name);
+        self
+    }
+
+    /// Set the preferred endpoint type for cluster redirections.
+    pub fn cluster_preferred_endpoint_type(mut self, endpoint_type: impl Into<String>) -> Self {
+        self.inner = self.inner.cluster_preferred_endpoint_type(endpoint_type);
+        self
+    }
+
+    /// Prevent replicas from attempting automatic failover.
+    pub fn cluster_replica_no_failover(mut self, no_failover: bool) -> Self {
+        self.inner = self.inner.cluster_replica_no_failover(no_failover);
+        self
+    }
+
+    /// Set the replica validity factor for failover eligibility.
+    pub fn cluster_replica_validity_factor(mut self, factor: u32) -> Self {
+        self.inner = self.inner.cluster_replica_validity_factor(factor);
+        self
+    }
+
+    /// Set the IP address nodes announce for client redirects.
+    pub fn cluster_announce_ip(mut self, ip: impl Into<String>) -> Self {
+        self.inner = self.inner.cluster_announce_ip(ip);
+        self
+    }
+
+    /// Set the client port nodes announce for redirects.
+    pub fn cluster_announce_port(mut self, port: u16) -> Self {
+        self.inner = self.inner.cluster_announce_port(port);
+        self
+    }
+
+    /// Set the cluster bus port nodes announce for gossip.
+    pub fn cluster_announce_bus_port(mut self, port: u16) -> Self {
+        self.inner = self.inner.cluster_announce_bus_port(port);
+        self
+    }
+
+    /// Set the TLS client port nodes announce for redirects.
+    pub fn cluster_announce_tls_port(mut self, port: u16) -> Self {
+        self.inner = self.inner.cluster_announce_tls_port(port);
+        self
+    }
+
+    /// Set a dedicated cluster bus port.
+    pub fn cluster_port(mut self, port: u16) -> Self {
+        self.inner = self.inner.cluster_port(port);
+        self
+    }
+
+    /// Set the maximum memory for a cluster bus link's output buffer.
+    pub fn cluster_link_sendbuf_limit(mut self, limit: u64) -> Self {
+        self.inner = self.inner.cluster_link_sendbuf_limit(limit);
+        self
+    }
+
+    /// Set the cluster compatibility sample ratio.
+    pub fn cluster_compatibility_sample_ratio(mut self, ratio: u32) -> Self {
+        self.inner = self.inner.cluster_compatibility_sample_ratio(ratio);
+        self
+    }
+
+    /// Set the maximum replication lag in bytes before slot migration handoff.
+    pub fn cluster_slot_migration_handoff_max_lag_bytes(mut self, bytes: u64) -> Self {
+        self.inner = self
+            .inner
+            .cluster_slot_migration_handoff_max_lag_bytes(bytes);
+        self
+    }
+
+    /// Set the write pause timeout in milliseconds during slot migration.
+    pub fn cluster_slot_migration_write_pause_timeout(mut self, ms: u64) -> Self {
+        self.inner = self.inner.cluster_slot_migration_write_pause_timeout(ms);
+        self
+    }
+
+    /// Enable per-slot statistics tracking.
+    pub fn cluster_slot_stats_enabled(mut self, enable: bool) -> Self {
+        self.inner = self.inner.cluster_slot_stats_enabled(enable);
+        self
+    }
+
+    // -- replication directives --
+
+    /// Set the minimum number of connected replicas before the master accepts writes.
+    pub fn min_replicas_to_write(mut self, n: u32) -> Self {
+        self.inner = self.inner.min_replicas_to_write(n);
+        self
+    }
+
+    /// Set the maximum replication lag (seconds) before a replica is considered disconnected.
+    pub fn min_replicas_max_lag(mut self, seconds: u32) -> Self {
+        self.inner = self.inner.min_replicas_max_lag(seconds);
+        self
+    }
+
+    /// Enable or disable diskless replication sync.
+    pub fn repl_diskless_sync(mut self, enable: bool) -> Self {
+        self.inner = self.inner.repl_diskless_sync(enable);
+        self
+    }
+
+    /// Set the delay in seconds before starting a diskless replication transfer.
+    pub fn repl_diskless_sync_delay(mut self, seconds: u32) -> Self {
+        self.inner = self.inner.repl_diskless_sync_delay(seconds);
+        self
+    }
+
+    /// Set how often replicas ping the master (seconds).
+    pub fn repl_ping_replica_period(mut self, seconds: u32) -> Self {
+        self.inner = self.inner.repl_ping_replica_period(seconds);
+        self
+    }
+
+    /// Set the replication timeout in seconds.
+    pub fn repl_timeout(mut self, seconds: u32) -> Self {
+        self.inner = self.inner.repl_timeout(seconds);
+        self
+    }
+
     /// Set an arbitrary config directive for all cluster nodes.
     pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.inner = self.inner.extra(key, value);
