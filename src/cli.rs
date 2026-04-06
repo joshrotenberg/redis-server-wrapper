@@ -50,6 +50,51 @@ pub struct RedisCli {
     cluster_mode: bool,
     output_format: OutputFormat,
     no_auth_warning: bool,
+
+    // -- input/output modifiers (#46) --
+    stdin_last_arg: bool,
+    stdin_tag_arg: bool,
+    multi_bulk_delimiter: Option<String>,
+    output_delimiter: Option<String>,
+    exit_error_code: bool,
+    no_raw: bool,
+    quoted_input: bool,
+    show_pushes: Option<bool>,
+
+    // -- diagnostic/analysis modes (#45) --
+    stat: bool,
+    latency: bool,
+    latency_history: bool,
+    latency_dist: bool,
+    bigkeys: bool,
+    memkeys: bool,
+    memkeys_samples: Option<u32>,
+    keystats: bool,
+    keystats_samples: Option<u32>,
+    hotkeys: bool,
+    scan: bool,
+    pattern: Option<String>,
+    count: Option<u32>,
+    quoted_pattern: Option<String>,
+    cursor: Option<u64>,
+    top: Option<u32>,
+    intrinsic_latency: Option<u32>,
+    lru_test: Option<u64>,
+    verbose: bool,
+
+    // -- scripting (#48) --
+    eval_file: Option<PathBuf>,
+    ldb: bool,
+    ldb_sync_mode: bool,
+
+    // -- persistence tools (#48) --
+    pipe: bool,
+    pipe_timeout: Option<u32>,
+    rdb: Option<PathBuf>,
+    functions_rdb: Option<PathBuf>,
+
+    // -- other (#48) --
+    replica: bool,
 }
 
 impl RedisCli {
@@ -72,6 +117,41 @@ impl RedisCli {
             cluster_mode: false,
             output_format: OutputFormat::Default,
             no_auth_warning: false,
+            stdin_last_arg: false,
+            stdin_tag_arg: false,
+            multi_bulk_delimiter: None,
+            output_delimiter: None,
+            exit_error_code: false,
+            no_raw: false,
+            quoted_input: false,
+            show_pushes: None,
+            stat: false,
+            latency: false,
+            latency_history: false,
+            latency_dist: false,
+            bigkeys: false,
+            memkeys: false,
+            memkeys_samples: None,
+            keystats: false,
+            keystats_samples: None,
+            hotkeys: false,
+            scan: false,
+            pattern: None,
+            count: None,
+            quoted_pattern: None,
+            cursor: None,
+            top: None,
+            intrinsic_latency: None,
+            lru_test: None,
+            verbose: false,
+            eval_file: None,
+            ldb: false,
+            ldb_sync_mode: false,
+            pipe: false,
+            pipe_timeout: None,
+            rdb: None,
+            functions_rdb: None,
+            replica: false,
         }
     }
 
@@ -169,6 +249,266 @@ impl RedisCli {
     pub fn no_auth_warning(mut self, suppress: bool) -> Self {
         self.no_auth_warning = suppress;
         self
+    }
+
+    // -- input/output modifiers --
+
+    /// Read last argument from stdin (`-x`).
+    pub fn stdin_last_arg(mut self, enable: bool) -> Self {
+        self.stdin_last_arg = enable;
+        self
+    }
+
+    /// Read tag argument from stdin (`-X`).
+    pub fn stdin_tag_arg(mut self, enable: bool) -> Self {
+        self.stdin_tag_arg = enable;
+        self
+    }
+
+    /// Set the multi-bulk delimiter (`-d`).
+    pub fn multi_bulk_delimiter(mut self, delim: impl Into<String>) -> Self {
+        self.multi_bulk_delimiter = Some(delim.into());
+        self
+    }
+
+    /// Set the output delimiter between responses (`-D`).
+    pub fn output_delimiter(mut self, delim: impl Into<String>) -> Self {
+        self.output_delimiter = Some(delim.into());
+        self
+    }
+
+    /// Return exit error code on server errors (`-e`).
+    pub fn exit_error_code(mut self, enable: bool) -> Self {
+        self.exit_error_code = enable;
+        self
+    }
+
+    /// Force formatted output even with pipe (`--no-raw`).
+    pub fn no_raw(mut self, enable: bool) -> Self {
+        self.no_raw = enable;
+        self
+    }
+
+    /// Force input to be processed as quoted strings (`--quoted-input`).
+    pub fn quoted_input(mut self, enable: bool) -> Self {
+        self.quoted_input = enable;
+        self
+    }
+
+    /// Show or hide push messages (`--show-pushes`).
+    pub fn show_pushes(mut self, enable: bool) -> Self {
+        self.show_pushes = Some(enable);
+        self
+    }
+
+    // -- diagnostic/analysis modes --
+
+    /// Enable continuous stat mode (`--stat`).
+    pub fn stat(mut self, enable: bool) -> Self {
+        self.stat = enable;
+        self
+    }
+
+    /// Enable latency mode (`--latency`).
+    pub fn latency(mut self, enable: bool) -> Self {
+        self.latency = enable;
+        self
+    }
+
+    /// Enable latency history mode (`--latency-history`).
+    pub fn latency_history(mut self, enable: bool) -> Self {
+        self.latency_history = enable;
+        self
+    }
+
+    /// Enable latency distribution mode (`--latency-dist`).
+    pub fn latency_dist(mut self, enable: bool) -> Self {
+        self.latency_dist = enable;
+        self
+    }
+
+    /// Scan for big keys (`--bigkeys`).
+    pub fn bigkeys(mut self, enable: bool) -> Self {
+        self.bigkeys = enable;
+        self
+    }
+
+    /// Scan for keys by memory usage (`--memkeys`).
+    pub fn memkeys(mut self, enable: bool) -> Self {
+        self.memkeys = enable;
+        self
+    }
+
+    /// Set the sample count for memkeys (`--memkeys-samples`).
+    pub fn memkeys_samples(mut self, n: u32) -> Self {
+        self.memkeys_samples = Some(n);
+        self
+    }
+
+    /// Enable key statistics (`--keystats`).
+    pub fn keystats(mut self, enable: bool) -> Self {
+        self.keystats = enable;
+        self
+    }
+
+    /// Set the sample count for keystats (`--keystats-samples`).
+    pub fn keystats_samples(mut self, n: u32) -> Self {
+        self.keystats_samples = Some(n);
+        self
+    }
+
+    /// Scan for hot keys (`--hotkeys`).
+    pub fn hotkeys(mut self, enable: bool) -> Self {
+        self.hotkeys = enable;
+        self
+    }
+
+    /// Enable scan mode (`--scan`).
+    pub fn scan(mut self, enable: bool) -> Self {
+        self.scan = enable;
+        self
+    }
+
+    /// Set a pattern filter for scan (`--pattern`).
+    pub fn pattern(mut self, pat: impl Into<String>) -> Self {
+        self.pattern = Some(pat.into());
+        self
+    }
+
+    /// Set a count hint for scan (`--count`).
+    pub fn count(mut self, n: u32) -> Self {
+        self.count = Some(n);
+        self
+    }
+
+    /// Set a quoted pattern for scan (`--quoted-pattern`).
+    pub fn quoted_pattern(mut self, pat: impl Into<String>) -> Self {
+        self.quoted_pattern = Some(pat.into());
+        self
+    }
+
+    /// Set the starting cursor for scan (`--cursor`).
+    pub fn cursor(mut self, n: u64) -> Self {
+        self.cursor = Some(n);
+        self
+    }
+
+    /// Set the top N for keystats (`--top`).
+    pub fn top(mut self, n: u32) -> Self {
+        self.top = Some(n);
+        self
+    }
+
+    /// Measure intrinsic system latency for the given number of seconds.
+    pub fn intrinsic_latency(mut self, seconds: u32) -> Self {
+        self.intrinsic_latency = Some(seconds);
+        self
+    }
+
+    /// Run LRU simulation test with the given number of keys.
+    pub fn lru_test(mut self, keys: u64) -> Self {
+        self.lru_test = Some(keys);
+        self
+    }
+
+    /// Enable verbose mode (`--verbose`).
+    pub fn verbose(mut self, enable: bool) -> Self {
+        self.verbose = enable;
+        self
+    }
+
+    // -- scripting --
+
+    /// Evaluate a Lua script file (`--eval`).
+    pub fn eval_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.eval_file = Some(path.into());
+        self
+    }
+
+    /// Enable Lua debugger (`--ldb`).
+    pub fn ldb(mut self, enable: bool) -> Self {
+        self.ldb = enable;
+        self
+    }
+
+    /// Enable Lua debugger in synchronous mode (`--ldb-sync-mode`).
+    pub fn ldb_sync_mode(mut self, enable: bool) -> Self {
+        self.ldb_sync_mode = enable;
+        self
+    }
+
+    // -- persistence tools --
+
+    /// Enable pipe mode for mass-insert (`--pipe`).
+    pub fn pipe(mut self, enable: bool) -> Self {
+        self.pipe = enable;
+        self
+    }
+
+    /// Set the pipe mode timeout in seconds (`--pipe-timeout`).
+    pub fn pipe_timeout(mut self, seconds: u32) -> Self {
+        self.pipe_timeout = Some(seconds);
+        self
+    }
+
+    /// Transfer an RDB dump to a file (`--rdb`).
+    pub fn rdb(mut self, path: impl Into<PathBuf>) -> Self {
+        self.rdb = Some(path.into());
+        self
+    }
+
+    /// Transfer a functions-only RDB dump (`--functions-rdb`).
+    pub fn functions_rdb(mut self, path: impl Into<PathBuf>) -> Self {
+        self.functions_rdb = Some(path.into());
+        self
+    }
+
+    // -- other --
+
+    /// Simulate a replica for replication stream (`--replica`).
+    pub fn replica(mut self, enable: bool) -> Self {
+        self.replica = enable;
+        self
+    }
+
+    /// Run a `redis-cli --cluster <command>` subcommand.
+    ///
+    /// This is a general-purpose method for all cluster subcommands beyond
+    /// `create` (which has the dedicated [`cluster_create`](Self::cluster_create) method).
+    /// Pass the subcommand and any additional arguments.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use redis_server_wrapper::RedisCli;
+    ///
+    /// # async fn example() {
+    /// let cli = RedisCli::new().host("127.0.0.1").port(7000);
+    /// let info = cli.cluster_command("info", &["127.0.0.1:7000"]).await.unwrap();
+    /// # }
+    /// ```
+    pub async fn cluster_command(&self, command: &str, args: &[&str]) -> Result<String> {
+        let mut cli_args = self.base_args();
+        cli_args.push("--cluster".into());
+        cli_args.push(command.into());
+        cli_args.extend(args.iter().map(|s| s.to_string()));
+
+        let str_args: Vec<&str> = cli_args.iter().map(|s| s.as_str()).collect();
+        let output = TokioCommand::new(&self.bin)
+            .args(&str_args)
+            .output()
+            .await?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(Error::Cli {
+                host: self.host.clone(),
+                port: self.port,
+                detail: stderr.into_owned(),
+            })
+        }
     }
 
     /// Run a command and return stdout on success.
@@ -331,6 +671,137 @@ impl RedisCli {
 
         if self.no_auth_warning {
             args.push("--no-auth-warning".to_string());
+        }
+
+        // -- input/output modifiers --
+        if self.stdin_last_arg {
+            args.push("-x".to_string());
+        }
+        if self.stdin_tag_arg {
+            args.push("-X".to_string());
+        }
+        if let Some(ref delim) = self.multi_bulk_delimiter {
+            args.push("-d".to_string());
+            args.push(delim.clone());
+        }
+        if let Some(ref delim) = self.output_delimiter {
+            args.push("-D".to_string());
+            args.push(delim.clone());
+        }
+        if self.exit_error_code {
+            args.push("-e".to_string());
+        }
+        if self.no_raw {
+            args.push("--no-raw".to_string());
+        }
+        if self.quoted_input {
+            args.push("--quoted-input".to_string());
+        }
+        if let Some(enable) = self.show_pushes {
+            args.push("--show-pushes".to_string());
+            args.push(if enable { "yes" } else { "no" }.to_string());
+        }
+
+        // -- diagnostic/analysis modes --
+        if self.stat {
+            args.push("--stat".to_string());
+        }
+        if self.latency {
+            args.push("--latency".to_string());
+        }
+        if self.latency_history {
+            args.push("--latency-history".to_string());
+        }
+        if self.latency_dist {
+            args.push("--latency-dist".to_string());
+        }
+        if self.bigkeys {
+            args.push("--bigkeys".to_string());
+        }
+        if self.memkeys {
+            args.push("--memkeys".to_string());
+        }
+        if let Some(n) = self.memkeys_samples {
+            args.push("--memkeys-samples".to_string());
+            args.push(n.to_string());
+        }
+        if self.keystats {
+            args.push("--keystats".to_string());
+        }
+        if let Some(n) = self.keystats_samples {
+            args.push("--keystats-samples".to_string());
+            args.push(n.to_string());
+        }
+        if self.hotkeys {
+            args.push("--hotkeys".to_string());
+        }
+        if self.scan {
+            args.push("--scan".to_string());
+        }
+        if let Some(ref pat) = self.pattern {
+            args.push("--pattern".to_string());
+            args.push(pat.clone());
+        }
+        if let Some(n) = self.count {
+            args.push("--count".to_string());
+            args.push(n.to_string());
+        }
+        if let Some(ref pat) = self.quoted_pattern {
+            args.push("--quoted-pattern".to_string());
+            args.push(pat.clone());
+        }
+        if let Some(n) = self.cursor {
+            args.push("--cursor".to_string());
+            args.push(n.to_string());
+        }
+        if let Some(n) = self.top {
+            args.push("--top".to_string());
+            args.push(n.to_string());
+        }
+        if let Some(seconds) = self.intrinsic_latency {
+            args.push("--intrinsic-latency".to_string());
+            args.push(seconds.to_string());
+        }
+        if let Some(keys) = self.lru_test {
+            args.push("--lru-test".to_string());
+            args.push(keys.to_string());
+        }
+        if self.verbose {
+            args.push("--verbose".to_string());
+        }
+
+        // -- scripting --
+        if let Some(ref path) = self.eval_file {
+            args.push("--eval".to_string());
+            args.push(path.display().to_string());
+        }
+        if self.ldb {
+            args.push("--ldb".to_string());
+        }
+        if self.ldb_sync_mode {
+            args.push("--ldb-sync-mode".to_string());
+        }
+
+        // -- persistence tools --
+        if self.pipe {
+            args.push("--pipe".to_string());
+        }
+        if let Some(n) = self.pipe_timeout {
+            args.push("--pipe-timeout".to_string());
+            args.push(n.to_string());
+        }
+        if let Some(ref path) = self.rdb {
+            args.push("--rdb".to_string());
+            args.push(path.display().to_string());
+        }
+        if let Some(ref path) = self.functions_rdb {
+            args.push("--functions-rdb".to_string());
+            args.push(path.display().to_string());
+        }
+
+        // -- other --
+        if self.replica {
+            args.push("--replica".to_string());
         }
 
         args
