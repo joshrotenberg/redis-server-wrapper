@@ -588,6 +588,7 @@ impl RedisClusterBuilder {
 
         Ok(RedisClusterHandle {
             nodes,
+            num_masters: self.masters,
             bind: self.bind,
             base_port: self.base_port,
             password: self.password,
@@ -599,6 +600,7 @@ impl RedisClusterBuilder {
 /// A running Redis Cluster. Stops all nodes on Drop.
 pub struct RedisClusterHandle {
     nodes: Vec<RedisServerHandle>,
+    num_masters: u16,
     bind: String,
     base_port: u16,
     password: Option<String>,
@@ -710,6 +712,68 @@ impl RedisClusterHandle {
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
+    }
+
+    /// Access a specific node by index.
+    ///
+    /// Nodes are ordered by port: masters first (indices `0..masters`),
+    /// then replicas (indices `masters..total`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index >= total_nodes`.
+    pub fn node(&self, index: usize) -> &RedisServerHandle {
+        &self.nodes[index]
+    }
+
+    /// All node handles.
+    pub fn nodes(&self) -> &[RedisServerHandle] {
+        &self.nodes
+    }
+
+    /// The number of master nodes in the cluster.
+    pub fn num_masters(&self) -> u16 {
+        self.num_masters
+    }
+
+    /// Handles for the master nodes (the first `masters` nodes by port order).
+    ///
+    /// Note: this reflects the *initial* topology. After a failover, the actual
+    /// roles may differ from the startup ordering.
+    pub fn master_nodes(&self) -> &[RedisServerHandle] {
+        &self.nodes[..self.num_masters as usize]
+    }
+
+    /// Handles for the replica nodes (all nodes after the masters by port order).
+    ///
+    /// Note: this reflects the *initial* topology. After a failover, the actual
+    /// roles may differ from the startup ordering.
+    pub fn replica_nodes(&self) -> &[RedisServerHandle] {
+        &self.nodes[self.num_masters as usize..]
+    }
+
+    /// Run `CONFIG SET` on all nodes.
+    pub async fn config_set_all(&self, key: &str, value: &str) -> Result<()> {
+        for node in &self.nodes {
+            node.run(&["CONFIG", "SET", key, value]).await?;
+        }
+        Ok(())
+    }
+
+    /// Run `CONFIG SET` on master nodes only (initial topology).
+    pub async fn config_set_masters(&self, key: &str, value: &str) -> Result<()> {
+        for node in self.master_nodes() {
+            node.run(&["CONFIG", "SET", key, value]).await?;
+        }
+        Ok(())
+    }
+
+    /// Run `CONFIG SET` on replica nodes only (initial topology).
+    pub async fn config_set_replicas(&self, key: &str, value: &str) -> Result<()> {
+        for node in self.replica_nodes() {
+            node.run(&["CONFIG", "SET", key, value]).await?;
+        }
+        Ok(())
     }
 
     /// Get a `RedisCli` for the seed node.
