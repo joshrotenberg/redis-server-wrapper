@@ -57,6 +57,10 @@ pub enum Error {
         binary: String,
     },
 
+    /// A TLS certificate generation error.
+    #[error("TLS error: {0}")]
+    Tls(String),
+
     /// An underlying I/O error.
     #[error(transparent)]
     Io(#[from] io::Error),
