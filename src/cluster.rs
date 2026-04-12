@@ -845,10 +845,11 @@ impl RedisClusterHandle {
     /// Check CLUSTER INFO for state=ok and all slots assigned.
     pub async fn is_healthy(&self) -> bool {
         for node in &self.nodes {
-            if let Ok(info) = node.run(&["CLUSTER", "INFO"]).await {
-                if info.contains("cluster_state:ok") && info.contains("cluster_slots_ok:16384") {
-                    return true;
-                }
+            if let Ok(info) = node.run(&["CLUSTER", "INFO"]).await
+                && info.contains("cluster_state:ok")
+                && info.contains("cluster_slots_ok:16384")
+            {
+                return true;
             }
         }
         false

@@ -35,7 +35,7 @@ jobs:
         rust: [stable]
         include:
           - os: ubuntu-latest
-            rust: 1.87.0
+            rust: 1.88.0
     steps:
       - uses: actions/checkout@v4
 
@@ -112,7 +112,7 @@ jobs:
       - name: Install Rust MSRV
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.87.0
+          toolchain: 1.88.0
 
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
