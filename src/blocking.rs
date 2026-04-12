@@ -1361,6 +1361,16 @@ impl RedisServer {
         self
     }
 
+    /// Disable automatic Redis Stack module detection and loading.
+    ///
+    /// By default, if the server binary is part of a redis-stack installation,
+    /// modules like RedisJSON, RediSearch, etc. are loaded automatically.
+    /// Call this to suppress that behavior.
+    pub fn no_stack_modules(mut self) -> Self {
+        self.inner = self.inner.no_stack_modules();
+        self
+    }
+
     /// Set an arbitrary config directive not covered by dedicated methods.
     pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.inner = self.inner.extra(key, value);
