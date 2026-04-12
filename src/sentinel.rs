@@ -750,9 +750,17 @@ impl RedisSentinelHandle {
         }
     }
 
-    /// Stop everything.
+    /// Stop everything via an escalating shutdown strategy.
+    ///
+    /// 1. Sends `SHUTDOWN NOSAVE` to each sentinel process.
+    /// 2. Waits 500ms for them to exit.
+    /// 3. For each sentinel PID that is still alive, calls [`crate::process::force_kill`].
+    /// 4. Calls [`crate::process::kill_by_port`] for each sentinel port as a safety net.
+    ///
+    /// Replicas and the master are stopped by their own handles' [`Drop`] impls,
+    /// which also use the escalating strategy.
     pub fn stop(&self) {
-        // Sentinels first.
+        // Step 1: graceful shutdown for each sentinel.
         for port in &self.sentinel_ports {
             self.tls
                 .apply(
@@ -762,6 +770,18 @@ impl RedisSentinelHandle {
                         .port(*port),
                 )
                 .shutdown();
+        }
+        // Step 2: grace period.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Step 3: force kill any sentinels still alive.
+        for pid in &self.sentinel_pids {
+            if crate::process::pid_alive(*pid) {
+                crate::process::force_kill(*pid);
+            }
+        }
+        // Step 4: port cleanup as safety net.
+        for port in &self.sentinel_ports {
+            crate::process::kill_by_port(*port);
         }
         // Replicas and master stopped by their handles' Drop.
     }
