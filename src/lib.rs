@@ -159,6 +159,7 @@ pub mod cli;
 #[cfg(feature = "tokio")]
 pub mod cluster;
 pub mod error;
+pub mod process;
 #[cfg(feature = "tokio")]
 pub mod sentinel;
 #[cfg(feature = "tokio")]

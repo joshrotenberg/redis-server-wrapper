@@ -2717,9 +2717,23 @@ impl RedisServerHandle {
         self.detached = true;
     }
 
-    /// Stop the server via SHUTDOWN NOSAVE.
+    /// Stop the server via an escalating shutdown strategy.
+    ///
+    /// 1. Sends `SHUTDOWN NOSAVE` via `redis-cli` for a graceful shutdown.
+    /// 2. Waits 500ms for the process to exit.
+    /// 3. If still alive, calls [`crate::process::force_kill`] (SIGTERM then SIGKILL).
+    /// 4. Attempts to release the port via [`crate::process::kill_by_port`] as a final safety net.
     pub fn stop(&self) {
+        // Step 1: graceful shutdown.
         self.cli.shutdown();
+        // Step 2: grace period.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Step 3: force kill if still alive.
+        if crate::process::pid_alive(self.pid) {
+            crate::process::force_kill(self.pid);
+        }
+        // Step 4: port cleanup as safety net.
+        crate::process::kill_by_port(self.config.port);
     }
 
     /// Wait until the server is ready (PING -> PONG).
