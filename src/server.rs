@@ -1995,6 +1995,21 @@ impl RedisServer {
         if let Some(ref pw) = self.config.password {
             cli = cli.password(pw);
         }
+        // When TLS is configured, enable it on the CLI so it can reach the server.
+        if self.config.tls_cert_file.is_some() && self.config.tls_key_file.is_some() {
+            cli = cli.tls(true);
+            if let Some(ref ca) = self.config.tls_ca_cert_file {
+                cli = cli.cacert(ca);
+            } else {
+                cli = cli.insecure(true);
+            }
+            if let Some(ref cert) = self.config.tls_cert_file {
+                cli = cli.cert(cert);
+            }
+            if let Some(ref key) = self.config.tls_key_file {
+                cli = cli.key(key);
+            }
+        }
 
         cli.wait_for_ready(Duration::from_secs(10)).await?;
 

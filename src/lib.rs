@@ -167,6 +167,9 @@ pub mod server;
 #[cfg(feature = "blocking")]
 pub mod blocking;
 
+#[cfg(feature = "test-tls")]
+pub mod tls;
+
 #[cfg(feature = "tokio")]
 pub use cli::{IpPreference, OutputFormat, RedisCli, RespProtocol};
 #[cfg(feature = "tokio")]

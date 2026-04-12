@@ -1676,6 +1676,56 @@ impl RedisClusterBuilder {
         self
     }
 
+    // -- TLS directives --
+
+    /// Set the TLS listening port for all cluster nodes.
+    pub fn tls_port(mut self, port: u16) -> Self {
+        self.inner = self.inner.tls_port(port);
+        self
+    }
+
+    /// Set the TLS certificate file path for all cluster nodes.
+    pub fn tls_cert_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.tls_cert_file(path);
+        self
+    }
+
+    /// Set the TLS private key file path for all cluster nodes.
+    pub fn tls_key_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.tls_key_file(path);
+        self
+    }
+
+    /// Set the TLS CA certificate file path for all cluster nodes.
+    pub fn tls_ca_cert_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.tls_ca_cert_file(path);
+        self
+    }
+
+    /// Set the TLS CA certificate directory for all cluster nodes.
+    pub fn tls_ca_cert_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.tls_ca_cert_dir(path);
+        self
+    }
+
+    /// Require TLS client authentication for all cluster nodes.
+    pub fn tls_auth_clients(mut self, auth: bool) -> Self {
+        self.inner = self.inner.tls_auth_clients(auth);
+        self
+    }
+
+    /// Use TLS for replication traffic between cluster nodes.
+    pub fn tls_replication(mut self, enable: bool) -> Self {
+        self.inner = self.inner.tls_replication(enable);
+        self
+    }
+
+    /// Use TLS for cluster bus communication between nodes.
+    pub fn tls_cluster(mut self, enable: bool) -> Self {
+        self.inner = self.inner.tls_cluster(enable);
+        self
+    }
+
     /// Set an arbitrary config directive for all cluster nodes.
     pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.inner = self.inner.extra(key, value);
@@ -1886,6 +1936,50 @@ impl RedisSentinelBuilder {
     /// Enable or disable AOF persistence for all data-bearing processes in the topology.
     pub fn appendonly(mut self, appendonly: bool) -> Self {
         self.inner = self.inner.appendonly(appendonly);
+        self
+    }
+
+    // -- TLS directives --
+
+    /// Set the TLS listening port for all nodes.
+    pub fn tls_port(mut self, port: u16) -> Self {
+        self.inner = self.inner.tls_port(port);
+        self
+    }
+
+    /// Set the TLS certificate file path for all nodes.
+    pub fn tls_cert_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.tls_cert_file(path);
+        self
+    }
+
+    /// Set the TLS private key file path for all nodes.
+    pub fn tls_key_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.tls_key_file(path);
+        self
+    }
+
+    /// Set the TLS CA certificate file path for all nodes.
+    pub fn tls_ca_cert_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.tls_ca_cert_file(path);
+        self
+    }
+
+    /// Set the TLS CA certificate directory for all nodes.
+    pub fn tls_ca_cert_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.tls_ca_cert_dir(path);
+        self
+    }
+
+    /// Require TLS client authentication for all nodes.
+    pub fn tls_auth_clients(mut self, auth: bool) -> Self {
+        self.inner = self.inner.tls_auth_clients(auth);
+        self
+    }
+
+    /// Use TLS for replication traffic between nodes.
+    pub fn tls_replication(mut self, enable: bool) -> Self {
+        self.inner = self.inner.tls_replication(enable);
         self
     }
 

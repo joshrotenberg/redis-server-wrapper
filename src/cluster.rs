@@ -1,6 +1,7 @@
 //! Redis Cluster lifecycle management built on `RedisServer`.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::cli::RedisCli;
@@ -101,6 +102,14 @@ pub struct RedisClusterBuilder {
     repl_diskless_sync_delay: Option<u32>,
     repl_ping_replica_period: Option<u32>,
     repl_timeout: Option<u32>,
+    tls_port: Option<u16>,
+    tls_cert_file: Option<PathBuf>,
+    tls_key_file: Option<PathBuf>,
+    tls_ca_cert_file: Option<PathBuf>,
+    tls_ca_cert_dir: Option<PathBuf>,
+    tls_auth_clients: Option<bool>,
+    tls_replication: Option<bool>,
+    tls_cluster: Option<bool>,
     extra: HashMap<String, String>,
     redis_server_bin: String,
     redis_cli_bin: String,
@@ -357,6 +366,56 @@ impl RedisClusterBuilder {
         self
     }
 
+    // -- TLS directives --
+
+    /// Set the TLS listening port for all cluster nodes.
+    pub fn tls_port(mut self, port: u16) -> Self {
+        self.tls_port = Some(port);
+        self
+    }
+
+    /// Set the TLS certificate file path for all cluster nodes.
+    pub fn tls_cert_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.tls_cert_file = Some(path.into());
+        self
+    }
+
+    /// Set the TLS private key file path for all cluster nodes.
+    pub fn tls_key_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.tls_key_file = Some(path.into());
+        self
+    }
+
+    /// Set the TLS CA certificate file path for all cluster nodes.
+    pub fn tls_ca_cert_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.tls_ca_cert_file = Some(path.into());
+        self
+    }
+
+    /// Set the TLS CA certificate directory for all cluster nodes.
+    pub fn tls_ca_cert_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.tls_ca_cert_dir = Some(path.into());
+        self
+    }
+
+    /// Require TLS client authentication for all cluster nodes.
+    pub fn tls_auth_clients(mut self, auth: bool) -> Self {
+        self.tls_auth_clients = Some(auth);
+        self
+    }
+
+    /// Use TLS for replication traffic between cluster nodes.
+    pub fn tls_replication(mut self, enable: bool) -> Self {
+        self.tls_replication = Some(enable);
+        self
+    }
+
+    /// Use TLS for cluster bus communication between nodes.
+    pub fn tls_cluster(mut self, enable: bool) -> Self {
+        self.tls_cluster = Some(enable);
+        self
+    }
+
     /// Set a per-node configuration callback.
     ///
     /// The callback receives a [`NodeContext`] containing the pre-configured
@@ -427,6 +486,30 @@ impl RedisClusterBuilder {
         (0..total).map(move |i| base + i)
     }
 
+    /// Whether TLS is configured (cert + key present).
+    fn has_tls(&self) -> bool {
+        self.tls_cert_file.is_some() && self.tls_key_file.is_some()
+    }
+
+    /// Apply TLS flags to a CLI instance based on builder config.
+    fn apply_tls_to_cli(&self, mut cli: RedisCli) -> RedisCli {
+        if self.has_tls() {
+            cli = cli.tls(true);
+            if let Some(ref ca) = self.tls_ca_cert_file {
+                cli = cli.cacert(ca);
+            } else {
+                cli = cli.insecure(true);
+            }
+            if let Some(ref cert) = self.tls_cert_file {
+                cli = cli.cert(cert);
+            }
+            if let Some(ref key) = self.tls_key_file {
+                cli = cli.key(key);
+            }
+        }
+        cli
+    }
+
     /// Start all nodes and form the cluster.
     pub async fn start(mut self) -> Result<RedisClusterHandle> {
         // Stop any leftover nodes from previous runs.
@@ -438,6 +521,7 @@ impl RedisClusterBuilder {
             if let Some(ref password) = self.password {
                 cli = cli.password(password);
             }
+            cli = self.apply_tls_to_cli(cli);
             cli.shutdown();
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -553,6 +637,31 @@ impl RedisClusterBuilder {
             if let Some(appendonly) = self.appendonly {
                 server = server.appendonly(appendonly);
             }
+            // TLS directives.
+            if let Some(port) = self.tls_port {
+                server = server.tls_port(port + index as u16);
+            }
+            if let Some(ref path) = self.tls_cert_file {
+                server = server.tls_cert_file(path);
+            }
+            if let Some(ref path) = self.tls_key_file {
+                server = server.tls_key_file(path);
+            }
+            if let Some(ref path) = self.tls_ca_cert_file {
+                server = server.tls_ca_cert_file(path);
+            }
+            if let Some(ref path) = self.tls_ca_cert_dir {
+                server = server.tls_ca_cert_dir(path);
+            }
+            if let Some(v) = self.tls_auth_clients {
+                server = server.tls_auth_clients(v);
+            }
+            if let Some(v) = self.tls_replication {
+                server = server.tls_replication(v);
+            }
+            if let Some(v) = self.tls_cluster {
+                server = server.tls_cluster(v);
+            }
             for (key, value) in &self.extra {
                 server = server.extra(key.clone(), value.clone());
             }
@@ -580,6 +689,7 @@ impl RedisClusterBuilder {
         if let Some(ref password) = self.password {
             cli = cli.password(password);
         }
+        cli = self.apply_tls_to_cli(cli);
         cli.cluster_create(&node_addrs, self.replicas_per_master)
             .await?;
 
@@ -593,7 +703,44 @@ impl RedisClusterBuilder {
             base_port: self.base_port,
             password: self.password,
             redis_cli_bin: self.redis_cli_bin,
+            tls: TlsConfig {
+                cert_file: self.tls_cert_file,
+                key_file: self.tls_key_file,
+                ca_cert_file: self.tls_ca_cert_file,
+            },
         })
+    }
+}
+
+/// TLS configuration snapshot stored in the handle for building CLI instances.
+#[derive(Clone, Debug, Default)]
+struct TlsConfig {
+    cert_file: Option<PathBuf>,
+    key_file: Option<PathBuf>,
+    ca_cert_file: Option<PathBuf>,
+}
+
+impl TlsConfig {
+    fn has_tls(&self) -> bool {
+        self.cert_file.is_some() && self.key_file.is_some()
+    }
+
+    fn apply(&self, mut cli: RedisCli) -> RedisCli {
+        if self.has_tls() {
+            cli = cli.tls(true);
+            if let Some(ref ca) = self.ca_cert_file {
+                cli = cli.cacert(ca);
+            } else {
+                cli = cli.insecure(true);
+            }
+            if let Some(ref cert) = self.cert_file {
+                cli = cli.cert(cert);
+            }
+            if let Some(ref key) = self.key_file {
+                cli = cli.key(key);
+            }
+        }
+        cli
     }
 }
 
@@ -605,6 +752,7 @@ pub struct RedisClusterHandle {
     base_port: u16,
     password: Option<String>,
     redis_cli_bin: String,
+    tls: TlsConfig,
 }
 
 /// Entry point for building a Redis Cluster topology.
@@ -652,6 +800,14 @@ impl RedisCluster {
             repl_diskless_sync_delay: None,
             repl_ping_replica_period: None,
             repl_timeout: None,
+            tls_port: None,
+            tls_cert_file: None,
+            tls_key_file: None,
+            tls_ca_cert_file: None,
+            tls_ca_cert_dir: None,
+            tls_auth_clients: None,
+            tls_replication: None,
+            tls_cluster: None,
             extra: HashMap::new(),
             redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),
@@ -785,6 +941,7 @@ impl RedisClusterHandle {
         if let Some(ref password) = self.password {
             cli = cli.password(password);
         }
+        cli = self.tls.apply(cli);
         cli
     }
 }

@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::path::PathBuf;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -45,6 +46,13 @@ pub struct RedisSentinelBuilder {
     appendonly: Option<bool>,
     down_after_ms: u64,
     failover_timeout_ms: u64,
+    tls_port: Option<u16>,
+    tls_cert_file: Option<PathBuf>,
+    tls_key_file: Option<PathBuf>,
+    tls_ca_cert_file: Option<PathBuf>,
+    tls_ca_cert_dir: Option<PathBuf>,
+    tls_auth_clients: Option<bool>,
+    tls_replication: Option<bool>,
     extra: HashMap<String, String>,
     redis_server_bin: String,
     redis_cli_bin: String,
@@ -160,6 +168,50 @@ impl RedisSentinelBuilder {
         self
     }
 
+    // -- TLS directives --
+
+    /// Set the TLS listening port for the master and replica nodes.
+    pub fn tls_port(mut self, port: u16) -> Self {
+        self.tls_port = Some(port);
+        self
+    }
+
+    /// Set the TLS certificate file path for all nodes.
+    pub fn tls_cert_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.tls_cert_file = Some(path.into());
+        self
+    }
+
+    /// Set the TLS private key file path for all nodes.
+    pub fn tls_key_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.tls_key_file = Some(path.into());
+        self
+    }
+
+    /// Set the TLS CA certificate file path for all nodes.
+    pub fn tls_ca_cert_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.tls_ca_cert_file = Some(path.into());
+        self
+    }
+
+    /// Set the TLS CA certificate directory for all nodes.
+    pub fn tls_ca_cert_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.tls_ca_cert_dir = Some(path.into());
+        self
+    }
+
+    /// Require TLS client authentication for all nodes.
+    pub fn tls_auth_clients(mut self, auth: bool) -> Self {
+        self.tls_auth_clients = Some(auth);
+        self
+    }
+
+    /// Use TLS for replication traffic between nodes.
+    pub fn tls_replication(mut self, enable: bool) -> Self {
+        self.tls_replication = Some(enable);
+        self
+    }
+
     /// Set an arbitrary config directive for all processes in the topology.
     pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.extra.insert(key.into(), value.into());
@@ -210,6 +262,56 @@ impl RedisSentinelBuilder {
         self
     }
 
+    /// Whether TLS is configured (cert + key present).
+    fn has_tls(&self) -> bool {
+        self.tls_cert_file.is_some() && self.tls_key_file.is_some()
+    }
+
+    /// Apply TLS flags to a CLI instance based on builder config.
+    fn apply_tls_to_cli(&self, mut cli: RedisCli) -> RedisCli {
+        if self.has_tls() {
+            cli = cli.tls(true);
+            if let Some(ref ca) = self.tls_ca_cert_file {
+                cli = cli.cacert(ca);
+            } else {
+                cli = cli.insecure(true);
+            }
+            if let Some(ref cert) = self.tls_cert_file {
+                cli = cli.cert(cert);
+            }
+            if let Some(ref key) = self.tls_key_file {
+                cli = cli.key(key);
+            }
+        }
+        cli
+    }
+
+    /// Apply TLS config to a server builder.
+    fn apply_tls_to_server(&self, mut server: RedisServer) -> RedisServer {
+        if let Some(port) = self.tls_port {
+            server = server.tls_port(port);
+        }
+        if let Some(ref path) = self.tls_cert_file {
+            server = server.tls_cert_file(path);
+        }
+        if let Some(ref path) = self.tls_key_file {
+            server = server.tls_key_file(path);
+        }
+        if let Some(ref path) = self.tls_ca_cert_file {
+            server = server.tls_ca_cert_file(path);
+        }
+        if let Some(ref path) = self.tls_ca_cert_dir {
+            server = server.tls_ca_cert_dir(path);
+        }
+        if let Some(v) = self.tls_auth_clients {
+            server = server.tls_auth_clients(v);
+        }
+        if let Some(v) = self.tls_replication {
+            server = server.tls_replication(v);
+        }
+        server
+    }
+
     fn replica_ports(&self) -> impl Iterator<Item = u16> {
         let base = self.replica_base_port;
         let n = self.num_replicas;
@@ -235,11 +337,13 @@ impl RedisSentinelBuilder {
 
         // Kill leftover processes.
         let cli_for_shutdown = |port: u16| {
-            RedisCli::new()
-                .bin(&self.redis_cli_bin)
-                .host(&self.bind)
-                .port(port)
-                .shutdown();
+            let cli = self.apply_tls_to_cli(
+                RedisCli::new()
+                    .bin(&self.redis_cli_bin)
+                    .host(&self.bind)
+                    .port(port),
+            );
+            cli.shutdown();
         };
         cli_for_shutdown(self.master_port);
         for port in self.replica_ports() {
@@ -270,6 +374,7 @@ impl RedisSentinelBuilder {
             .appendonly(appendonly)
             .redis_server_bin(&self.redis_server_bin)
             .redis_cli_bin(&self.redis_cli_bin);
+        master = self.apply_tls_to_server(master);
         if let Some(ref logfile) = self.logfile {
             master = master.logfile(logfile.clone());
         }
@@ -296,6 +401,7 @@ impl RedisSentinelBuilder {
                 .replicaof(self.bind.clone(), self.master_port)
                 .redis_server_bin(&self.redis_server_bin)
                 .redis_cli_bin(&self.redis_cli_bin);
+            replica = self.apply_tls_to_server(replica);
             if let Some(ref logfile) = self.logfile {
                 replica = replica.logfile(logfile.clone());
             }
@@ -355,6 +461,34 @@ impl RedisSentinelBuilder {
                     failover_timeout = self.failover_timeout_ms,
                 ));
             }
+            // TLS directives for sentinels.
+            if let Some(ref path) = self.tls_cert_file {
+                conf.push_str(&format!("tls-cert-file {}\n", path.display()));
+            }
+            if let Some(ref path) = self.tls_key_file {
+                conf.push_str(&format!("tls-key-file {}\n", path.display()));
+            }
+            if let Some(ref path) = self.tls_ca_cert_file {
+                conf.push_str(&format!("tls-ca-cert-file {}\n", path.display()));
+            }
+            if let Some(ref path) = self.tls_ca_cert_dir {
+                conf.push_str(&format!("tls-ca-cert-dir {}\n", path.display()));
+            }
+            if let Some(tls_port) = self.tls_port {
+                conf.push_str(&format!("tls-port {tls_port}\n"));
+            }
+            if let Some(v) = self.tls_auth_clients {
+                conf.push_str(&format!(
+                    "tls-auth-clients {}\n",
+                    if v { "yes" } else { "no" }
+                ));
+            }
+            if let Some(v) = self.tls_replication {
+                conf.push_str(&format!(
+                    "tls-replication {}\n",
+                    if v { "yes" } else { "no" }
+                ));
+            }
             for (key, value) in &self.extra {
                 conf.push_str(&format!("{key} {value}\n"));
             }
@@ -372,10 +506,12 @@ impl RedisSentinelBuilder {
                 return Err(Error::SentinelStart { port });
             }
 
-            let cli = RedisCli::new()
-                .bin(&self.redis_cli_bin)
-                .host(&self.bind)
-                .port(port);
+            let cli = self.apply_tls_to_cli(
+                RedisCli::new()
+                    .bin(&self.redis_cli_bin)
+                    .host(&self.bind)
+                    .port(port),
+            );
             cli.wait_for_ready(Duration::from_secs(10)).await?;
 
             let pid_path = dir.join("sentinel.pid");
@@ -400,7 +536,44 @@ impl RedisSentinelBuilder {
             redis_cli_bin: self.redis_cli_bin,
             num_sentinels: self.num_sentinels,
             monitored_masters,
+            tls: TlsConfig {
+                cert_file: self.tls_cert_file,
+                key_file: self.tls_key_file,
+                ca_cert_file: self.tls_ca_cert_file,
+            },
         })
+    }
+}
+
+/// TLS configuration snapshot stored in the handle for building CLI instances.
+#[derive(Clone, Debug, Default)]
+struct TlsConfig {
+    cert_file: Option<PathBuf>,
+    key_file: Option<PathBuf>,
+    ca_cert_file: Option<PathBuf>,
+}
+
+impl TlsConfig {
+    fn has_tls(&self) -> bool {
+        self.cert_file.is_some() && self.key_file.is_some()
+    }
+
+    fn apply(&self, mut cli: RedisCli) -> RedisCli {
+        if self.has_tls() {
+            cli = cli.tls(true);
+            if let Some(ref ca) = self.ca_cert_file {
+                cli = cli.cacert(ca);
+            } else {
+                cli = cli.insecure(true);
+            }
+            if let Some(ref cert) = self.cert_file {
+                cli = cli.cert(cert);
+            }
+            if let Some(ref key) = self.key_file {
+                cli = cli.key(key);
+            }
+        }
+        cli
     }
 }
 
@@ -416,6 +589,7 @@ pub struct RedisSentinelHandle {
     redis_cli_bin: String,
     num_sentinels: u16,
     monitored_masters: Vec<MonitoredMaster>,
+    tls: TlsConfig,
 }
 
 /// Entry point for building a Redis Sentinel topology.
@@ -441,6 +615,13 @@ impl RedisSentinel {
             appendonly: None,
             down_after_ms: 5000,
             failover_timeout_ms: 10000,
+            tls_port: None,
+            tls_cert_file: None,
+            tls_key_file: None,
+            tls_ca_cert_file: None,
+            tls_ca_cert_dir: None,
+            tls_auth_clients: None,
+            tls_replication: None,
             extra: HashMap::new(),
             redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),
@@ -514,10 +695,12 @@ impl RedisSentinelHandle {
     /// primary master configured for this topology.
     pub async fn poke_master(&self, master_name: &str) -> Result<HashMap<String, String>> {
         for port in &self.sentinel_ports {
-            let cli = RedisCli::new()
-                .bin(&self.redis_cli_bin)
-                .host(&self.bind)
-                .port(*port);
+            let cli = self.tls.apply(
+                RedisCli::new()
+                    .bin(&self.redis_cli_bin)
+                    .host(&self.bind)
+                    .port(*port),
+            );
             if let Ok(raw) = cli.run(&["SENTINEL", "MASTER", master_name]).await {
                 return Ok(parse_flat_kv(&raw));
             }
@@ -571,10 +754,13 @@ impl RedisSentinelHandle {
     pub fn stop(&self) {
         // Sentinels first.
         for port in &self.sentinel_ports {
-            RedisCli::new()
-                .bin(&self.redis_cli_bin)
-                .host(&self.bind)
-                .port(*port)
+            self.tls
+                .apply(
+                    RedisCli::new()
+                        .bin(&self.redis_cli_bin)
+                        .host(&self.bind)
+                        .port(*port),
+                )
                 .shutdown();
         }
         // Replicas and master stopped by their handles' Drop.
