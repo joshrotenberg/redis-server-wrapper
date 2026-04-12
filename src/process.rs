@@ -1,9 +1,13 @@
-//! OS-level process utilities for robust server shutdown.
+//! OS-level process utilities for robust server shutdown and stale process cleanup.
 //!
-//! This module provides functions for checking process liveness and performing
-//! escalating kills, including process-group kills to handle wrapper scripts
-//! that spawn child processes.
+//! This module provides functions for checking process liveness, performing
+//! escalating kills (including process-group kills to handle wrapper scripts),
+//! and cleaning up stale pidfiles from crashed test runs.
+//!
+//! All utilities are intentionally synchronous so they can be used from
+//! [`Drop`] implementations as well as from async startup paths.
 
+use std::path::Path;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
@@ -63,6 +67,16 @@ pub fn force_kill(pid: u32) {
         // Also kill the individual PID as fallback.
         let _ = Command::new("kill").args(["-9", &pid_str]).output();
     }
+}
+
+/// Read a PID from a pidfile.
+///
+/// Returns `None` if the file does not exist, cannot be read, or its contents
+/// cannot be parsed as a `u32`.
+pub fn read_pidfile(path: &Path) -> Option<u32> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
 }
 
 /// Kill any process listening on a TCP port via `lsof -ti :$port`.

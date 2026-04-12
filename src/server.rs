@@ -1969,6 +1969,17 @@ impl RedisServer {
         }
 
         let node_dir = self.config.dir.join(format!("node-{}", self.config.port));
+
+        // Clean up any stale process from a previous run before (re)creating
+        // the node directory. This handles test crashes that leave orphaned
+        // redis-server processes behind.
+        let stale_pidfile = node_dir.join("redis.pid");
+        if let Some(stale_pid) = crate::process::read_pidfile(&stale_pidfile)
+            && crate::process::pid_alive(stale_pid)
+        {
+            crate::process::force_kill(stale_pid);
+        }
+
         fs::create_dir_all(&node_dir)?;
 
         let conf_path = node_dir.join("redis.conf");
