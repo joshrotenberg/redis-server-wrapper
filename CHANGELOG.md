@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.4.0...v0.4.1) - 2026-04-13
+
+### Fixed
+
+- prevent kill_by_port from killing the calling process ([#77](https://github.com/joshrotenberg/redis-server-wrapper/pull/77))
+
 ## [0.4.0](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.3.0...v0.4.0) - 2026-04-13
 
 ### Added
