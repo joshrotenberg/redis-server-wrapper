@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.3.0...v0.4.0) - 2026-04-13
+
+### Added
+
+- add chaos module with fault injection primitives ([#74](https://github.com/joshrotenberg/redis-server-wrapper/pull/74))
+- auto-detect redis-stack-server binary and load modules ([#70](https://github.com/joshrotenberg/redis-server-wrapper/pull/70))
+- add stale pidfile cleanup before server start ([#71](https://github.com/joshrotenberg/redis-server-wrapper/pull/71))
+- add robust multi-layer shutdown with escalating cleanup ([#72](https://github.com/joshrotenberg/redis-server-wrapper/pull/72))
+- add TLS cert generation and wire TLS through internal CLIs ([#64](https://github.com/joshrotenberg/redis-server-wrapper/pull/64))
+
+### Other
+
+- bump MSRV to 1.88 to fix time crate vulnerability ([#73](https://github.com/joshrotenberg/redis-server-wrapper/pull/73))
+
 ## [0.3.0](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.2.0...v0.3.0) - 2026-04-06
 
 ### Added
