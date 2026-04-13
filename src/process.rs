@@ -79,7 +79,11 @@ pub fn read_pidfile(path: &Path) -> Option<u32> {
         .and_then(|s| s.trim().parse::<u32>().ok())
 }
 
-/// Kill any process listening on a TCP port via `lsof -ti :$port`.
+/// Kill any process **listening** on a TCP port via `lsof`.
+///
+/// Uses `-sTCP:LISTEN` to restrict matches to server processes, avoiding
+/// false positives on client connections to the same port. Also filters
+/// out the calling process's own PID as a safeguard.
 ///
 /// Best-effort -- all errors are silently ignored. This is intended as a
 /// final safety net to release the port after shutdown, not as a primary
@@ -94,16 +98,20 @@ pub fn read_pidfile(path: &Path) -> Option<u32> {
 /// ```
 pub fn kill_by_port(port: u16) {
     let port_str = format!(":{port}");
-    let Ok(output) = Command::new("lsof").args(["-ti", &port_str]).output() else {
+    let Ok(output) = Command::new("lsof")
+        .args(["-ti", &port_str, "-sTCP:LISTEN"])
+        .output()
+    else {
         return;
     };
     if !output.status.success() {
         return;
     }
+    let my_pid = std::process::id().to_string();
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
         let line = line.trim();
-        if !line.is_empty() {
+        if !line.is_empty() && line != my_pid {
             let _ = Command::new("kill").args(["-9", line]).output();
         }
     }
