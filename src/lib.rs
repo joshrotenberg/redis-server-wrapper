@@ -164,6 +164,7 @@ pub mod process;
 pub mod sentinel;
 #[cfg(feature = "tokio")]
 pub mod server;
+pub mod stack;
 
 #[cfg(feature = "blocking")]
 pub mod blocking;

@@ -455,10 +455,14 @@ pub struct RedisServerConfig {
     pub extra: HashMap<String, String>,
 
     // -- binary paths --
-    /// Path to the `redis-server` binary (default: `"redis-server"`).
+    /// Path to the `redis-server` binary (default: auto-detected).
     pub redis_server_bin: String,
     /// Path to the `redis-cli` binary (default: `"redis-cli"`).
     pub redis_cli_bin: String,
+
+    // -- stack --
+    /// When `true`, skip automatic Redis Stack module detection and loading.
+    pub no_stack_modules: bool,
 }
 
 /// AOF fsync policy.
@@ -735,8 +739,9 @@ impl Default for RedisServerConfig {
             propagation_error_behavior: None,
             tracking_table_max_keys: None,
             extra: HashMap::new(),
-            redis_server_bin: "redis-server".into(),
+            redis_server_bin: crate::stack::detect_server_bin(),
             redis_cli_bin: "redis-cli".into(),
+            no_stack_modules: false,
         }
     }
 }
@@ -1946,6 +1951,16 @@ impl RedisServer {
         self
     }
 
+    /// Disable automatic Redis Stack module detection and loading.
+    ///
+    /// By default, if the server binary is part of a redis-stack installation,
+    /// modules like RedisJSON, RediSearch, etc. are loaded automatically.
+    /// Call this to suppress that behavior.
+    pub fn no_stack_modules(mut self) -> Self {
+        self.config.no_stack_modules = true;
+        self
+    }
+
     /// Set an arbitrary config directive not covered by dedicated methods.
     pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.config.extra.insert(key.into(), value.into());
@@ -1986,8 +2001,14 @@ impl RedisServer {
         let conf_content = self.generate_config(&node_dir);
         fs::write(&conf_path, conf_content)?;
 
+        let module_args = if self.config.no_stack_modules {
+            Vec::new()
+        } else {
+            crate::stack::detect_stack_modules(&self.config.redis_server_bin)
+        };
         let status = Command::new(&self.config.redis_server_bin)
             .arg(&conf_path)
+            .args(&module_args)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
