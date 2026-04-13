@@ -1,6 +1,6 @@
 [package]
 name = "redis-server-wrapper"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 authors = ["Josh Rotenberg <joshrotenberg@gmail.com>"]
 description = "Type-safe wrapper for redis-server and redis-cli with builder pattern APIs"
