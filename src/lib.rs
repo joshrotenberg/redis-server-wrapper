@@ -154,6 +154,7 @@
 //! You can also call `.stop()` explicitly on any handle to shut down early, or
 //! `.detach()` on a server handle to consume it without stopping the process.
 
+pub mod chaos;
 #[cfg(feature = "tokio")]
 pub mod cli;
 #[cfg(feature = "tokio")]
