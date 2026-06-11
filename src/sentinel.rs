@@ -515,10 +515,20 @@ impl RedisSentinelBuilder {
             cli.wait_for_ready(Duration::from_secs(10)).await?;
 
             let pid_path = dir.join("sentinel.pid");
-            let pid: u32 = fs::read_to_string(&pid_path)?
-                .trim()
-                .parse()
-                .map_err(|_| Error::SentinelStart { port })?;
+            let pid: u32 = {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+                loop {
+                    if let Ok(s) = fs::read_to_string(&pid_path)
+                        && let Ok(p) = s.trim().parse::<u32>()
+                    {
+                        break p;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(Error::SentinelStart { port });
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            };
 
             sentinel_handles.push((port, pid, cli));
         }
