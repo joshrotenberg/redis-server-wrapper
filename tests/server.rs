@@ -1,4 +1,5 @@
 use redis_server_wrapper::{LogLevel, RedisServer};
+use std::fs;
 
 #[tokio::test]
 async fn start_and_ping() {
@@ -94,4 +95,22 @@ async fn detach_leaves_server_running() {
     cli.shutdown();
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert!(!cli.ping().await);
+}
+
+#[tokio::test]
+async fn dir_with_spaces() {
+    // Verify that a working directory whose path contains a space does not
+    // cause redis-server to fail parsing the generated config.
+    let base = std::env::temp_dir().join("redis wrapper test");
+    fs::create_dir_all(&base).expect("failed to create temp dir with space");
+
+    let server = RedisServer::new()
+        .port(16406)
+        .dir(&base)
+        .loglevel(LogLevel::Warning)
+        .start()
+        .await
+        .expect("server with space in dir should start cleanly");
+
+    assert!(server.is_alive().await);
 }

@@ -439,9 +439,9 @@ impl RedisSentinelBuilder {
                 "port {port}\n\
                  bind {bind}\n\
                  daemonize yes\n\
-                 pidfile {dir}/sentinel.pid\n\
-                 logfile {logfile}\n\
-                 dir {dir}\n",
+                 pidfile \"{dir}/sentinel.pid\"\n\
+                 logfile \"{logfile}\"\n\
+                 dir \"{dir}\"\n",
                 port = port,
                 bind = self.bind,
                 dir = dir.display(),
@@ -463,16 +463,16 @@ impl RedisSentinelBuilder {
             }
             // TLS directives for sentinels.
             if let Some(ref path) = self.tls_cert_file {
-                conf.push_str(&format!("tls-cert-file {}\n", path.display()));
+                conf.push_str(&format!("tls-cert-file \"{}\"\n", path.display()));
             }
             if let Some(ref path) = self.tls_key_file {
-                conf.push_str(&format!("tls-key-file {}\n", path.display()));
+                conf.push_str(&format!("tls-key-file \"{}\"\n", path.display()));
             }
             if let Some(ref path) = self.tls_ca_cert_file {
-                conf.push_str(&format!("tls-ca-cert-file {}\n", path.display()));
+                conf.push_str(&format!("tls-ca-cert-file \"{}\"\n", path.display()));
             }
             if let Some(ref path) = self.tls_ca_cert_dir {
-                conf.push_str(&format!("tls-ca-cert-dir {}\n", path.display()));
+                conf.push_str(&format!("tls-ca-cert-dir \"{}\"\n", path.display()));
             }
             if let Some(tls_port) = self.tls_port {
                 conf.push_str(&format!("tls-port {tls_port}\n"));
