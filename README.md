@@ -29,7 +29,7 @@ Add to `Cargo.toml` for async use (the default):
 
 ```toml
 [dev-dependencies]
-redis-server-wrapper = "0.1"
+redis-server-wrapper = "0.4"
 ```
 
 The `tokio` feature is enabled by default. To use the synchronous blocking API instead,
@@ -37,14 +37,14 @@ disable default features and enable `blocking`:
 
 ```toml
 [dev-dependencies]
-redis-server-wrapper = { version = "0.1", default-features = false, features = ["blocking"] }
+redis-server-wrapper = { version = "0.4", default-features = false, features = ["blocking"] }
 ```
 
 To use both async and blocking APIs together:
 
 ```toml
 [dev-dependencies]
-redis-server-wrapper = { version = "0.1", features = ["blocking"] }
+redis-server-wrapper = { version = "0.4", features = ["blocking"] }
 ```
 
 ## Usage
@@ -57,15 +57,18 @@ for synchronous use.
 ```rust
 use redis_server_wrapper::RedisServer;
 
-let server = RedisServer::new()
-    .port(6400)
-    .bind("127.0.0.1")
-    .start()
-    .await
-    .unwrap();
+#[tokio::test]
+async fn test_server() {
+    let server = RedisServer::new()
+        .port(6400)
+        .bind("127.0.0.1")
+        .start()
+        .await
+        .unwrap();
 
-assert!(server.is_alive().await);
-// Stopped automatically on drop.
+    assert!(server.is_alive().await);
+    // Stopped automatically on drop.
+}
 ```
 
 The server process is stopped via `SHUTDOWN NOSAVE` when the handle is dropped.
@@ -79,17 +82,20 @@ a raw Redis directive with `.extra(key, value)`:
 ```rust
 use redis_server_wrapper::{LogLevel, RedisServer};
 
-let server = RedisServer::new()
-    .port(6400)
-    .bind("127.0.0.1")
-    .password("secret")
-    .loglevel(LogLevel::Warning)
-    .appendonly(true)
-    .extra("maxmemory", "256mb")
-    .extra("maxmemory-policy", "allkeys-lru")
-    .start()
-    .await
-    .unwrap();
+#[tokio::test]
+async fn test_server_config() {
+    let server = RedisServer::new()
+        .port(6400)
+        .bind("127.0.0.1")
+        .password("secret")
+        .loglevel(LogLevel::Warning)
+        .appendonly(true)
+        .extra("maxmemory", "256mb")
+        .extra("maxmemory-policy", "allkeys-lru")
+        .start()
+        .await
+        .unwrap();
+}
 ```
 
 ### Running Commands
@@ -99,11 +105,14 @@ The handle exposes a `RedisCli` you can use to run arbitrary commands against th
 ```rust
 use redis_server_wrapper::RedisServer;
 
-let server = RedisServer::new().port(6400).start().await.unwrap();
+#[tokio::test]
+async fn test_run_commands() {
+    let server = RedisServer::new().port(6400).start().await.unwrap();
 
-server.run(&["SET", "key", "value"]).await.unwrap();
-let val = server.run(&["GET", "key"]).await.unwrap();
-assert_eq!(val.trim(), "value");
+    server.run(&["SET", "key", "value"]).await.unwrap();
+    let val = server.run(&["GET", "key"]).await.unwrap();
+    assert_eq!(val.trim(), "value");
+}
 ```
 
 You can also get a `RedisCli` instance directly from the handle:
@@ -111,10 +120,13 @@ You can also get a `RedisCli` instance directly from the handle:
 ```rust
 use redis_server_wrapper::RedisServer;
 
-let server = RedisServer::new().port(6400).start().await.unwrap();
-let cli = server.cli();
-let pong = cli.ping().await;
-assert!(pong);
+#[tokio::test]
+async fn test_cli() {
+    let server = RedisServer::new().port(6400).start().await.unwrap();
+    let cli = server.cli();
+    let pong = cli.ping().await;
+    assert!(pong);
+}
 ```
 
 ### Cluster
@@ -122,15 +134,18 @@ assert!(pong);
 ```rust
 use redis_server_wrapper::RedisCluster;
 
-let cluster = RedisCluster::builder()
-    .masters(3)
-    .replicas_per_master(1)
-    .base_port(7000)
-    .start()
-    .await
-    .unwrap();
+#[tokio::test]
+async fn test_cluster() {
+    let cluster = RedisCluster::builder()
+        .masters(3)
+        .replicas_per_master(1)
+        .base_port(7000)
+        .start()
+        .await
+        .unwrap();
 
-assert!(cluster.is_healthy().await);
+    assert!(cluster.is_healthy().await);
+}
 ```
 
 ### Sentinel
@@ -138,15 +153,18 @@ assert!(cluster.is_healthy().await);
 ```rust
 use redis_server_wrapper::RedisSentinel;
 
-let sentinel = RedisSentinel::builder()
-    .master_port(6390)
-    .replicas(2)
-    .sentinels(3)
-    .start()
-    .await
-    .unwrap();
+#[tokio::test]
+async fn test_sentinel() {
+    let sentinel = RedisSentinel::builder()
+        .master_port(6390)
+        .replicas(2)
+        .sentinels(3)
+        .start()
+        .await
+        .unwrap();
 
-assert!(sentinel.is_healthy().await);
+    assert!(sentinel.is_healthy().await);
+}
 ```
 
 ## Error Handling
@@ -157,11 +175,14 @@ start failures, timeouts, CLI errors, and underlying I/O errors:
 ```rust
 use redis_server_wrapper::{Error, RedisServer};
 
-match RedisServer::new().port(6400).start().await {
-    Ok(server) => println!("running on {}", server.addr()),
-    Err(Error::ServerStart { port }) => eprintln!("could not start on port {port}"),
-    Err(Error::BinaryNotFound { binary }) => eprintln!("{binary} not found on PATH"),
-    Err(e) => eprintln!("unexpected: {e}"),
+#[tokio::test]
+async fn test_error_handling() {
+    match RedisServer::new().port(6400).start().await {
+        Ok(server) => println!("running on {}", server.addr()),
+        Err(Error::ServerStart { port }) => eprintln!("could not start on port {port}"),
+        Err(Error::BinaryNotFound { binary }) => eprintln!("{binary} not found on PATH"),
+        Err(e) => eprintln!("unexpected: {e}"),
+    }
 }
 ```
 
@@ -171,7 +192,7 @@ Enable the `blocking` feature for synchronous wrappers that require no async run
 
 ```toml
 [dev-dependencies]
-redis-server-wrapper = { version = "0.1", features = ["blocking"] }
+redis-server-wrapper = { version = "0.4", features = ["blocking"] }
 ```
 
 The `blocking` module mirrors the async API. Every operation blocks the calling thread
