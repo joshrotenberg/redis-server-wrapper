@@ -2046,13 +2046,22 @@ impl RedisServer {
         cli.wait_for_ready(Duration::from_secs(10)).await?;
 
         let pid_path = node_dir.join("redis.pid");
-        let pid: u32 = fs::read_to_string(&pid_path)
-            .map_err(Error::Io)?
-            .trim()
-            .parse()
-            .map_err(|_| Error::ServerStart {
-                port: self.config.port,
-            })?;
+        let pid: u32 = {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            loop {
+                if let Ok(s) = fs::read_to_string(&pid_path)
+                    && let Ok(p) = s.trim().parse::<u32>()
+                {
+                    break p;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(Error::ServerStart {
+                        port: self.config.port,
+                    });
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        };
 
         Ok(RedisServerHandle {
             config: self.config,
