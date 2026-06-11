@@ -2069,8 +2069,8 @@ impl RedisServer {
             "port {port}\n\
              bind {bind}\n\
              daemonize {daemonize}\n\
-             pidfile {dir}/redis.pid\n\
-             dir {dir}\n\
+             pidfile \"{dir}/redis.pid\"\n\
+             dir \"{dir}\"\n\
              loglevel {level}\n\
              protected-mode {protected}\n",
             port = self.config.port,
@@ -2087,14 +2087,14 @@ impl RedisServer {
             .as_deref()
             .map(str::to_owned)
             .unwrap_or_else(|| format!("{}/redis.log", node_dir.display()));
-        conf.push_str(&format!("logfile {logfile}\n"));
+        conf.push_str(&format!("logfile \"{logfile}\"\n"));
 
         // -- network --
         if let Some(backlog) = self.config.tcp_backlog {
             conf.push_str(&format!("tcp-backlog {backlog}\n"));
         }
         if let Some(ref path) = self.config.unixsocket {
-            conf.push_str(&format!("unixsocket {}\n", path.display()));
+            conf.push_str(&format!("unixsocket \"{}\"\n", path.display()));
         }
         if let Some(perm) = self.config.unixsocketperm {
             conf.push_str(&format!("unixsocketperm {perm}\n"));
@@ -2111,34 +2111,34 @@ impl RedisServer {
             conf.push_str(&format!("tls-port {port}\n"));
         }
         if let Some(ref path) = self.config.tls_cert_file {
-            conf.push_str(&format!("tls-cert-file {}\n", path.display()));
+            conf.push_str(&format!("tls-cert-file \"{}\"\n", path.display()));
         }
         if let Some(ref path) = self.config.tls_key_file {
-            conf.push_str(&format!("tls-key-file {}\n", path.display()));
+            conf.push_str(&format!("tls-key-file \"{}\"\n", path.display()));
         }
         if let Some(ref pass) = self.config.tls_key_file_pass {
             conf.push_str(&format!("tls-key-file-pass {pass}\n"));
         }
         if let Some(ref path) = self.config.tls_ca_cert_file {
-            conf.push_str(&format!("tls-ca-cert-file {}\n", path.display()));
+            conf.push_str(&format!("tls-ca-cert-file \"{}\"\n", path.display()));
         }
         if let Some(ref path) = self.config.tls_ca_cert_dir {
-            conf.push_str(&format!("tls-ca-cert-dir {}\n", path.display()));
+            conf.push_str(&format!("tls-ca-cert-dir \"{}\"\n", path.display()));
         }
         if let Some(auth) = self.config.tls_auth_clients {
             conf.push_str(&format!("tls-auth-clients {}\n", yn(auth)));
         }
         if let Some(ref path) = self.config.tls_client_cert_file {
-            conf.push_str(&format!("tls-client-cert-file {}\n", path.display()));
+            conf.push_str(&format!("tls-client-cert-file \"{}\"\n", path.display()));
         }
         if let Some(ref path) = self.config.tls_client_key_file {
-            conf.push_str(&format!("tls-client-key-file {}\n", path.display()));
+            conf.push_str(&format!("tls-client-key-file \"{}\"\n", path.display()));
         }
         if let Some(ref pass) = self.config.tls_client_key_file_pass {
             conf.push_str(&format!("tls-client-key-file-pass {pass}\n"));
         }
         if let Some(ref path) = self.config.tls_dh_params_file {
-            conf.push_str(&format!("tls-dh-params-file {}\n", path.display()));
+            conf.push_str(&format!("tls-dh-params-file \"{}\"\n", path.display()));
         }
         if let Some(ref ciphers) = self.config.tls_ciphers {
             conf.push_str(&format!("tls-ciphers {ciphers}\n"));
@@ -2345,17 +2345,17 @@ impl RedisServer {
             conf.push_str(&format!("requirepass {pw}\n"));
         }
         if let Some(ref path) = self.config.acl_file {
-            conf.push_str(&format!("aclfile {}\n", path.display()));
+            conf.push_str(&format!("aclfile \"{}\"\n", path.display()));
         }
 
         // -- cluster --
         if self.config.cluster_enabled {
             conf.push_str("cluster-enabled yes\n");
             if let Some(ref path) = self.config.cluster_config_file {
-                conf.push_str(&format!("cluster-config-file {}\n", path.display()));
+                conf.push_str(&format!("cluster-config-file \"{}\"\n", path.display()));
             } else {
                 conf.push_str(&format!(
-                    "cluster-config-file {}/nodes.conf\n",
+                    "cluster-config-file \"{}/nodes.conf\"\n",
                     node_dir.display()
                 ));
             }
@@ -2476,7 +2476,7 @@ impl RedisServer {
 
         // -- modules --
         for path in &self.config.loadmodule {
-            conf.push_str(&format!("loadmodule {}\n", path.display()));
+            conf.push_str(&format!("loadmodule \"{}\"\n", path.display()));
         }
 
         // -- advanced --
@@ -2661,7 +2661,7 @@ impl RedisServer {
             conf.push_str(&format!("ignore-warnings {warning}\n"));
         }
         for path in &self.config.include {
-            conf.push_str(&format!("include {}\n", path.display()));
+            conf.push_str(&format!("include \"{}\"\n", path.display()));
         }
         if let Some(enable) = self.config.jemalloc_bg_thread {
             conf.push_str(&format!("jemalloc-bg-thread {}\n", yn(enable)));
