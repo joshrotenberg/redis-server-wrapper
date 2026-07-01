@@ -165,8 +165,251 @@ pub fn recover(cluster: &RedisClusterHandle) {
     }
 }
 
-// TODO(#80): slot-migration (reshard) orchestration -- migrate_slot,
-// migrate_slots, and ReshardGuard.
+// ---------------------------------------------------------------------------
+// Slot migration (reshard)
+// ---------------------------------------------------------------------------
+
+/// Migrate a single hash slot from one master to another.
+///
+/// Runs the standard Redis Cluster reshard sequence: `CLUSTER SETSLOT
+/// IMPORTING` on `to`, `SETSLOT MIGRATING` on `from`, `CLUSTER
+/// GETKEYSINSLOT` + `MIGRATE` for every key in the slot, then `SETSLOT
+/// NODE` on every master so the new ownership propagates through the
+/// cluster.
+///
+/// Returns the number of keys migrated.
+///
+/// While the migration is in flight, clients that address `from` for a key
+/// already moved to `to` get a `-ASK` redirect. To hold the cluster in that
+/// window deterministically (e.g. to test client ASK handling), use
+/// [`ReshardGuard`] directly instead of this function.
+#[cfg(feature = "tokio")]
+pub async fn migrate_slot(
+    cluster: &RedisClusterHandle,
+    slot: u16,
+    from: &RedisServerHandle,
+    to: &RedisServerHandle,
+) -> Result<usize> {
+    let guard = ReshardGuard::start(cluster, slot, from, to).await?;
+    let moved = guard.migrate_keys().await?;
+    guard.complete().await?;
+    Ok(moved)
+}
+
+/// Migrate a range of hash slots from one master to another.
+///
+/// Calls [`migrate_slot`] for each slot in `slots` in order. Returns the
+/// total number of keys migrated across the whole range.
+#[cfg(feature = "tokio")]
+pub async fn migrate_slots(
+    cluster: &RedisClusterHandle,
+    slots: std::ops::RangeInclusive<u16>,
+    from: &RedisServerHandle,
+    to: &RedisServerHandle,
+) -> Result<usize> {
+    let mut moved = 0;
+    for slot in slots {
+        moved += migrate_slot(cluster, slot, from, to).await?;
+    }
+    Ok(moved)
+}
+
+/// Holds a hash slot in the `MIGRATING`/`IMPORTING` state so tests can
+/// deterministically observe `-ASK` redirects, then finishes or reverts the
+/// migration.
+///
+/// Construct with [`ReshardGuard::start`]. While the guard is alive, `slot`
+/// is `MIGRATING` on the source node and `IMPORTING` on the target node --
+/// the window in which Redis Cluster returns `-ASK` for keys in that slot
+/// that live on the source but haven't been moved yet, and clients that
+/// address the target directly get `-TRYAGAIN`/`MOVED` depending on the
+/// key.
+///
+/// Call [`ReshardGuard::migrate_keys`] any number of times to move keys
+/// without changing ownership (this is what lets a test provoke `-ASK`
+/// deterministically: move some keys, leave others, then issue commands
+/// against them). Call [`ReshardGuard::complete`] to migrate any remaining
+/// keys and hand the slot to the target, or [`ReshardGuard::abort`] to hand
+/// it back to the source.
+///
+/// If the guard is dropped without calling either, it makes a best-effort
+/// synchronous attempt to reset the slot to `STABLE` on both nodes so the
+/// cluster doesn't get stuck straddling the migration.
+///
+/// # Example
+///
+/// ```no_run
+/// use redis_server_wrapper::{RedisCluster, chaos::ReshardGuard};
+///
+/// # async fn example() {
+/// let cluster = RedisCluster::builder()
+///     .masters(2)
+///     .base_port(7200)
+///     .start()
+///     .await
+///     .unwrap();
+///
+/// let guard = ReshardGuard::start(&cluster, 0, cluster.node(0), cluster.node(1))
+///     .await
+///     .unwrap();
+///
+/// // ... issue commands against a key in slot 0 and assert on -ASK ...
+///
+/// guard.complete().await.unwrap();
+/// # }
+/// ```
+#[cfg(feature = "tokio")]
+pub struct ReshardGuard<'a> {
+    cluster: &'a RedisClusterHandle,
+    slot: u16,
+    from: &'a RedisServerHandle,
+    to: &'a RedisServerHandle,
+    to_id: String,
+    resolved: bool,
+}
+
+#[cfg(feature = "tokio")]
+impl<'a> ReshardGuard<'a> {
+    /// Put `slot` into `MIGRATING` on `from` and `IMPORTING` on `to`.
+    ///
+    /// No keys are moved yet -- this only opens the migration window.
+    pub async fn start(
+        cluster: &'a RedisClusterHandle,
+        slot: u16,
+        from: &'a RedisServerHandle,
+        to: &'a RedisServerHandle,
+    ) -> Result<ReshardGuard<'a>> {
+        let from_id = node_id(from).await?;
+        let to_id = node_id(to).await?;
+        let slot_str = slot.to_string();
+        to.run(&["CLUSTER", "SETSLOT", &slot_str, "IMPORTING", &from_id])
+            .await?;
+        from.run(&["CLUSTER", "SETSLOT", &slot_str, "MIGRATING", &to_id])
+            .await?;
+        Ok(ReshardGuard {
+            cluster,
+            slot,
+            from,
+            to,
+            to_id,
+            resolved: false,
+        })
+    }
+
+    /// Migrate every key currently in the slot from `from` to `to`, without
+    /// changing slot ownership.
+    ///
+    /// Safe to call more than once (e.g. to sweep up keys written after a
+    /// previous call). Returns the number of keys moved by this call.
+    pub async fn migrate_keys(&self) -> Result<usize> {
+        let password = self.cluster.password();
+        let to_host = self.to.host().to_string();
+        let to_port = self.to.port().to_string();
+        let mut moved = 0;
+        loop {
+            let keys = get_keys_in_slot(self.from, self.slot, 100).await?;
+            if keys.is_empty() {
+                break;
+            }
+            for key in &keys {
+                let mut args = vec![
+                    to_host.as_str(),
+                    to_port.as_str(),
+                    key.as_str(),
+                    "0",
+                    "5000",
+                ];
+                if let Some(password) = password {
+                    args.push("AUTH");
+                    args.push(password);
+                }
+                let mut cmd = vec!["MIGRATE"];
+                cmd.extend(args);
+                self.from.run(&cmd).await?;
+                moved += 1;
+            }
+        }
+        Ok(moved)
+    }
+
+    /// Finish the migration: sweep up any remaining keys, then reassign
+    /// `slot` to the target node on every master.
+    pub async fn complete(mut self) -> Result<usize> {
+        let moved = self.migrate_keys().await?;
+        let slot_str = self.slot.to_string();
+        for node in self.cluster.master_nodes() {
+            node.run(&["CLUSTER", "SETSLOT", &slot_str, "NODE", &self.to_id])
+                .await?;
+        }
+        self.resolved = true;
+        Ok(moved)
+    }
+
+    /// Abort the migration: reset `slot` back to `STABLE` on both nodes,
+    /// leaving ownership with the source.
+    ///
+    /// Any keys already moved to the target by [`ReshardGuard::migrate_keys`]
+    /// stay there -- `MIGRATE` does not roll back, so a partial abort can
+    /// leave a few keys reachable only via the target until the next
+    /// reshard picks them up.
+    pub async fn abort(mut self) -> Result<()> {
+        let slot_str = self.slot.to_string();
+        self.from
+            .run(&["CLUSTER", "SETSLOT", &slot_str, "STABLE"])
+            .await?;
+        self.to
+            .run(&["CLUSTER", "SETSLOT", &slot_str, "STABLE"])
+            .await?;
+        self.resolved = true;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "tokio")]
+impl Drop for ReshardGuard<'_> {
+    fn drop(&mut self) {
+        if self.resolved {
+            return;
+        }
+        let slot_str = self.slot.to_string();
+        self.from
+            .cli()
+            .fire_and_forget(&["CLUSTER", "SETSLOT", &slot_str, "STABLE"]);
+        self.to
+            .cli()
+            .fire_and_forget(&["CLUSTER", "SETSLOT", &slot_str, "STABLE"]);
+    }
+}
+
+/// Get this node's cluster node ID via `CLUSTER MYID`.
+#[cfg(feature = "tokio")]
+async fn node_id(handle: &RedisServerHandle) -> Result<String> {
+    let id = handle.run(&["CLUSTER", "MYID"]).await?;
+    Ok(id.trim().to_string())
+}
+
+/// Get up to `count` keys in `slot` via `CLUSTER GETKEYSINSLOT`.
+#[cfg(feature = "tokio")]
+async fn get_keys_in_slot(
+    handle: &RedisServerHandle,
+    slot: u16,
+    count: u32,
+) -> Result<Vec<String>> {
+    let output = handle
+        .run(&[
+            "CLUSTER",
+            "GETKEYSINSLOT",
+            &slot.to_string(),
+            &count.to_string(),
+        ])
+        .await?;
+    Ok(output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(String::from)
+        .collect())
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
