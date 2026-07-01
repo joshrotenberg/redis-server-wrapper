@@ -64,6 +64,64 @@ fn blocking_server_detach_leaves_server_running() {
 }
 
 #[test]
+fn blocking_server_password_auth() {
+    let server = RedisServer::new()
+        .port(16540)
+        .password("testpass")
+        .start()
+        .expect("failed to start redis-server");
+
+    assert!(server.is_alive());
+}
+
+#[test]
+fn blocking_server_extra_config() {
+    let server = RedisServer::new()
+        .port(16541)
+        .extra("maxmemory", "10mb")
+        .start()
+        .expect("failed to start redis-server");
+
+    let info = server.run(&["CONFIG", "GET", "maxmemory"]).unwrap();
+    assert!(info.contains("10485760") || info.contains("10mb"));
+}
+
+#[test]
+fn blocking_server_logfile() {
+    let server = RedisServer::new()
+        .port(16542)
+        .logfile("/tmp/blocking-test.log")
+        .start()
+        .expect("failed to start redis-server");
+
+    assert!(server.is_alive());
+    let logfile = server.run(&["CONFIG", "GET", "logfile"]).unwrap();
+    assert!(logfile.contains("/tmp/blocking-test.log"));
+}
+
+#[test]
+fn blocking_cli_run_command() {
+    let _server = RedisServer::new()
+        .port(16543)
+        .start()
+        .expect("failed to start redis-server");
+
+    let cli = redis_server_wrapper::blocking::RedisCli::new().port(16543);
+    let result = cli.run(&["SET", "foo", "bar"]).unwrap();
+    assert_eq!(result.trim(), "OK");
+
+    let result = cli.run(&["GET", "foo"]).unwrap();
+    assert_eq!(result.trim(), "bar");
+}
+
+#[test]
+fn blocking_cli_wait_for_ready_timeout() {
+    let cli = redis_server_wrapper::blocking::RedisCli::new().port(16560);
+    let result = cli.wait_for_ready(std::time::Duration::from_millis(500));
+    assert!(result.is_err());
+}
+
+#[test]
 fn blocking_cluster_start_and_health() {
     let cluster = RedisCluster::builder()
         .masters(3)
