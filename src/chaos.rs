@@ -165,6 +165,9 @@ pub fn recover(cluster: &RedisClusterHandle) {
     }
 }
 
+// TODO(#80): slot-migration (reshard) orchestration -- migrate_slot,
+// migrate_slots, and ReshardGuard.
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
