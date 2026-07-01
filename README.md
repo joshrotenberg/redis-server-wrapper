@@ -23,6 +23,12 @@ just `redis-server` and `redis-cli` on PATH.
 `redis-server` and `redis-cli` must be available on your PATH (or specify custom paths with
 `.redis_server_bin()` and `.redis_cli_bin()` on any builder).
 
+## Platform support
+
+Unix-like platforms only (Linux, macOS, BSD). Process lifecycle management relies on POSIX
+signals (`SIGTERM`/`SIGKILL`/`SIGSTOP`/`SIGCONT`) and Unix utilities (`kill`, `lsof`) that have
+no equivalent on Windows. Building on a non-Unix target fails at compile time.
+
 ## Installation
 
 Add to `Cargo.toml` for async use (the default):
