@@ -153,6 +153,20 @@
 //!
 //! You can also call `.stop()` explicitly on any handle to shut down early, or
 //! `.detach()` on a server handle to consume it without stopping the process.
+//!
+//! # Feature Flags
+//!
+//! | Feature | Default | Description |
+//! |---------|---------|-------------|
+//! | `tokio` | yes | Async API. Enables [`RedisServer`], [`RedisCluster`], [`RedisSentinel`]. |
+//! | `blocking` | no | Synchronous wrappers in [`blocking`]. Implies `tokio`. Enable with `features = ["blocking"]`. |
+//! | `test-tls` | no | TLS certificate generation helpers in [`tls`]. Requires `rcgen`. |
+//!
+//! To use only the blocking (sync) API without pulling in async code directly:
+//! ```toml
+//! [dev-dependencies]
+//! redis-server-wrapper = { version = "*", default-features = false, features = ["blocking"] }
+//! ```
 
 pub mod chaos;
 #[cfg(feature = "tokio")]
