@@ -1,4 +1,4 @@
-use redis_server_wrapper::{LogLevel, RedisServer};
+use redis_server_wrapper::{Error, LogLevel, RedisServer};
 use std::fs;
 
 #[tokio::test]
@@ -113,4 +113,55 @@ async fn dir_with_spaces() {
         .expect("server with space in dir should start cleanly");
 
     assert!(server.is_alive().await);
+}
+
+#[tokio::test]
+async fn bad_server_binary_returns_binary_not_found() {
+    let result = RedisServer::new()
+        .port(16407)
+        .redis_server_bin("/nonexistent/redis-server")
+        .start()
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(Error::BinaryNotFound { binary }) if binary == "/nonexistent/redis-server"
+    ));
+}
+
+#[tokio::test]
+async fn bad_cli_binary_returns_binary_not_found() {
+    let result = RedisServer::new()
+        .port(16408)
+        .redis_cli_bin("/nonexistent/redis-cli")
+        .start()
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(Error::BinaryNotFound { binary }) if binary == "/nonexistent/redis-cli"
+    ));
+}
+
+#[tokio::test]
+async fn port_already_in_use_returns_server_start_error() {
+    let _first = RedisServer::new()
+        .port(16409)
+        .dir(std::env::temp_dir().join("rsw-port-conflict-a"))
+        .start()
+        .await
+        .expect("first server should start");
+
+    // A daemonizing redis-server forks and its parent exits 0 before the
+    // child even attempts to bind, so a second daemonized start on the same
+    // port would falsely report success. Run the second attempt in the
+    // foreground so the bind failure surfaces synchronously.
+    let result = RedisServer::new()
+        .port(16409)
+        .dir(std::env::temp_dir().join("rsw-port-conflict-b"))
+        .extra("daemonize", "no")
+        .start()
+        .await;
+
+    assert!(matches!(result, Err(Error::ServerStart { port: 16409 })));
 }
