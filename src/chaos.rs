@@ -5,6 +5,9 @@
 //! triggering failovers, and more. All operations work with the handle
 //! types returned by the server, cluster, and sentinel builders.
 //!
+//! Unix-only: the node-kill and freeze/resume operations send POSIX signals
+//! via `kill`. See the crate-level "Platform Support" docs for details.
+//!
 //! # Example
 //!
 //! ```no_run

@@ -6,6 +6,9 @@
 //!
 //! All utilities are intentionally synchronous so they can be used from
 //! [`Drop`] implementations as well as from async startup paths.
+//!
+//! Unix-only: every function here shells out to `kill` or `lsof`. See the
+//! crate-level "Platform Support" docs for details.
 
 use std::path::Path;
 use std::process::Command;

@@ -167,6 +167,22 @@
 //! [dev-dependencies]
 //! redis-server-wrapper = { version = "*", default-features = false, features = ["blocking"] }
 //! ```
+//!
+//! # Platform Support
+//!
+//! This crate only supports Unix-like platforms (Linux, macOS, BSD). Process
+//! lifecycle management in the [`process`] and [`chaos`] modules relies on
+//! POSIX signals (`SIGTERM`, `SIGKILL`, `SIGSTOP`, `SIGCONT`) and Unix
+//! utilities (`kill`, `lsof`) that have no equivalent on Windows. Building on
+//! a non-Unix target fails at compile time rather than silently leaking
+//! processes at runtime.
+
+#[cfg(not(unix))]
+compile_error!(
+    "redis-server-wrapper only supports Unix-like platforms (Linux, macOS, BSD). \
+     Process lifecycle management relies on POSIX signals (SIGTERM/SIGKILL/SIGSTOP/SIGCONT) \
+     and Unix utilities (`kill`, `lsof`) that have no equivalent on Windows."
+);
 
 pub mod chaos;
 #[cfg(feature = "tokio")]
