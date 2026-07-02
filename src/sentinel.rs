@@ -641,7 +641,14 @@ impl RedisSentinel {
 }
 
 impl RedisSentinelHandle {
-    /// The master's address.
+    /// The master's address as "host:port". Kept consistent with
+    /// [`RedisServerHandle::addr`](crate::server::RedisServerHandle::addr) and
+    /// [`RedisClusterHandle::addr`](crate::cluster::RedisClusterHandle::addr).
+    pub fn addr(&self) -> String {
+        self.master.addr()
+    }
+
+    /// The master's address. Alias for [`Self::addr`].
     pub fn master_addr(&self) -> String {
         self.master.addr()
     }

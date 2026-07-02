@@ -2026,7 +2026,13 @@ pub struct RedisSentinelHandle {
 }
 
 impl RedisSentinelHandle {
-    /// The master's address.
+    /// The master's address as "host:port". Kept consistent with
+    /// `RedisServerHandle::addr` and `RedisClusterHandle::addr`.
+    pub fn addr(&self) -> String {
+        self.inner.addr()
+    }
+
+    /// The master's address. Alias for [`Self::addr`].
     pub fn master_addr(&self) -> String {
         self.inner.master_addr()
     }
