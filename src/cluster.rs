@@ -933,6 +933,14 @@ impl RedisClusterHandle {
         Ok(())
     }
 
+    /// The cluster's `requirepass` password, if one was set.
+    ///
+    /// Used internally (e.g. by [`crate::chaos::migrate_slot`]) to pass
+    /// `MIGRATE ... AUTH` when moving keys between password-protected nodes.
+    pub(crate) fn password(&self) -> Option<&str> {
+        self.password.as_deref()
+    }
+
     /// Get a `RedisCli` for the seed node.
     pub fn cli(&self) -> RedisCli {
         let mut cli = RedisCli::new()
