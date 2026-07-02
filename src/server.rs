@@ -2020,15 +2020,24 @@ impl RedisServer {
             });
         }
 
+        // The plain `port` always speaks unencrypted Redis protocol; `tls-port`
+        // is the only listener that speaks TLS. When the plain port is
+        // disabled (0), the server is only reachable over `tls-port`, so the
+        // admin CLI must connect there with TLS enabled instead.
+        let tls_only = self.config.port == 0;
+        let admin_port = if tls_only {
+            self.config.tls_port.unwrap_or(self.config.port)
+        } else {
+            self.config.port
+        };
         let mut cli = RedisCli::new()
             .bin(&self.config.redis_cli_bin)
             .host(&self.config.bind)
-            .port(self.config.port);
+            .port(admin_port);
         if let Some(ref pw) = self.config.password {
             cli = cli.password(pw);
         }
-        // When TLS is configured, enable it on the CLI so it can reach the server.
-        if self.config.tls_cert_file.is_some() && self.config.tls_key_file.is_some() {
+        if tls_only && self.config.tls_cert_file.is_some() && self.config.tls_key_file.is_some() {
             cli = cli.tls(true);
             if let Some(ref ca) = self.config.tls_ca_cert_file {
                 cli = cli.cacert(ca);
