@@ -1,8 +1,9 @@
 //! Redis Cluster lifecycle management built on `RedisServer`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cli::RedisCli;
 use crate::error::{Error, Result};
@@ -529,10 +530,18 @@ impl RedisClusterBuilder {
         // Start each node.
         let total_nodes = self.total_nodes();
         let ports: Vec<u16> = self.ports().collect();
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let cluster_base = std::env::temp_dir().join(format!(
+            "redis-cluster-wrapper-{}-{}",
+            std::process::id(),
+            unique
+        ));
         let mut nodes = Vec::new();
         for (index, port) in ports.into_iter().enumerate() {
-            let node_dir = std::env::temp_dir().join(format!("redis-cluster-wrapper/node-{port}"));
-            let _ = std::fs::remove_dir_all(&node_dir);
+            let node_dir = cluster_base.join(format!("node-{port}"));
             let mut server = RedisServer::new()
                 .port(port)
                 .bind(&self.bind)
@@ -708,6 +717,7 @@ impl RedisClusterBuilder {
                 key_file: self.tls_key_file,
                 ca_cert_file: self.tls_ca_cert_file,
             },
+            cluster_base,
         })
     }
 }
@@ -753,6 +763,8 @@ pub struct RedisClusterHandle {
     password: Option<String>,
     redis_cli_bin: String,
     tls: TlsConfig,
+    /// Unique per-invocation base directory holding all node working directories.
+    cluster_base: PathBuf,
 }
 
 /// Entry point for building a Redis Cluster topology.
@@ -952,6 +964,11 @@ impl RedisClusterHandle {
         }
         cli = self.tls.apply(cli);
         cli
+    }
+
+    /// The unique per-invocation base directory holding all node working directories.
+    pub fn cluster_base(&self) -> &Path {
+        &self.cluster_base
     }
 }
 
