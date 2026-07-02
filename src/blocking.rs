@@ -1398,6 +1398,13 @@ pub struct RedisServerHandle {
 }
 
 impl RedisServerHandle {
+    /// Get a `RedisCli` configured for this server.
+    pub fn cli(&self) -> RedisCli {
+        RedisCli {
+            inner: self.inner.cli().clone(),
+        }
+    }
+
     /// The server's address as "host:port".
     pub fn addr(&self) -> String {
         self.inner.addr()
@@ -1769,6 +1776,13 @@ pub struct RedisClusterHandle {
 }
 
 impl RedisClusterHandle {
+    /// Get a `RedisCli` for the seed node.
+    pub fn cli(&self) -> RedisCli {
+        RedisCli {
+            inner: self.inner.cli(),
+        }
+    }
+
     /// The seed address (first node).
     pub fn addr(&self) -> String {
         self.inner.addr()
@@ -2026,6 +2040,13 @@ pub struct RedisSentinelHandle {
 }
 
 impl RedisSentinelHandle {
+    /// Get a `RedisCli` for the seed sentinel (first sentinel process).
+    pub fn cli(&self) -> RedisCli {
+        RedisCli {
+            inner: self.inner.cli(),
+        }
+    }
+
     /// The master's address as "host:port". Kept consistent with
     /// `RedisServerHandle::addr` and `RedisClusterHandle::addr`.
     pub fn addr(&self) -> String {

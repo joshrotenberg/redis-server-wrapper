@@ -653,6 +653,16 @@ impl RedisSentinelHandle {
         self.master.addr()
     }
 
+    /// Get a `RedisCli` for the seed sentinel (first sentinel process).
+    pub fn cli(&self) -> RedisCli {
+        self.tls.apply(
+            RedisCli::new()
+                .bin(&self.redis_cli_bin)
+                .host(&self.bind)
+                .port(self.sentinel_ports[0]),
+        )
+    }
+
     /// All monitored master names.
     pub fn monitored_master_names(&self) -> Vec<&str> {
         self.monitored_masters
