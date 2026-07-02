@@ -122,6 +122,17 @@ fn blocking_cli_wait_for_ready_timeout() {
 }
 
 #[test]
+fn blocking_server_cli_accessor() {
+    let server = RedisServer::new()
+        .port(16544)
+        .start()
+        .expect("failed to start redis-server");
+
+    let cli = server.cli();
+    assert!(cli.ping());
+}
+
+#[test]
 fn blocking_cluster_start_and_health() {
     let cluster = RedisCluster::builder()
         .masters(3)
@@ -136,6 +147,9 @@ fn blocking_cluster_start_and_health() {
     assert!(cluster.is_healthy());
     assert_eq!(cluster.node_addrs().len(), 3);
     assert_eq!(cluster.addr(), "127.0.0.1:17100");
+
+    let cli = cluster.cli();
+    assert!(cli.ping());
 }
 
 #[test]
@@ -156,6 +170,9 @@ fn blocking_sentinel_start_and_health() {
     assert_eq!(sentinel.master_name(), "mymaster");
     assert_eq!(sentinel.master_addr(), "127.0.0.1:16590");
     assert_eq!(sentinel.sentinel_addrs().len(), 3);
+
+    let cli = sentinel.cli();
+    assert!(cli.ping());
 }
 
 #[test]
