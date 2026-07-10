@@ -17,11 +17,15 @@ just `redis-server` and `redis-cli` on PATH.
 - **Sentinel** -- full sentinel topology (master + replicas + sentinels)
 - **Custom binaries** -- point to any `redis-server`/`redis-cli` path
 - **Arbitrary config** -- pass any Redis directive via `.extra(key, value)`
+- **Fault injection** -- process-level chaos (freeze, kill, partition) via the `chaos` module,
+  and byte-level TCP fault injection (delay, drop, chunking) via `FaultProxy`
 
 ## Prerequisites
 
 `redis-server` and `redis-cli` must be available on your PATH (or specify custom paths with
 `.redis_server_bin()` and `.redis_cli_bin()` on any builder).
+
+Minimum supported Rust version (MSRV): 1.88, enforced in CI.
 
 ## Platform support
 
@@ -104,6 +108,24 @@ async fn test_server_config() {
 }
 ```
 
+Redis modules can be loaded at startup with `.loadmodule()`, optionally passing load-time
+arguments with `.loadmodule_with_args()`:
+
+```rust
+use redis_server_wrapper::RedisServer;
+
+#[tokio::test]
+async fn test_loadmodule() {
+    let server = RedisServer::new()
+        .port(6400)
+        .loadmodule("/path/to/module.so")
+        .loadmodule_with_args("/path/to/other_module.so", ["arg1", "value1"])
+        .start()
+        .await
+        .unwrap();
+}
+```
+
 ### Running Commands
 
 The handle exposes a `RedisCli` you can use to run arbitrary commands against the server:
@@ -170,6 +192,49 @@ async fn test_sentinel() {
         .unwrap();
 
     assert!(sentinel.is_healthy().await);
+}
+```
+
+### Chaos and Fault Injection
+
+The `chaos` module simulates process-level failures -- freezing, killing, and partitioning
+nodes with POSIX signals -- for testing how clients handle timeouts and failovers:
+
+```rust
+use redis_server_wrapper::{RedisServer, chaos};
+use std::time::Duration;
+
+#[tokio::test]
+async fn test_chaos_pause() {
+    let server = RedisServer::new().port(6400).start().await.unwrap();
+
+    // Freeze the node for 2 seconds, then resume it automatically.
+    chaos::pause_node(&server, Duration::from_secs(2));
+
+    // ... test client behavior while the node is frozen ...
+}
+```
+
+`chaos::partition` and `chaos::recover` simulate a network partition across a cluster by
+freezing every node outside a reachable set, and `chaos::fill_memory` writes a bounded number
+of fixed-size keys for exercising `maxmemory` and eviction behavior.
+
+`FaultProxy` operates at the byte level instead of the process level, injecting faults into
+the TCP connection itself -- delay, mid-frame drops, chunked writes -- without touching the
+server process:
+
+```rust
+use redis_server_wrapper::{Direction, FaultProxy, RedisServer};
+
+#[tokio::test]
+async fn test_fault_proxy() {
+    let server = RedisServer::new().port(6400).start().await.unwrap();
+    let proxy = FaultProxy::spawn(server.addr()).await.unwrap();
+
+    // Point clients at proxy.addr() instead of server.addr().
+    proxy.close_after(Direction::UpstreamToClient, 8);
+
+    // ... assert the client sees a clean mid-frame connection error ...
 }
 ```
 

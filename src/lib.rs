@@ -126,6 +126,26 @@
 //! # }
 //! ```
 //!
+//! # Chaos / Fault Injection
+//!
+//! The [`chaos`] module simulates process-level failures using POSIX signals --
+//! freezing, killing, and partitioning nodes -- for testing how clients handle
+//! timeouts and failovers. [`fault_proxy`] operates at the byte level instead,
+//! injecting delay, mid-frame drops, and chunked writes into the TCP connection
+//! itself via [`fault_proxy::FaultProxy`]:
+//!
+//! ```no_run
+//! use redis_server_wrapper::{RedisServer, chaos};
+//! use std::time::Duration;
+//!
+//! # async fn example() {
+//! let server = RedisServer::new().port(6400).start().await.unwrap();
+//!
+//! // Freeze the node for 2 seconds, then resume it automatically.
+//! chaos::pause_node(&server, Duration::from_secs(2));
+//! # }
+//! ```
+//!
 //! # Error Handling
 //!
 //! All fallible operations return [`Result<T>`], which uses the crate's
