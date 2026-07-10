@@ -2373,6 +2373,12 @@ impl RedisSentinelBuilder {
         self
     }
 
+    /// Set a password for the data-node tier of the topology.
+    pub fn password(mut self, password: impl Into<String>) -> Self {
+        self.inner = self.inner.password(password);
+        self
+    }
+
     /// Set the log file path for all processes in the topology.
     pub fn logfile(mut self, path: impl Into<String>) -> Self {
         self.inner = self.inner.logfile(path);
@@ -2470,6 +2476,31 @@ impl RedisSentinelBuilder {
     /// Use TLS for replication traffic between nodes.
     pub fn tls_replication(mut self, enable: bool) -> Self {
         self.inner = self.inner.tls_replication(enable);
+        self
+    }
+
+    // -- modules --
+
+    /// Load a Redis module at startup on the master and every replica data node.
+    pub fn loadmodule(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.loadmodule(path);
+        self
+    }
+
+    /// Load a Redis module at startup on the master and every replica data
+    /// node, with load-time arguments.
+    pub fn loadmodule_with_args(
+        mut self,
+        path: impl Into<PathBuf>,
+        args: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.inner = self.inner.loadmodule_with_args(path, args);
+        self
+    }
+
+    /// Enable the MODULE command on the master and every replica data node.
+    pub fn enable_module_command(mut self, mode: impl Into<String>) -> Self {
+        self.inner = self.inner.enable_module_command(mode);
         self
     }
 
