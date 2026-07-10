@@ -89,3 +89,85 @@ async fn sentinel_monitors_multiple_masters() {
     drop(sentinel);
     drop(external_master);
 }
+
+#[tokio::test]
+async fn sentinel_password_auth() {
+    let sentinel = RedisSentinel::builder()
+        .master_port(17400)
+        .replicas(1)
+        .replica_base_port(17401)
+        .sentinels(3)
+        .sentinel_base_port(27400)
+        .password("testpass")
+        .start()
+        .await
+        .expect("failed to start sentinel topology");
+
+    sentinel
+        .wait_for_healthy(std::time::Duration::from_secs(30))
+        .await
+        .expect("sentinel topology did not become healthy");
+
+    // is_healthy() still works: it only ever talks to the (unauthenticated)
+    // sentinel processes, never the password-protected data nodes.
+    assert!(sentinel.is_healthy().await);
+
+    // A sentinel still discovers the master via the handle's existing
+    // discovery path.
+    let master_info = sentinel
+        .poke()
+        .await
+        .expect("failed to query master via sentinel");
+    assert_eq!(master_info.get("port").map(String::as_str), Some("17400"));
+
+    // The master rejects an unauthenticated command...
+    let unauthed = RedisCli::new().host("127.0.0.1").port(17400);
+    let unauthed_reply = unauthed
+        .run(&["GET", "foo"])
+        .await
+        .expect("redis-cli itself should not fail even on a NOAUTH reply");
+    assert!(
+        unauthed_reply.contains("NOAUTH"),
+        "expected a NOAUTH reply, got: {unauthed_reply}"
+    );
+
+    // ...and accepts the same command once authenticated.
+    let authed = RedisCli::new()
+        .host("127.0.0.1")
+        .port(17400)
+        .password("testpass");
+    authed
+        .run(&["SET", "foo", "bar"])
+        .await
+        .expect("authenticated SET should succeed");
+    let value = authed
+        .run(&["GET", "foo"])
+        .await
+        .expect("authenticated GET should succeed");
+    assert_eq!(value.trim(), "bar");
+}
+
+#[tokio::test]
+async fn sentinel_enable_module_command() {
+    let sentinel = RedisSentinel::builder()
+        .master_port(17410)
+        .replicas(1)
+        .replica_base_port(17411)
+        .sentinels(3)
+        .sentinel_base_port(27410)
+        .enable_module_command("yes")
+        .start()
+        .await
+        .expect("failed to start sentinel topology");
+
+    sentinel
+        .wait_for_healthy(std::time::Duration::from_secs(30))
+        .await
+        .expect("sentinel topology did not become healthy");
+
+    let master_cli = RedisCli::new().host("127.0.0.1").port(17410);
+    master_cli
+        .run(&["MODULE", "LIST"])
+        .await
+        .expect("MODULE LIST should succeed on the master");
+}

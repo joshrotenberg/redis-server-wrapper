@@ -41,6 +41,7 @@ pub struct RedisSentinelBuilder {
     sentinel_base_port: u16,
     quorum: u16,
     bind: String,
+    password: Option<String>,
     logfile: Option<String>,
     save: Option<SavePolicy>,
     appendonly: Option<bool>,
@@ -53,6 +54,8 @@ pub struct RedisSentinelBuilder {
     tls_ca_cert_dir: Option<PathBuf>,
     tls_auth_clients: Option<bool>,
     tls_replication: Option<bool>,
+    loadmodule: Vec<(PathBuf, Vec<String>)>,
+    enable_module_command: Option<String>,
     extra: HashMap<String, String>,
     redis_server_bin: String,
     redis_cli_bin: String,
@@ -117,6 +120,23 @@ impl RedisSentinelBuilder {
     /// Set the bind address for all processes in the topology (default: `"127.0.0.1"`).
     pub fn bind(mut self, bind: impl Into<String>) -> Self {
         self.bind = bind.into();
+        self
+    }
+
+    /// Set a password for the data-node tier of the topology.
+    ///
+    /// The master and every replica get `requirepass` (so clients must
+    /// authenticate) and `masterauth` (so a demoted master can re-sync as a
+    /// replica, and replicas can sync from a newly promoted master). Every
+    /// sentinel conf gets `sentinel auth-pass <master-name> <pass>` for the
+    /// primary monitored master so sentinels can keep talking to it.
+    ///
+    /// Sentinel processes themselves do not get `requirepass`: the handle's
+    /// [`RedisSentinelHandle::poke`], [`RedisSentinelHandle::poke_master`],
+    /// and [`RedisSentinelHandle::is_healthy`] talk to sentinels
+    /// unauthenticated and must keep working unchanged.
+    pub fn password(mut self, password: impl Into<String>) -> Self {
+        self.password = Some(password.into());
         self
     }
 
@@ -209,6 +229,39 @@ impl RedisSentinelBuilder {
     /// Use TLS for replication traffic between nodes.
     pub fn tls_replication(mut self, enable: bool) -> Self {
         self.tls_replication = Some(enable);
+        self
+    }
+
+    // -- modules --
+
+    /// Load a Redis module at startup on the master and every replica data node.
+    ///
+    /// Sentinel processes do not load modules.
+    pub fn loadmodule(mut self, path: impl Into<PathBuf>) -> Self {
+        self.loadmodule.push((path.into(), Vec::new()));
+        self
+    }
+
+    /// Load a Redis module at startup on the master and every replica data
+    /// node, with load-time arguments.
+    ///
+    /// Sentinel processes do not load modules.
+    pub fn loadmodule_with_args(
+        mut self,
+        path: impl Into<PathBuf>,
+        args: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.loadmodule
+            .push((path.into(), args.into_iter().map(Into::into).collect()));
+        self
+    }
+
+    /// Enable the MODULE command (`"yes"`, `"local"`, or `"no"`) on the
+    /// master and every replica data node.
+    ///
+    /// Sentinel processes are unaffected.
+    pub fn enable_module_command(mut self, mode: impl Into<String>) -> Self {
+        self.enable_module_command = Some(mode.into());
         self
     }
 
@@ -335,22 +388,25 @@ impl RedisSentinelBuilder {
         });
         monitored_masters.extend(self.monitored_masters.iter().cloned());
 
-        // Kill leftover processes.
-        let cli_for_shutdown = |port: u16| {
-            let cli = self.apply_tls_to_cli(
-                RedisCli::new()
-                    .bin(&self.redis_cli_bin)
-                    .host(&self.bind)
-                    .port(port),
-            );
+        // Kill leftover processes. Data nodes (master, replicas) may be
+        // password-protected from a previous run; sentinels never are.
+        let cli_for_shutdown = |port: u16, authed: bool| {
+            let mut cli = RedisCli::new()
+                .bin(&self.redis_cli_bin)
+                .host(&self.bind)
+                .port(port);
+            if authed && let Some(ref password) = self.password {
+                cli = cli.password(password);
+            }
+            cli = self.apply_tls_to_cli(cli);
             cli.shutdown();
         };
-        cli_for_shutdown(self.master_port);
+        cli_for_shutdown(self.master_port, true);
         for port in self.replica_ports() {
-            cli_for_shutdown(port);
+            cli_for_shutdown(port, true);
         }
         for port in self.sentinel_ports() {
-            cli_for_shutdown(port);
+            cli_for_shutdown(port, false);
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -385,6 +441,17 @@ impl RedisSentinelBuilder {
                 SavePolicy::Custom(pairs) => master = master.save_schedule(pairs.clone()),
             }
         }
+        if let Some(ref password) = self.password {
+            // `masterauth` lets the master re-sync as a replica after a
+            // failover demotes it.
+            master = master.password(password).masterauth(password);
+        }
+        for (path, args) in &self.loadmodule {
+            master = master.loadmodule_with_args(path.clone(), args.iter().cloned());
+        }
+        if let Some(ref mode) = self.enable_module_command {
+            master = master.enable_module_command(mode.clone());
+        }
         for (key, value) in &self.extra {
             master = master.extra(key.clone(), value.clone());
         }
@@ -413,6 +480,18 @@ impl RedisSentinelBuilder {
                         replica = replica.save_schedule(pairs.clone());
                     }
                 }
+            }
+            if let Some(ref password) = self.password {
+                // `requirepass` so the replica can be promoted to master and
+                // still enforce auth; `masterauth` so it can sync from the
+                // (also password-protected) master.
+                replica = replica.password(password).masterauth(password);
+            }
+            for (path, args) in &self.loadmodule {
+                replica = replica.loadmodule_with_args(path.clone(), args.iter().cloned());
+            }
+            if let Some(ref mode) = self.enable_module_command {
+                replica = replica.enable_module_command(mode.clone());
             }
             for (key, value) in &self.extra {
                 replica = replica.extra(key.clone(), value.clone());
@@ -460,6 +539,17 @@ impl RedisSentinelBuilder {
                     down_after = self.down_after_ms,
                     failover_timeout = self.failover_timeout_ms,
                 ));
+                // `sentinel auth-pass` must follow the `sentinel monitor`
+                // line for the same master name; only the primary,
+                // builder-managed master is password-protected here.
+                if let Some(ref password) = self.password
+                    && master.name == self.master_name
+                {
+                    conf.push_str(&format!(
+                        "sentinel auth-pass {name} {password}\n",
+                        name = master.name,
+                    ));
+                }
             }
             // TLS directives for sentinels.
             if let Some(ref path) = self.tls_cert_file {
@@ -620,6 +710,7 @@ impl RedisSentinel {
             sentinel_base_port: 26389,
             quorum: 2,
             bind: "127.0.0.1".into(),
+            password: None,
             logfile: None,
             save: None,
             appendonly: None,
@@ -632,6 +723,8 @@ impl RedisSentinel {
             tls_ca_cert_dir: None,
             tls_auth_clients: None,
             tls_replication: None,
+            loadmodule: Vec::new(),
+            enable_module_command: None,
             extra: HashMap::new(),
             redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),
@@ -871,6 +964,9 @@ mod tests {
         assert_eq!(b.num_sentinels, 3);
         assert_eq!(b.quorum, 2);
         assert!(b.logfile.is_none());
+        assert!(b.password.is_none());
+        assert!(b.loadmodule.is_empty());
+        assert!(b.enable_module_command.is_none());
         assert!(b.extra.is_empty());
         assert!(b.monitored_masters.is_empty());
     }
@@ -903,6 +999,31 @@ mod tests {
                 expected_replicas: 0,
             }
         );
+    }
+
+    #[test]
+    fn builder_password() {
+        let b = RedisSentinel::builder().password("secret");
+        assert_eq!(b.password.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn builder_modules() {
+        let b = RedisSentinel::builder()
+            .loadmodule("/x/mod.so")
+            .loadmodule_with_args("/y/mod.so", ["a", "b"])
+            .enable_module_command("yes");
+        assert_eq!(
+            b.loadmodule,
+            vec![
+                (PathBuf::from("/x/mod.so"), Vec::<String>::new()),
+                (
+                    PathBuf::from("/y/mod.so"),
+                    vec!["a".to_string(), "b".to_string()]
+                ),
+            ]
+        );
+        assert_eq!(b.enable_module_command.as_deref(), Some("yes"));
     }
 
     #[test]
