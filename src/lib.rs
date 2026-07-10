@@ -190,6 +190,8 @@ pub mod cli;
 #[cfg(feature = "tokio")]
 pub mod cluster;
 pub mod error;
+#[cfg(feature = "tokio")]
+pub mod fault_proxy;
 pub mod process;
 #[cfg(feature = "tokio")]
 pub mod sentinel;
@@ -208,6 +210,8 @@ pub use cli::{IpPreference, OutputFormat, RedisCli, RespProtocol};
 #[cfg(feature = "tokio")]
 pub use cluster::{NodeContext, RedisCluster, RedisClusterBuilder, RedisClusterHandle};
 pub use error::{Error, Result};
+#[cfg(feature = "tokio")]
+pub use fault_proxy::{Delay, Direction, FaultProxy};
 #[cfg(feature = "tokio")]
 pub use sentinel::{RedisSentinel, RedisSentinelBuilder, RedisSentinelHandle};
 #[cfg(feature = "tokio")]
