@@ -721,6 +721,19 @@ impl RedisSentinelHandle {
     /// Like [`poke`](Self::poke) but targets `master_name` instead of the
     /// primary master configured for this topology.
     pub async fn poke_master(&self, master_name: &str) -> Result<HashMap<String, String>> {
+        self.poke_master_bounded(master_name, None).await
+    }
+
+    /// Shared implementation for [`Self::poke_master`] and [`Self::is_healthy`].
+    ///
+    /// `bound`, when set, caps each `SENTINEL MASTER` invocation so a
+    /// health-check loop can't hang on an unreachable sentinel; `poke_master`
+    /// itself passes `None` to keep its existing unbounded behavior.
+    async fn poke_master_bounded(
+        &self,
+        master_name: &str,
+        bound: Option<Duration>,
+    ) -> Result<HashMap<String, String>> {
         for port in &self.sentinel_ports {
             let cli = self.tls.apply(
                 RedisCli::new()
@@ -728,7 +741,14 @@ impl RedisSentinelHandle {
                     .host(&self.bind)
                     .port(*port),
             );
-            if let Ok(raw) = cli.run(&["SENTINEL", "MASTER", master_name]).await {
+            let result = match bound {
+                Some(timeout) => {
+                    cli.run_bounded(&["SENTINEL", "MASTER", master_name], timeout)
+                        .await
+                }
+                None => cli.run(&["SENTINEL", "MASTER", master_name]).await,
+            };
+            if let Ok(raw) = result {
                 return Ok(parse_flat_kv(&raw));
             }
         }
@@ -736,9 +756,16 @@ impl RedisSentinelHandle {
     }
 
     /// Check if the topology is healthy.
+    ///
+    /// Bounded by a modest internal timeout (not the general
+    /// [`RedisCli::run`] path) so an unreachable sentinel can't hang
+    /// [`Self::wait_for_healthy`] forever.
     pub async fn is_healthy(&self) -> bool {
         for master in &self.monitored_masters {
-            let Ok(info) = self.poke_master(&master.name).await else {
+            let Ok(info) = self
+                .poke_master_bounded(&master.name, Some(crate::cli::HEALTH_CHECK_TIMEOUT))
+                .await
+            else {
                 return false;
             };
             let flags = info.get("flags").map(|s| s.as_str()).unwrap_or("");

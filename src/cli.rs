@@ -2,10 +2,25 @@
 
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
 use tokio::process::Command as TokioCommand;
 
 use crate::error::{Error, Result};
+
+/// Default bound applied to the internal health-check probes (`ping`, and by
+/// extension `wait_for_ready` / `wait_for_healthy`) so that observing a
+/// frozen node cannot hang forever.
+///
+/// `redis-cli -t` only bounds the initial TCP connect: a node suspended with
+/// `SIGSTOP` still completes the handshake from the kernel's accept queue and
+/// then never replies, so `-t` alone does not help here. The child process
+/// itself has to be wrapped in a [`tokio::time::timeout`] and killed on
+/// expiry instead.
+///
+/// This bound is **not** applied to [`RedisCli::run`] -- tests legitimately
+/// issue long-running commands (e.g. `DEBUG SLEEP`) through it.
+pub(crate) const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// RESP protocol version for client connections.
 #[derive(Debug, Clone, Copy)]
@@ -637,8 +652,12 @@ impl RedisCli {
     }
 
     /// Send PING and return true if PONG is received.
+    ///
+    /// Bounded by a modest internal timeout so a frozen (`SIGSTOP`ped) node
+    /// cannot hang this check forever -- `redis-cli -t` cannot be used for
+    /// this instead, since it only bounds the initial TCP connect.
     pub async fn ping(&self) -> bool {
-        self.run(&["PING"])
+        self.run_bounded(&["PING"], HEALTH_CHECK_TIMEOUT)
             .await
             .map(|r| r.trim() == "PONG")
             .unwrap_or(false)
@@ -965,6 +984,49 @@ impl RedisCli {
             .args(args)
             .output()
             .await
+    }
+
+    /// Like [`Self::run`], but bounds the child process with `timeout` and
+    /// kills it if it hasn't produced output by the deadline.
+    ///
+    /// Used internally by the health-check paths ([`Self::ping`], and by
+    /// extension `wait_for_ready` / `wait_for_healthy`); not exposed on the
+    /// general command path since tests legitimately run long commands (e.g.
+    /// `DEBUG SLEEP`) through [`Self::run`].
+    pub(crate) async fn run_bounded(&self, args: &[&str], timeout: Duration) -> Result<String> {
+        let output = self.raw_output_bounded(args, timeout).await?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(Error::Cli {
+                host: self.host.clone(),
+                port: self.port,
+                detail: stderr.into_owned(),
+            })
+        }
+    }
+
+    async fn raw_output_bounded(
+        &self,
+        args: &[&str],
+        timeout: Duration,
+    ) -> std::io::Result<Output> {
+        let fut = TokioCommand::new(&self.bin)
+            .args(self.base_args())
+            .args(args)
+            .kill_on_drop(true)
+            .output();
+        match tokio::time::timeout(timeout, fut).await {
+            Ok(result) => result,
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "redis-cli {}:{} did not respond within {timeout:?}",
+                    self.host, self.port
+                ),
+            )),
+        }
     }
 }
 

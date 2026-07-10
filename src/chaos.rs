@@ -24,25 +24,47 @@
 //!     .unwrap();
 //!
 //! // Freeze a node (SIGSTOP) -- it stops processing but stays in memory.
-//! chaos::freeze_node(cluster.node(0));
+//! chaos::freeze_node(cluster.node(0)).unwrap();
 //!
 //! // ... test client behavior with a frozen node ...
 //!
 //! // Resume the node (SIGCONT).
-//! chaos::resume_node(cluster.node(0));
+//! chaos::resume_node(cluster.node(0)).unwrap();
 //! # }
 //! ```
 
 #[cfg(feature = "tokio")]
 use crate::cluster::RedisClusterHandle;
 #[cfg(feature = "tokio")]
-use crate::error::Result;
+use crate::error::{Error, Result};
 #[cfg(feature = "tokio")]
 use crate::server::RedisServerHandle;
 
 use std::process::Command;
 #[cfg(feature = "tokio")]
 use std::time::Duration;
+
+/// Send a POSIX signal to `pid` via `kill <signal_flag> <pid>`.
+///
+/// Propagates both failure to spawn `kill` at all and a non-zero exit status
+/// (e.g. the target PID no longer exists) as [`Error::Signal`]. Shared by
+/// every signal-sending function in this module so none of them silently
+/// swallows a failed kill.
+#[cfg(feature = "tokio")]
+fn send_signal(pid: u32, signal_flag: &str) -> Result<()> {
+    let output = Command::new("kill")
+        .args([signal_flag, &pid.to_string()])
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(Error::Signal {
+            signal: signal_flag.to_string(),
+            pid,
+            detail: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        })
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Node-level operations
@@ -53,9 +75,8 @@ use std::time::Duration;
 /// The process is terminated without any chance to clean up. This simulates
 /// a hard crash (e.g., OOM kill, hardware failure).
 #[cfg(feature = "tokio")]
-pub fn kill_node(handle: &RedisServerHandle) {
-    let pid = handle.pid().to_string();
-    let _ = Command::new("kill").args(["-9", &pid]).output();
+pub fn kill_node(handle: &RedisServerHandle) -> Result<()> {
+    send_signal(handle.pid(), "-9")
 }
 
 /// Freeze a node by sending SIGSTOP.
@@ -67,9 +88,8 @@ pub fn kill_node(handle: &RedisServerHandle) {
 /// This is more useful than [`kill_node`] for testing timeout handling and
 /// partition scenarios because the node can be resumed without losing state.
 #[cfg(feature = "tokio")]
-pub fn freeze_node(handle: &RedisServerHandle) {
-    let pid = handle.pid().to_string();
-    let _ = Command::new("kill").args(["-STOP", &pid]).output();
+pub fn freeze_node(handle: &RedisServerHandle) -> Result<()> {
+    send_signal(handle.pid(), "-STOP")
 }
 
 /// Resume a frozen node by sending SIGCONT.
@@ -77,36 +97,57 @@ pub fn freeze_node(handle: &RedisServerHandle) {
 /// The process resumes from where it was suspended. Buffered writes and
 /// replication will catch up automatically.
 #[cfg(feature = "tokio")]
-pub fn resume_node(handle: &RedisServerHandle) {
-    let pid = handle.pid().to_string();
-    let _ = Command::new("kill").args(["-CONT", &pid]).output();
+pub fn resume_node(handle: &RedisServerHandle) -> Result<()> {
+    send_signal(handle.pid(), "-CONT")
 }
 
 /// Freeze a node for a fixed duration, then resume it automatically.
 ///
-/// Sends SIGSTOP immediately and returns without blocking. A background
-/// tokio task sleeps for `duration` and then sends SIGCONT, so the node
-/// comes back on its own -- there's no need to call [`resume_node`] or
-/// [`recover`] afterward. Useful for testing timeout handling where the
-/// outage has a bounded, known length.
+/// Sends SIGSTOP immediately and returns once that signal is confirmed
+/// delivered. A background tokio task then sleeps for `duration` and sends
+/// SIGCONT, so the node comes back on its own -- there's no need to call
+/// [`resume_node`] or [`recover`] afterward. Useful for testing timeout
+/// handling where the outage has a bounded, known length.
+///
+/// The initial SIGSTOP's success is surfaced via the returned `Result`. The
+/// deferred SIGCONT sent by the background task is best-effort -- by the
+/// time it runs there's no caller left to hand an error back to, so a failed
+/// resume is silently ignored the way it always was.
 #[cfg(feature = "tokio")]
-pub fn pause_node(handle: &RedisServerHandle, duration: Duration) {
-    let pid = handle.pid().to_string();
-    let _ = Command::new("kill").args(["-STOP", &pid]).output();
+pub fn pause_node(handle: &RedisServerHandle, duration: Duration) -> Result<()> {
+    let pid = handle.pid();
+    send_signal(pid, "-STOP")?;
     tokio::spawn(async move {
         tokio::time::sleep(duration).await;
-        let _ = Command::new("kill").args(["-CONT", &pid]).output();
+        let _ = send_signal(pid, "-CONT");
     });
+    Ok(())
 }
 
-/// Pause client connections for a duration using `CLIENT PAUSE`.
+/// Pause client connections for a duration using `CLIENT PAUSE ... ALL`
+/// (the default mode since Redis 6.2).
 ///
 /// Unlike [`freeze_node`], the server process stays responsive for
 /// replication and cluster protocol. Only client commands are delayed.
 /// After the duration expires, clients resume automatically.
+///
+/// See [`slow_down_writes`] to pause only write commands instead.
 #[cfg(feature = "tokio")]
 pub async fn slow_down(handle: &RedisServerHandle, millis: u64) -> Result<String> {
     handle.run(&["CLIENT", "PAUSE", &millis.to_string()]).await
+}
+
+/// Pause only write commands for a duration using `CLIENT PAUSE ... WRITE`
+/// (available since Redis 6.2).
+///
+/// Unlike [`slow_down`], reads keep flowing while the pause is in effect --
+/// useful for testing client behavior around write-availability windows
+/// (e.g. during a failover) without blocking reads too.
+#[cfg(feature = "tokio")]
+pub async fn slow_down_writes(handle: &RedisServerHandle, millis: u64) -> Result<String> {
+    handle
+        .run(&["CLIENT", "PAUSE", &millis.to_string(), "WRITE"])
+        .await
 }
 
 /// Trigger a background RDB save.
@@ -126,14 +167,31 @@ pub async fn flushall(handle: &RedisServerHandle) -> Result<String> {
 /// Writes keys named `<prefix>0` through `<prefix>{count-1}`, each holding a
 /// 1 KiB value. Useful for exercising `maxmemory` and eviction-policy
 /// behavior with a deterministic, bounded key count.
+///
+/// All `count` writes are issued through a single `EVAL` call (one
+/// `redis-cli` invocation total) instead of spawning a `redis-cli` process
+/// per key, which is the difference between one process and `count`
+/// processes for a large fill.
+///
+/// Passing a cluster node directly (rather than going through
+/// `redis-cli -c`) restricts the script to keys that hash to slots owned by
+/// that node -- non-owned keys would fail the same way a plain per-key `SET`
+/// against a single node already does in cluster mode (a `-MOVED` error), so
+/// this isn't a behavior change for cluster use, just a faster single-node
+/// one.
 #[cfg(feature = "tokio")]
 pub async fn fill_memory(handle: &RedisServerHandle, prefix: &str, count: usize) -> Result<()> {
     let value = "x".repeat(1024);
-    for i in 0..count {
-        handle
-            .run(&["SET", &format!("{prefix}{i}"), &value])
-            .await?;
-    }
+    handle
+        .run(&[
+            "EVAL",
+            "for i=0,tonumber(ARGV[1])-1 do redis.call('SET', ARGV[2]..i, ARGV[3]) end",
+            "0",
+            &count.to_string(),
+            prefix,
+            &value,
+        ])
+        .await?;
     Ok(())
 }
 
@@ -147,12 +205,11 @@ pub async fn fill_memory(handle: &RedisServerHandle, prefix: &str, count: usize)
 /// slot, then sends SIGKILL to that process.
 ///
 /// Returns `Ok(port)` of the killed node, or an error if the slot owner
-/// could not be determined.
+/// could not be determined or the signal could not be delivered.
 #[cfg(feature = "tokio")]
 pub async fn kill_master_by_slot(cluster: &RedisClusterHandle, slot: u16) -> Result<u16> {
     let owner = find_slot_owner(cluster, slot).await?;
-    let pid = owner.pid().to_string();
-    let _ = Command::new("kill").args(["-9", &pid]).output();
+    send_signal(owner.pid(), "-9")?;
     Ok(owner.port())
 }
 
@@ -173,53 +230,54 @@ pub async fn kill_master_by_key(cluster: &RedisClusterHandle, key: &str) -> Resu
 #[cfg(feature = "tokio")]
 pub async fn freeze_master_by_slot(cluster: &RedisClusterHandle, slot: u16) -> Result<u16> {
     let owner = find_slot_owner(cluster, slot).await?;
-    let pid = owner.pid().to_string();
-    let _ = Command::new("kill").args(["-STOP", &pid]).output();
+    send_signal(owner.pid(), "-STOP")?;
     Ok(owner.port())
 }
 
 /// Trigger a `CLUSTER FAILOVER` on a replica node.
 ///
-/// If the initial failover fails because the master is down, retries with
+/// If the initial failover fails because the master is down -- either the
+/// command returns an error result containing `"ERR"`, or the `redis-cli`
+/// invocation itself fails (e.g. the master is unreachable) -- retries with
 /// `CLUSTER FAILOVER FORCE`.
 #[cfg(feature = "tokio")]
 pub async fn trigger_failover(replica: &RedisServerHandle) -> Result<String> {
-    let result = replica.run(&["CLUSTER", "FAILOVER"]).await?;
-    if result.contains("ERR") {
-        return replica.run(&["CLUSTER", "FAILOVER", "FORCE"]).await;
+    match replica.run(&["CLUSTER", "FAILOVER"]).await {
+        Ok(result) if !result.contains("ERR") => Ok(result),
+        _ => replica.run(&["CLUSTER", "FAILOVER", "FORCE"]).await,
     }
-    Ok(result)
 }
 
 /// Simulate a network partition by freezing every node not in `reachable`.
 ///
 /// `reachable` holds the indices, matching the order of
 /// [`RedisClusterHandle::nodes`], of the nodes that stay up; every other
-/// node is sent SIGSTOP. Returns the ports of the frozen nodes. Call
-/// [`recover`] to heal the partition.
+/// node is sent SIGSTOP. Returns the ports of the frozen nodes, or an error
+/// if any signal failed to deliver -- nodes frozen before the failing one
+/// stay frozen; call [`recover`] to heal the partition either way.
 #[cfg(feature = "tokio")]
-pub fn partition(cluster: &RedisClusterHandle, reachable: &[usize]) -> Vec<u16> {
+pub fn partition(cluster: &RedisClusterHandle, reachable: &[usize]) -> Result<Vec<u16>> {
     let mut frozen = Vec::new();
     for (i, node) in cluster.nodes().iter().enumerate() {
         if !reachable.contains(&i) {
-            let pid = node.pid().to_string();
-            let _ = Command::new("kill").args(["-STOP", &pid]).output();
+            send_signal(node.pid(), "-STOP")?;
             frozen.push(node.port());
         }
     }
-    frozen
+    Ok(frozen)
 }
 
 /// Resume all nodes in a cluster by sending SIGCONT.
 ///
 /// Useful after freezing nodes for partition simulation. Sends SIGCONT to
-/// every node regardless of whether it was frozen.
+/// every node regardless of whether it was frozen -- signaling an
+/// already-running node with SIGCONT is a no-op, not an error.
 #[cfg(feature = "tokio")]
-pub fn recover(cluster: &RedisClusterHandle) {
+pub fn recover(cluster: &RedisClusterHandle) -> Result<()> {
     for node in cluster.nodes() {
-        let pid = node.pid().to_string();
-        let _ = Command::new("kill").args(["-CONT", &pid]).output();
+        send_signal(node.pid(), "-CONT")?;
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

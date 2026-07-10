@@ -12,7 +12,7 @@ async fn freeze_and_resume_node() {
 
     assert!(server.is_alive().await);
 
-    chaos::freeze_node(&server);
+    chaos::freeze_node(&server).expect("freeze_node failed");
 
     // SIGSTOP suspends the process but the kernel still completes the TCP
     // handshake, so a PING can hang forever waiting for a reply that will
@@ -20,7 +20,7 @@ async fn freeze_and_resume_node() {
     let frozen_ping = tokio::time::timeout(Duration::from_secs(2), server.is_alive()).await;
     assert!(frozen_ping.is_err() || frozen_ping == Ok(false));
 
-    chaos::resume_node(&server);
+    chaos::resume_node(&server).expect("resume_node failed");
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(server.is_alive().await);
 }
@@ -35,7 +35,7 @@ async fn kill_node_terminates_process() {
 
     assert!(server.is_alive().await);
 
-    chaos::kill_node(&server);
+    chaos::kill_node(&server).expect("kill_node failed");
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!server.is_alive().await);
 }
@@ -94,7 +94,7 @@ async fn failover_and_recover_cluster() {
         .await
         .expect("cluster did not recover after failover");
 
-    chaos::recover(&cluster);
+    chaos::recover(&cluster).expect("recover failed");
     assert!(cluster.all_alive().await);
 }
 
@@ -109,7 +109,7 @@ async fn pause_node_resumes_automatically() {
 
     assert!(server.is_alive().await);
 
-    chaos::pause_node(&server, Duration::from_millis(300));
+    chaos::pause_node(&server, Duration::from_millis(300)).expect("pause_node failed");
 
     tokio::time::sleep(Duration::from_millis(600)).await;
 
@@ -130,7 +130,11 @@ async fn fill_memory_writes_keys() {
         .expect("fill_memory failed");
 
     let dbsize = server.run(&["DBSIZE"]).await.expect("DBSIZE failed");
-    assert!(dbsize.contains("50"));
+    let dbsize: u64 = dbsize
+        .trim()
+        .parse()
+        .expect("DBSIZE did not return an integer");
+    assert_eq!(dbsize, 50);
 }
 
 #[cfg_attr(not(unix), ignore)]
@@ -149,11 +153,11 @@ async fn partition_freezes_unreachable_nodes() {
         .await
         .expect("cluster did not become healthy");
 
-    let frozen = chaos::partition(&cluster, &[0]);
+    let frozen = chaos::partition(&cluster, &[0]).expect("partition failed");
     assert!(!frozen.is_empty());
     assert_eq!(frozen.len(), cluster.nodes().len() - 1);
 
-    chaos::recover(&cluster);
+    chaos::recover(&cluster).expect("recover failed");
 
     let node0 = &cluster.nodes()[0];
     assert!(node0.run(&["PING"]).await.is_ok());
