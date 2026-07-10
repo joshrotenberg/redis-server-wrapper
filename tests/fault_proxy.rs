@@ -166,8 +166,21 @@ async fn stats_counts_a_fired_fault() {
     let mut buf = [0u8; 7];
     client.read_exact(&mut buf).await.unwrap();
 
-    let stats = proxy.stats();
     assert_eq!(&buf, b"delayed");
+
+    // Counter updates race the client's read (the reply can arrive before
+    // the forwarding task's increments land), so poll instead of asserting
+    // the byte and delay counters immediately.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let stats = loop {
+        let stats = proxy.stats();
+        if (stats.delays_upstream_to_client > 0 && stats.bytes_upstream_to_client >= 7)
+            || tokio::time::Instant::now() > deadline
+        {
+            break stats;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     assert!(stats.connections_accepted >= 1);
     assert!(
         stats.delays_upstream_to_client > 0,

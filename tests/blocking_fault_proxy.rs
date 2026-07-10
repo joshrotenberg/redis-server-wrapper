@@ -71,7 +71,17 @@ fn stats_and_reject_next_smoke_test() {
     client.read_exact(&mut buf).expect("read failed");
     assert_eq!(&buf, b"+PONG\r\n");
 
-    let stats = proxy.stats();
+    // The byte counters are updated by the proxy's forwarding task, which
+    // races the client's read: the reply can reach the client before the
+    // counter increment lands. Poll instead of asserting immediately.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let stats = loop {
+        let stats = proxy.stats();
+        if stats.bytes_upstream_to_client > 0 || std::time::Instant::now() > deadline {
+            break stats;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
     assert_eq!(stats.connections_accepted, 2);
     assert_eq!(stats.connections_rejected, 1);
     assert!(stats.bytes_upstream_to_client > 0);
