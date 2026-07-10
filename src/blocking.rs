@@ -2288,7 +2288,7 @@ pub mod chaos {
 
 // ── FaultProxy ────────────────────────────────────────────────────────────────
 
-pub use crate::fault_proxy::{Delay, Direction};
+pub use crate::fault_proxy::{CloseKind, Delay, Direction, ProxyStats};
 
 /// Synchronous wrapper for [`crate::fault_proxy::FaultProxy`].
 ///
@@ -2301,13 +2301,14 @@ pub use crate::fault_proxy::{Delay, Direction};
 ///
 /// Fault controls (`set_delay`, `close_after`, `set_chunk_size`,
 /// `set_drop_all`, `reset`, ...) are synchronous in the async API already, so
-/// they delegate directly here without touching the runtime.
+/// they delegate directly here without touching the runtime. `disable` and
+/// `enable` are async in the inner API, so they block on the runtime here.
 pub struct FaultProxy {
     inner: crate::fault_proxy::FaultProxy,
-    // Never read directly after construction; kept alive so its worker
-    // threads keep running the accept loop and per-connection forwarding
-    // tasks spawned during `spawn`, and so it shuts them down on drop.
-    #[allow(dead_code)]
+    // Kept alive so its worker threads keep running the accept loop and
+    // per-connection forwarding tasks spawned during `spawn`, and so it
+    // shuts them down on drop. Also used directly by `disable`/`enable` to
+    // drive the inner async calls.
     rt: Runtime,
 }
 
@@ -2322,9 +2323,15 @@ impl FaultProxy {
         Ok(Self { inner, rt })
     }
 
-    /// The local address clients should connect to.
+    /// The local address clients should connect to. Stable across
+    /// `disable`/`enable` cycles.
     pub fn addr(&self) -> SocketAddr {
         self.inner.addr()
+    }
+
+    /// Cumulative counters since `spawn`. Lock-free snapshot.
+    pub fn stats(&self) -> ProxyStats {
+        self.inner.stats()
     }
 
     /// Set (or replace) the delay applied before forwarding data in `direction`.
@@ -2339,9 +2346,16 @@ impl FaultProxy {
 
     /// Close the connection once `bytes` total have been forwarded in
     /// `direction`, cutting mid-buffer if the triggering read straddles the
-    /// threshold.
+    /// threshold. Closes with a clean FIN; use `close_after_with` for a TCP
+    /// reset instead.
     pub fn close_after(&self, direction: Direction, bytes: u64) {
         self.inner.close_after(direction, bytes);
+    }
+
+    /// Like `close_after`, but the connection is closed with `kind` once the
+    /// threshold trips.
+    pub fn close_after_with(&self, direction: Direction, bytes: u64, kind: CloseKind) {
+        self.inner.close_after_with(direction, bytes, kind);
     }
 
     /// Remove the close-after threshold configured for `direction`.
@@ -2360,9 +2374,72 @@ impl FaultProxy {
         self.inner.clear_chunk_size();
     }
 
+    /// Sleep `delay` between chunked write pieces so the client observes each
+    /// piece as a separate read. No effect unless `set_chunk_size` splits a
+    /// read into more than one piece.
+    pub fn set_chunk_delay(&self, delay: Duration) {
+        self.inner.set_chunk_delay(delay);
+    }
+
+    /// Remove the inter-chunk delay configured by `set_chunk_delay`.
+    pub fn clear_chunk_delay(&self) {
+        self.inner.clear_chunk_delay();
+    }
+
     /// Enable or disable black-hole mode.
     pub fn set_drop_all(&self, drop_all: bool) {
         self.inner.set_drop_all(drop_all);
+    }
+
+    /// Stop forwarding bytes in `direction` on every connection, existing and
+    /// new, until cleared or severed by a pending `stall_then_close` deadline.
+    pub fn set_stall(&self, direction: Direction) {
+        self.inner.set_stall(direction);
+    }
+
+    /// Resume forwarding in `direction`; bytes read while stalled are flushed.
+    pub fn clear_stall(&self, direction: Direction) {
+        self.inner.clear_stall(direction);
+    }
+
+    /// Stall both directions now, then sever every connection `after` later.
+    pub fn stall_then_close(&self, after: Duration) {
+        self.inner.stall_then_close(after);
+    }
+
+    /// Cancel any pending `stall_then_close` deadline and clear both stalls.
+    pub fn clear_stall_all(&self) {
+        self.inner.clear_stall_all();
+    }
+
+    /// Sever every live connection right now with a TCP RST, simulating a
+    /// crashed server.
+    pub fn reset_peer(&self) {
+        self.inner.reset_peer();
+    }
+
+    /// Fail the next `n` accepted connections by closing them immediately
+    /// (with `kind`) before any upstream connect; passthrough resumes after.
+    pub fn reject_next(&self, n: u32, kind: CloseKind) {
+        self.inner.reject_next(n, kind);
+    }
+
+    /// Cancel any pending `reject_next` countdown.
+    pub fn clear_reject(&self) {
+        self.inner.clear_reject();
+    }
+
+    /// Stop listening and sever all live connections; new connect attempts
+    /// fail with `ECONNREFUSED`. The port is released and re-claimed by
+    /// `enable`.
+    pub fn disable(&self) -> Result<()> {
+        self.rt.block_on(self.inner.disable())
+    }
+
+    /// Rebind the same local port and resume passthrough with the current
+    /// fault state.
+    pub fn enable(&self) -> Result<()> {
+        self.rt.block_on(self.inner.enable())
     }
 
     /// Clear every fault control, returning the proxy to clean passthrough

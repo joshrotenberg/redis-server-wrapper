@@ -231,7 +231,7 @@ pub use cli::{IpPreference, OutputFormat, RedisCli, RespProtocol};
 pub use cluster::{NodeContext, RedisCluster, RedisClusterBuilder, RedisClusterHandle};
 pub use error::{Error, Result};
 #[cfg(feature = "tokio")]
-pub use fault_proxy::{Delay, Direction, FaultProxy};
+pub use fault_proxy::{CloseKind, Delay, Direction, FaultProxy, ProxyStats};
 #[cfg(feature = "tokio")]
 pub use sentinel::{RedisSentinel, RedisSentinelBuilder, RedisSentinelHandle};
 #[cfg(feature = "tokio")]

@@ -1,6 +1,6 @@
 #![cfg(feature = "blocking")]
 
-use redis_server_wrapper::blocking::{Direction, FaultProxy, RedisServer};
+use redis_server_wrapper::blocking::{CloseKind, Direction, FaultProxy, RedisServer};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
@@ -40,4 +40,39 @@ fn close_after_drops_connection_mid_frame() {
         .expect("read_to_end failed");
 
     assert_eq!(received, b"+PO");
+}
+
+#[test]
+fn stats_and_reject_next_smoke_test() {
+    let server = RedisServer::new()
+        .port(17852)
+        .start()
+        .expect("failed to start server");
+
+    let proxy = FaultProxy::spawn(server.addr()).expect("failed to spawn proxy");
+    proxy.reject_next(1, CloseKind::Fin);
+
+    // The first connection attempt is rejected: accepted, then closed
+    // immediately without any upstream connection or data.
+    {
+        let mut client = TcpStream::connect(proxy.addr()).expect("failed to connect to proxy");
+        let mut buf = [0u8; 8];
+        let n = client.read(&mut buf).expect("read failed");
+        assert_eq!(
+            n, 0,
+            "expected an immediate close for a rejected connection"
+        );
+    }
+
+    // The second connection attempt passes through normally.
+    let mut client = TcpStream::connect(proxy.addr()).expect("failed to connect to proxy");
+    client.write_all(b"PING\r\n").expect("write failed");
+    let mut buf = [0u8; 7];
+    client.read_exact(&mut buf).expect("read failed");
+    assert_eq!(&buf, b"+PONG\r\n");
+
+    let stats = proxy.stats();
+    assert_eq!(stats.connections_accepted, 2);
+    assert_eq!(stats.connections_rejected, 1);
+    assert!(stats.bytes_upstream_to_client > 0);
 }
