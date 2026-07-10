@@ -2075,6 +2075,140 @@ impl RedisClusterBuilder {
         self
     }
 
+    // -- aof --
+
+    /// Set the AOF fsync policy for all cluster nodes.
+    pub fn appendfsync(mut self, policy: AppendFsync) -> Self {
+        self.inner = self.inner.appendfsync(policy);
+        self
+    }
+
+    // -- memory --
+
+    /// Set the maximum memory limit (e.g. `"256mb"`, `"1gb"`) for all cluster nodes.
+    pub fn maxmemory(mut self, limit: impl Into<String>) -> Self {
+        self.inner = self.inner.maxmemory(limit);
+        self
+    }
+
+    /// Set the eviction policy when maxmemory is reached, for all cluster nodes.
+    pub fn maxmemory_policy(mut self, policy: impl Into<String>) -> Self {
+        self.inner = self.inner.maxmemory_policy(policy);
+        self
+    }
+
+    /// Set the maximum number of simultaneous client connections for all cluster nodes.
+    pub fn maxclients(mut self, n: u32) -> Self {
+        self.inner = self.inner.maxclients(n);
+        self
+    }
+
+    /// Add a client output buffer limit (e.g. `"normal 0 0 0"` or `"replica 256mb 64mb 60"`)
+    /// to all cluster nodes.
+    ///
+    /// Repeatable; each call adds an additional limit line applied to every node.
+    pub fn client_output_buffer_limit(mut self, limit: impl Into<String>) -> Self {
+        self.inner = self.inner.client_output_buffer_limit(limit);
+        self
+    }
+
+    /// Set keyspace notification events (e.g. `"KEA"`) for all cluster nodes.
+    pub fn notify_keyspace_events(mut self, events: impl Into<String>) -> Self {
+        self.inner = self.inner.notify_keyspace_events(events);
+        self
+    }
+
+    // -- replication --
+
+    /// Set the replication backlog size (e.g. `"1mb"`) for all cluster nodes.
+    pub fn repl_backlog_size(mut self, size: impl Into<String>) -> Self {
+        self.inner = self.inner.repl_backlog_size(size);
+        self
+    }
+
+    /// Set seconds before the backlog is freed when no replicas are connected,
+    /// for all cluster nodes.
+    pub fn repl_backlog_ttl(mut self, seconds: u32) -> Self {
+        self.inner = self.inner.repl_backlog_ttl(seconds);
+        self
+    }
+
+    /// Set the diskless load policy for replicas, for all cluster nodes.
+    pub fn repl_diskless_load(mut self, policy: ReplDisklessLoad) -> Self {
+        self.inner = self.inner.repl_diskless_load(policy);
+        self
+    }
+
+    /// Control whether replicas serve stale data while syncing, for all cluster nodes.
+    pub fn replica_serve_stale_data(mut self, serve: bool) -> Self {
+        self.inner = self.inner.replica_serve_stale_data(serve);
+        self
+    }
+
+    // -- tls (additional) --
+
+    /// Set the passphrase for the TLS private key file for all cluster nodes.
+    pub fn tls_key_file_pass(mut self, pass: impl Into<String>) -> Self {
+        self.inner = self.inner.tls_key_file_pass(pass);
+        self
+    }
+
+    /// Set the allowed TLS protocol versions (e.g. `"TLSv1.2 TLSv1.3"`) for all cluster nodes.
+    pub fn tls_protocols(mut self, protocols: impl Into<String>) -> Self {
+        self.inner = self.inner.tls_protocols(protocols);
+        self
+    }
+
+    // -- security and ACL --
+
+    /// Set the path to an ACL file for all cluster nodes.
+    pub fn acl_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.acl_file(path);
+        self
+    }
+
+    /// Enable the DEBUG command (`"yes"`, `"local"`, or `"no"`) on every cluster node.
+    pub fn enable_debug_command(mut self, mode: impl Into<String>) -> Self {
+        self.inner = self.inner.enable_debug_command(mode);
+        self
+    }
+
+    /// Allow CONFIG SET to modify protected configs (`"yes"`, `"local"`, or `"no"`) on
+    /// every cluster node.
+    pub fn enable_protected_configs(mut self, mode: impl Into<String>) -> Self {
+        self.inner = self.inner.enable_protected_configs(mode);
+        self
+    }
+
+    /// Rename a command on all cluster nodes. Pass an empty new name to disable the
+    /// command entirely.
+    ///
+    /// Repeatable; each call adds an additional rename applied to every node.
+    pub fn rename_command(
+        mut self,
+        command: impl Into<String>,
+        new_name: impl Into<String>,
+    ) -> Self {
+        self.inner = self.inner.rename_command(command, new_name);
+        self
+    }
+
+    // -- logging --
+
+    /// Set the log level (default: [`LogLevel::Notice`]) for all cluster nodes.
+    pub fn loglevel(mut self, level: LogLevel) -> Self {
+        self.inner = self.inner.loglevel(level);
+        self
+    }
+
+    /// Include another config file on every cluster node.
+    ///
+    /// Repeatable; each call adds an additional include applied to every node.
+    pub fn include(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.include(path);
+        self
+    }
+
     /// Set an arbitrary config directive for all cluster nodes.
     pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.inner = self.inner.extra(key, value);

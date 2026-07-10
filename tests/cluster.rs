@@ -207,3 +207,63 @@ async fn cluster_enable_module_command() {
             .expect("MODULE LIST should succeed on every node");
     }
 }
+
+#[tokio::test]
+async fn cluster_config_directives() {
+    let cluster = RedisCluster::builder()
+        .masters(3)
+        .replicas_per_master(0)
+        .base_port(17060)
+        .maxmemory("64mb")
+        .maxmemory_policy("allkeys-lru")
+        .notify_keyspace_events("Ex")
+        .enable_debug_command("yes")
+        .start()
+        .await
+        .expect("failed to start cluster");
+
+    cluster
+        .wait_for_healthy(std::time::Duration::from_secs(30))
+        .await
+        .expect("cluster did not become healthy");
+
+    for node in cluster.nodes() {
+        let maxmemory = node
+            .run(&["CONFIG", "GET", "maxmemory"])
+            .await
+            .expect("CONFIG GET maxmemory should succeed on every node");
+        assert!(
+            maxmemory.contains("67108864") || maxmemory.contains("64mb"),
+            "node should have maxmemory 64mb, got: {maxmemory}"
+        );
+
+        let policy = node
+            .run(&["CONFIG", "GET", "maxmemory-policy"])
+            .await
+            .expect("CONFIG GET maxmemory-policy should succeed on every node");
+        assert!(
+            policy.contains("allkeys-lru"),
+            "node should have maxmemory-policy allkeys-lru, got: {policy}"
+        );
+
+        let notify = node
+            .run(&["CONFIG", "GET", "notify-keyspace-events"])
+            .await
+            .expect("CONFIG GET notify-keyspace-events should succeed on every node");
+        // Redis normalizes the flag order in its response (e.g. "Ex" becomes "xE"),
+        // so check that both configured flags are present rather than exact order.
+        assert!(
+            notify.contains('E') && notify.contains('x'),
+            "node should have notify-keyspace-events with E and x flags, got: {notify}"
+        );
+
+        let debug = node
+            .run(&["DEBUG", "SET-ACTIVE-EXPIRE", "1"])
+            .await
+            .expect("DEBUG command should be enabled on every node");
+        assert!(
+            debug.to_uppercase().contains("OK"),
+            "DEBUG SET-ACTIVE-EXPIRE should succeed, got: {debug}"
+        );
+    }
+}

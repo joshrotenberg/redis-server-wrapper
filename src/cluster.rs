@@ -7,7 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cli::RedisCli;
 use crate::error::{Error, Result};
-use crate::server::{RedisServer, RedisServerHandle, SavePolicy};
+use crate::server::{
+    AppendFsync, LogLevel, RedisServer, RedisServerHandle, ReplDisklessLoad, SavePolicy,
+};
 
 /// Context passed to the per-node configuration callback.
 ///
@@ -113,6 +115,24 @@ pub struct RedisClusterBuilder {
     tls_cluster: Option<bool>,
     loadmodule: Vec<(PathBuf, Vec<String>)>,
     enable_module_command: Option<String>,
+    appendfsync: Option<AppendFsync>,
+    maxmemory: Option<String>,
+    maxmemory_policy: Option<String>,
+    maxclients: Option<u32>,
+    client_output_buffer_limit: Vec<String>,
+    notify_keyspace_events: Option<String>,
+    repl_backlog_size: Option<String>,
+    repl_backlog_ttl: Option<u32>,
+    repl_diskless_load: Option<ReplDisklessLoad>,
+    replica_serve_stale_data: Option<bool>,
+    tls_key_file_pass: Option<String>,
+    tls_protocols: Option<String>,
+    acl_file: Option<PathBuf>,
+    enable_debug_command: Option<String>,
+    enable_protected_configs: Option<String>,
+    rename_command: Vec<(String, String)>,
+    loglevel: Option<LogLevel>,
+    include: Vec<PathBuf>,
     extra: HashMap<String, String>,
     redis_server_bin: String,
     redis_cli_bin: String,
@@ -444,6 +464,140 @@ impl RedisClusterBuilder {
         self
     }
 
+    // -- aof --
+
+    /// Set the AOF fsync policy for all cluster nodes.
+    pub fn appendfsync(mut self, policy: AppendFsync) -> Self {
+        self.appendfsync = Some(policy);
+        self
+    }
+
+    // -- memory --
+
+    /// Set the maximum memory limit (e.g. `"256mb"`, `"1gb"`) for all cluster nodes.
+    pub fn maxmemory(mut self, limit: impl Into<String>) -> Self {
+        self.maxmemory = Some(limit.into());
+        self
+    }
+
+    /// Set the eviction policy when maxmemory is reached, for all cluster nodes.
+    pub fn maxmemory_policy(mut self, policy: impl Into<String>) -> Self {
+        self.maxmemory_policy = Some(policy.into());
+        self
+    }
+
+    /// Set the maximum number of simultaneous client connections for all cluster nodes.
+    pub fn maxclients(mut self, n: u32) -> Self {
+        self.maxclients = Some(n);
+        self
+    }
+
+    /// Add a client output buffer limit (e.g. `"normal 0 0 0"` or `"replica 256mb 64mb 60"`)
+    /// to all cluster nodes.
+    ///
+    /// Repeatable; each call adds an additional limit line applied to every node.
+    pub fn client_output_buffer_limit(mut self, limit: impl Into<String>) -> Self {
+        self.client_output_buffer_limit.push(limit.into());
+        self
+    }
+
+    /// Set keyspace notification events (e.g. `"KEA"`) for all cluster nodes.
+    pub fn notify_keyspace_events(mut self, events: impl Into<String>) -> Self {
+        self.notify_keyspace_events = Some(events.into());
+        self
+    }
+
+    // -- replication --
+
+    /// Set the replication backlog size (e.g. `"1mb"`) for all cluster nodes.
+    pub fn repl_backlog_size(mut self, size: impl Into<String>) -> Self {
+        self.repl_backlog_size = Some(size.into());
+        self
+    }
+
+    /// Set seconds before the backlog is freed when no replicas are connected,
+    /// for all cluster nodes.
+    pub fn repl_backlog_ttl(mut self, seconds: u32) -> Self {
+        self.repl_backlog_ttl = Some(seconds);
+        self
+    }
+
+    /// Set the diskless load policy for replicas, for all cluster nodes.
+    pub fn repl_diskless_load(mut self, policy: ReplDisklessLoad) -> Self {
+        self.repl_diskless_load = Some(policy);
+        self
+    }
+
+    /// Control whether replicas serve stale data while syncing, for all cluster nodes.
+    pub fn replica_serve_stale_data(mut self, serve: bool) -> Self {
+        self.replica_serve_stale_data = Some(serve);
+        self
+    }
+
+    // -- tls (additional) --
+
+    /// Set the passphrase for the TLS private key file for all cluster nodes.
+    pub fn tls_key_file_pass(mut self, pass: impl Into<String>) -> Self {
+        self.tls_key_file_pass = Some(pass.into());
+        self
+    }
+
+    /// Set the allowed TLS protocol versions (e.g. `"TLSv1.2 TLSv1.3"`) for all cluster nodes.
+    pub fn tls_protocols(mut self, protocols: impl Into<String>) -> Self {
+        self.tls_protocols = Some(protocols.into());
+        self
+    }
+
+    // -- security and ACL --
+
+    /// Set the path to an ACL file for all cluster nodes.
+    pub fn acl_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.acl_file = Some(path.into());
+        self
+    }
+
+    /// Enable the DEBUG command (`"yes"`, `"local"`, or `"no"`) on every cluster node.
+    pub fn enable_debug_command(mut self, mode: impl Into<String>) -> Self {
+        self.enable_debug_command = Some(mode.into());
+        self
+    }
+
+    /// Allow CONFIG SET to modify protected configs (`"yes"`, `"local"`, or `"no"`) on
+    /// every cluster node.
+    pub fn enable_protected_configs(mut self, mode: impl Into<String>) -> Self {
+        self.enable_protected_configs = Some(mode.into());
+        self
+    }
+
+    /// Rename a command on all cluster nodes. Pass an empty new name to disable the
+    /// command entirely.
+    ///
+    /// Repeatable; each call adds an additional rename applied to every node.
+    pub fn rename_command(
+        mut self,
+        command: impl Into<String>,
+        new_name: impl Into<String>,
+    ) -> Self {
+        self.rename_command.push((command.into(), new_name.into()));
+        self
+    }
+
+    // -- logging --
+
+    /// Set the log level (default: [`LogLevel::Notice`]) for all cluster nodes.
+    pub fn loglevel(mut self, level: LogLevel) -> Self {
+        self.loglevel = Some(level);
+        self
+    }
+
+    /// Include another config file on every cluster node.
+    ///
+    /// Repeatable; each call adds an additional include applied to every node.
+    pub fn include(mut self, path: impl Into<PathBuf>) -> Self {
+        self.include.push(path.into());
+        self
+    }
+
     /// Set a per-node configuration callback.
     ///
     /// The callback receives a [`NodeContext`] containing the pre-configured
@@ -704,6 +858,60 @@ impl RedisClusterBuilder {
             if let Some(ref mode) = self.enable_module_command {
                 server = server.enable_module_command(mode.clone());
             }
+            if let Some(policy) = self.appendfsync {
+                server = server.appendfsync(policy);
+            }
+            if let Some(ref limit) = self.maxmemory {
+                server = server.maxmemory(limit.clone());
+            }
+            if let Some(ref policy) = self.maxmemory_policy {
+                server = server.maxmemory_policy(policy.clone());
+            }
+            if let Some(n) = self.maxclients {
+                server = server.maxclients(n);
+            }
+            for limit in &self.client_output_buffer_limit {
+                server = server.client_output_buffer_limit(limit.clone());
+            }
+            if let Some(ref events) = self.notify_keyspace_events {
+                server = server.notify_keyspace_events(events.clone());
+            }
+            if let Some(ref size) = self.repl_backlog_size {
+                server = server.repl_backlog_size(size.clone());
+            }
+            if let Some(seconds) = self.repl_backlog_ttl {
+                server = server.repl_backlog_ttl(seconds);
+            }
+            if let Some(policy) = self.repl_diskless_load {
+                server = server.repl_diskless_load(policy);
+            }
+            if let Some(serve) = self.replica_serve_stale_data {
+                server = server.replica_serve_stale_data(serve);
+            }
+            if let Some(ref pass) = self.tls_key_file_pass {
+                server = server.tls_key_file_pass(pass.clone());
+            }
+            if let Some(ref protocols) = self.tls_protocols {
+                server = server.tls_protocols(protocols.clone());
+            }
+            if let Some(ref path) = self.acl_file {
+                server = server.acl_file(path.clone());
+            }
+            if let Some(ref mode) = self.enable_debug_command {
+                server = server.enable_debug_command(mode.clone());
+            }
+            if let Some(ref mode) = self.enable_protected_configs {
+                server = server.enable_protected_configs(mode.clone());
+            }
+            for (command, new_name) in &self.rename_command {
+                server = server.rename_command(command.clone(), new_name.clone());
+            }
+            if let Some(level) = self.loglevel {
+                server = server.loglevel(level);
+            }
+            for path in &self.include {
+                server = server.include(path.clone());
+            }
             for (key, value) in &self.extra {
                 server = server.extra(key.clone(), value.clone());
             }
@@ -855,6 +1063,24 @@ impl RedisCluster {
             tls_cluster: None,
             loadmodule: Vec::new(),
             enable_module_command: None,
+            appendfsync: None,
+            maxmemory: None,
+            maxmemory_policy: None,
+            maxclients: None,
+            client_output_buffer_limit: Vec::new(),
+            notify_keyspace_events: None,
+            repl_backlog_size: None,
+            repl_backlog_ttl: None,
+            repl_diskless_load: None,
+            replica_serve_stale_data: None,
+            tls_key_file_pass: None,
+            tls_protocols: None,
+            acl_file: None,
+            enable_debug_command: None,
+            enable_protected_configs: None,
+            rename_command: Vec::new(),
+            loglevel: None,
+            include: Vec::new(),
             extra: HashMap::new(),
             redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),
@@ -1157,5 +1383,68 @@ mod tests {
             ]
         );
         assert_eq!(b.enable_module_command.as_deref(), Some("yes"));
+    }
+
+    #[test]
+    fn builder_core_directives() {
+        let b = RedisCluster::builder()
+            .acl_file("/etc/redis/users.acl")
+            .appendfsync(AppendFsync::Always)
+            .client_output_buffer_limit("normal 0 0 0")
+            .client_output_buffer_limit("replica 256mb 64mb 60")
+            .enable_debug_command("yes")
+            .enable_protected_configs("yes")
+            .maxmemory("100mb")
+            .maxmemory_policy("allkeys-lru")
+            .notify_keyspace_events("KEA")
+            .repl_backlog_size("2mb")
+            .replica_serve_stale_data(false);
+        assert_eq!(b.acl_file, Some(PathBuf::from("/etc/redis/users.acl")));
+        assert!(matches!(b.appendfsync, Some(AppendFsync::Always)));
+        assert_eq!(
+            b.client_output_buffer_limit,
+            vec![
+                "normal 0 0 0".to_string(),
+                "replica 256mb 64mb 60".to_string()
+            ]
+        );
+        assert_eq!(b.enable_debug_command.as_deref(), Some("yes"));
+        assert_eq!(b.enable_protected_configs.as_deref(), Some("yes"));
+        assert_eq!(b.maxmemory.as_deref(), Some("100mb"));
+        assert_eq!(b.maxmemory_policy.as_deref(), Some("allkeys-lru"));
+        assert_eq!(b.notify_keyspace_events.as_deref(), Some("KEA"));
+        assert_eq!(b.repl_backlog_size.as_deref(), Some("2mb"));
+        assert_eq!(b.replica_serve_stale_data, Some(false));
+    }
+
+    #[test]
+    fn builder_extended_directives() {
+        let b = RedisCluster::builder()
+            .maxclients(5000)
+            .rename_command("FLUSHALL", "")
+            .rename_command("CONFIG", "MYCONFIG")
+            .repl_diskless_load(ReplDisklessLoad::OnEmptyDb)
+            .repl_backlog_ttl(3600)
+            .loglevel(LogLevel::Debug)
+            .include("/etc/redis/shared.conf")
+            .tls_key_file_pass("hunter2")
+            .tls_protocols("TLSv1.2 TLSv1.3");
+        assert_eq!(b.maxclients, Some(5000));
+        assert_eq!(
+            b.rename_command,
+            vec![
+                ("FLUSHALL".to_string(), "".to_string()),
+                ("CONFIG".to_string(), "MYCONFIG".to_string()),
+            ]
+        );
+        assert!(matches!(
+            b.repl_diskless_load,
+            Some(ReplDisklessLoad::OnEmptyDb)
+        ));
+        assert_eq!(b.repl_backlog_ttl, Some(3600));
+        assert!(matches!(b.loglevel, Some(LogLevel::Debug)));
+        assert_eq!(b.include, vec![PathBuf::from("/etc/redis/shared.conf")]);
+        assert_eq!(b.tls_key_file_pass.as_deref(), Some("hunter2"));
+        assert_eq!(b.tls_protocols.as_deref(), Some("TLSv1.2 TLSv1.3"));
     }
 }
