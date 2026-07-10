@@ -303,8 +303,8 @@ pub struct RedisServerConfig {
     pub stream_idmp_maxsize: Option<u64>,
 
     // -- modules --
-    /// List of Redis module paths to load at startup.
-    pub loadmodule: Vec<PathBuf>,
+    /// List of Redis module paths to load at startup, each with its load-time arguments.
+    pub loadmodule: Vec<(PathBuf, Vec<String>)>,
 
     // -- advanced --
     /// Server tick frequency in Hz, if set (Redis default: `10`).
@@ -1535,7 +1535,23 @@ impl RedisServer {
 
     /// Load a Redis module at startup.
     pub fn loadmodule(mut self, path: impl Into<PathBuf>) -> Self {
-        self.config.loadmodule.push(path.into());
+        self.config.loadmodule.push((path.into(), Vec::new()));
+        self
+    }
+
+    /// Load a Redis module at startup with load-time arguments.
+    ///
+    /// Renders `loadmodule "<path>" arg1 arg2 ...`. The path is quoted; the
+    /// arguments are appended unquoted and space-separated, matching how Redis
+    /// parses module arguments.
+    pub fn loadmodule_with_args(
+        mut self,
+        path: impl Into<PathBuf>,
+        args: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.config
+            .loadmodule
+            .push((path.into(), args.into_iter().map(Into::into).collect()));
         self
     }
 
@@ -2493,8 +2509,13 @@ impl RedisServer {
         }
 
         // -- modules --
-        for path in &self.config.loadmodule {
-            conf.push_str(&format!("loadmodule \"{}\"\n", path.display()));
+        for (path, args) in &self.config.loadmodule {
+            conf.push_str(&format!("loadmodule \"{}\"", path.display()));
+            for arg in args {
+                conf.push(' ');
+                conf.push_str(arg);
+            }
+            conf.push('\n');
         }
 
         // -- advanced --
@@ -3136,5 +3157,20 @@ mod tests {
         assert_eq!(s.config.tls_session_cache_timeout, Some(300));
         assert_eq!(s.config.tls_replication, Some(true));
         assert_eq!(s.config.tls_cluster, Some(true));
+    }
+
+    #[test]
+    fn loadmodule_config() {
+        let s = RedisServer::new().loadmodule("/x/mod.so");
+        let config = s.generate_config(std::path::Path::new("/tmp/rsw-test"));
+        assert!(config.contains("loadmodule \"/x/mod.so\"\n"));
+    }
+
+    #[test]
+    fn loadmodule_with_args_config() {
+        let s = RedisServer::new()
+            .loadmodule_with_args("/x/mod.so", ["stream-prefix", "ks:", "events"]);
+        let config = s.generate_config(std::path::Path::new("/tmp/rsw-test"));
+        assert!(config.contains("loadmodule \"/x/mod.so\" stream-prefix ks: events\n"));
     }
 }
