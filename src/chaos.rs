@@ -544,7 +544,7 @@ async fn get_keys_in_slot(
 
 /// Compute the hash slot for a key via `CLUSTER KEYSLOT`.
 #[cfg(feature = "tokio")]
-async fn keyslot(cluster: &RedisClusterHandle, key: &str) -> Result<u16> {
+pub async fn keyslot(cluster: &RedisClusterHandle, key: &str) -> Result<u16> {
     let output = cluster.cli().run(&["CLUSTER", "KEYSLOT", key]).await?;
     let slot: u16 = output
         .trim()
@@ -553,6 +553,74 @@ async fn keyslot(cluster: &RedisClusterHandle, key: &str) -> Result<u16> {
             message: format!("could not parse CLUSTER KEYSLOT response: {output}"),
         })?;
     Ok(slot)
+}
+
+/// The port of the master node that currently owns `slot`.
+///
+/// Thin public wrapper around the same `CLUSTER NODES` lookup
+/// [`kill_master_by_slot`] and friends use internally. Returns the owner's
+/// port rather than a borrowed node handle, since `CLUSTER FAILOVER` is
+/// asynchronous (redis.io: "does not execute a failover synchronously...
+/// only schedules a manual failover") and the topology can change out from
+/// under a borrowed reference; a plain port value is what
+/// [`wait_for_slot_owner_change`] polls for and what callers can compare or
+/// store.
+#[cfg(feature = "tokio")]
+pub async fn slot_owner(cluster: &RedisClusterHandle, slot: u16) -> Result<u16> {
+    find_slot_owner(cluster, slot).await.map(|node| node.port())
+}
+
+/// Poll [`slot_owner`] until `slot` is owned by a port different from
+/// `old_port`, or timeout. Returns the new owner's port.
+///
+/// The assertion twin of [`trigger_failover`] / [`kill_master_by_slot`] /
+/// [`freeze_master_by_slot`]: since `CLUSTER FAILOVER` completes
+/// asynchronously, those functions return before the topology has actually
+/// settled, leaving tests to either sleep blindly or poll `CLUSTER NODES`
+/// themselves. Each poll is bounded so a frozen former-owner node can't hang
+/// the wait.
+#[cfg(feature = "tokio")]
+pub async fn wait_for_slot_owner_change(
+    cluster: &RedisClusterHandle,
+    slot: u16,
+    old_port: u16,
+    timeout: Duration,
+) -> Result<u16> {
+    // A `Cell` avoids the closure needing a unique (`&mut`) capture of
+    // `new_owner` across separate invocations, which the borrow checker
+    // otherwise rejects for an `FnMut` closure returning a future.
+    let new_owner = std::cell::Cell::new(old_port);
+    crate::wait::wait_for(
+        || async {
+            match tokio::time::timeout(crate::cli::HEALTH_CHECK_TIMEOUT, slot_owner(cluster, slot))
+                .await
+            {
+                Ok(Ok(port)) if port != old_port => {
+                    new_owner.set(port);
+                    true
+                }
+                _ => false,
+            }
+        },
+        timeout,
+        Duration::from_millis(250),
+        format!("slot {slot} owner did not change from port {old_port} in time"),
+    )
+    .await?;
+    Ok(new_owner.get())
+}
+
+/// Number of keys currently stored in `slot`, via `CLUSTER COUNTKEYSINSLOT`
+/// on the slot's current owner (see [`slot_owner`]).
+#[cfg(feature = "tokio")]
+pub async fn count_keys_in_slot(cluster: &RedisClusterHandle, slot: u16) -> Result<usize> {
+    let owner = find_slot_owner(cluster, slot).await?;
+    let raw = owner
+        .run(&["CLUSTER", "COUNTKEYSINSLOT", &slot.to_string()])
+        .await?;
+    raw.trim().parse().map_err(|_| Error::Timeout {
+        message: format!("could not parse CLUSTER COUNTKEYSINSLOT response: {raw}"),
+    })
 }
 
 /// Find the cluster node that owns a given slot by querying CLUSTER SLOTS.

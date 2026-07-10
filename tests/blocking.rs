@@ -1,6 +1,9 @@
 #![cfg(feature = "blocking")]
 
-use redis_server_wrapper::blocking::{RedisCluster, RedisSentinel, RedisServer};
+use redis_server_wrapper::blocking::{
+    RedisCluster, RedisSentinel, RedisServer, chaos, wait_for, wait_for_replica_sync,
+};
+use std::time::Duration;
 
 #[test]
 fn blocking_server_start_and_ping() {
@@ -290,4 +293,97 @@ fn blocking_sentinel_monitors_multiple_masters() {
 
     drop(sentinel);
     drop(external_master);
+}
+
+#[test]
+fn blocking_wait_for_combinator() {
+    let mut calls = 0;
+    wait_for(
+        || {
+            calls += 1;
+            calls >= 3
+        },
+        Duration::from_secs(5),
+        Duration::from_millis(10),
+        "never became true",
+    )
+    .expect("wait_for should succeed once the check passes");
+    assert_eq!(calls, 3);
+
+    let err = wait_for(
+        || false,
+        Duration::from_millis(50),
+        Duration::from_millis(10),
+        "custom timeout message",
+    )
+    .expect_err("wait_for should time out when check never passes");
+    assert_eq!(err.to_string(), "custom timeout message");
+}
+
+#[test]
+fn blocking_info_role_wait_until_role_dbsize() {
+    let server = RedisServer::new()
+        .port(17940)
+        .start()
+        .expect("failed to start redis-server");
+
+    let full = server.info(None).expect("INFO failed");
+    assert!(full.contains_key("redis_version"));
+
+    assert_eq!(server.role().unwrap(), "master");
+    server
+        .wait_until_role("master", Duration::from_secs(5))
+        .expect("a freshly started standalone server should already be master");
+
+    chaos::fill_memory(&server, "k:", 42).expect("fill_memory failed");
+    assert_eq!(server.dbsize().unwrap(), 42);
+}
+
+#[test]
+fn blocking_wait_for_replica_sync_after_write() {
+    let master = RedisServer::new()
+        .port(17941)
+        .start()
+        .expect("failed to start master");
+
+    let replica = RedisServer::new()
+        .port(17942)
+        .replicaof("127.0.0.1", 17941)
+        .start()
+        .expect("failed to start replica");
+
+    replica
+        .wait_until_role("slave", Duration::from_secs(10))
+        .expect("replica did not report role slave");
+
+    master
+        .run(&["SET", "sync-key", "sync-value"])
+        .expect("SET on master failed");
+
+    wait_for_replica_sync(&replica, &master, Duration::from_secs(10))
+        .expect("replica did not catch up to master");
+
+    let val = replica.run(&["GET", "sync-key"]).expect("GET failed");
+    assert_eq!(val.trim(), "sync-value");
+}
+
+#[test]
+fn blocking_wait_for_log_after_bgsave() {
+    let server = RedisServer::new()
+        .port(17943)
+        .start()
+        .expect("failed to start redis-server");
+
+    let from = server.log_len().expect("log_len failed");
+
+    chaos::trigger_save(&server).expect("BGSAVE failed");
+
+    let line = server
+        .wait_for_log(
+            "Background saving terminated with success",
+            from,
+            Duration::from_secs(10),
+        )
+        .expect("wait_for_log did not find the bgsave completion line");
+    assert!(line.contains("Background saving terminated with success"));
 }

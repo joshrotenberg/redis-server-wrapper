@@ -218,6 +218,8 @@ pub mod sentinel;
 #[cfg(feature = "tokio")]
 pub mod server;
 pub mod stack;
+#[cfg(feature = "tokio")]
+pub mod wait;
 
 #[cfg(feature = "blocking")]
 pub mod blocking;

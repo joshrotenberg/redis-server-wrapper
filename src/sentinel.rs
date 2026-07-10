@@ -883,18 +883,13 @@ impl RedisSentinelHandle {
 
     /// Wait until the topology is healthy or timeout.
     pub async fn wait_for_healthy(&self, timeout: Duration) -> Result<()> {
-        let start = std::time::Instant::now();
-        loop {
-            if self.is_healthy().await {
-                return Ok(());
-            }
-            if start.elapsed() > timeout {
-                return Err(Error::Timeout {
-                    message: "sentinel topology did not become healthy in time".into(),
-                });
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
+        crate::wait::wait_for(
+            || self.is_healthy(),
+            timeout,
+            Duration::from_millis(500),
+            "sentinel topology did not become healthy in time",
+        )
+        .await
     }
 
     /// Stop everything via an escalating shutdown strategy.

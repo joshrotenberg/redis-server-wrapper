@@ -2783,6 +2783,131 @@ impl RedisServerHandle {
         self.cli.run(args).await
     }
 
+    /// `INFO [section]` parsed into a flat key/value map.
+    ///
+    /// Lines are split on the first `:` since values may themselves contain
+    /// colons (e.g. `slave0:ip=127.0.0.1,port=6380,state=online,offset=1,lag=0`).
+    /// `# Section` header lines and blank lines are skipped, and a trailing
+    /// `\r` is trimmed from each line (the INFO payload is CRLF-terminated).
+    ///
+    /// Deliberately returns a flat map rather than per-section typed structs:
+    /// INFO's fields vary across Redis versions, and a flat map lets callers
+    /// pick out exactly the fields they need without this crate chasing
+    /// every field across every version.
+    pub async fn info(&self, section: Option<&str>) -> Result<HashMap<String, String>> {
+        let raw = match section {
+            Some(s) => self.run(&["INFO", s]).await?,
+            None => self.run(&["INFO"]).await?,
+        };
+        Ok(parse_info(&raw))
+    }
+
+    /// Shorthand for `info(Some("replication"))["role"]` (`"master"` or
+    /// `"slave"`).
+    pub async fn role(&self) -> Result<String> {
+        let info = self.info(Some("replication")).await?;
+        info.get("role").cloned().ok_or_else(|| Error::Timeout {
+            message: "INFO replication response did not contain a role field".into(),
+        })
+    }
+
+    /// Block until [`Self::role`] returns `role` (`"master"` or `"slave"`),
+    /// or timeout.
+    ///
+    /// Each poll is bounded by a short internal timeout so a frozen
+    /// (`SIGSTOP`ped) node can't hang the wait -- `RedisCli::run` has no read
+    /// timeout of its own. Built on [`crate::wait::wait_for`].
+    pub async fn wait_until_role(&self, role: &str, timeout: Duration) -> Result<()> {
+        crate::wait::wait_for(
+            || async {
+                matches!(
+                    tokio::time::timeout(crate::cli::HEALTH_CHECK_TIMEOUT, self.role()).await,
+                    Ok(Ok(actual)) if actual == role
+                )
+            },
+            timeout,
+            Duration::from_millis(250),
+            format!("node did not report role {role:?} within {timeout:?}"),
+        )
+        .await
+    }
+
+    /// Path to this node's log file.
+    ///
+    /// Returns `config.logfile` if the builder set one -- resolved against
+    /// the node's working directory if it was a relative path, since Redis
+    /// `chdir`s to `dir` before opening a relative `logfile` -- else the
+    /// default `{node_dir}/redis.log` the generated config pins when no
+    /// `logfile` is configured.
+    pub fn log_path(&self) -> PathBuf {
+        let node_dir = self.config.dir.join(format!("node-{}", self.config.port));
+        match self.config.logfile.as_deref() {
+            Some(logfile) => {
+                let path = PathBuf::from(logfile);
+                if path.is_absolute() {
+                    path
+                } else {
+                    node_dir.join(path)
+                }
+            }
+            None => node_dir.join("redis.log"),
+        }
+    }
+
+    /// Current byte length of [`Self::log_path`].
+    ///
+    /// Capture this before triggering a chaos operation, then pass it as
+    /// `from` to [`Self::wait_for_log`] to scope the wait to lines written
+    /// after that point -- patterns like `"Background saving terminated with
+    /// success"` can already be present in the log from startup, so waiting
+    /// from byte `0` risks matching a stale line instead of the one the
+    /// triggering call produced.
+    pub fn log_len(&self) -> Result<u64> {
+        Ok(fs::metadata(self.log_path())?.len())
+    }
+
+    /// Poll the log file until a line past byte offset `from` contains
+    /// `pattern` (plain substring match, no regex dependency), or timeout.
+    /// Returns the matching line.
+    ///
+    /// Use `from = 0` to scan the whole file from the start, or
+    /// [`Self::log_len`] captured before the triggering call to scan only
+    /// lines written afterward.
+    pub async fn wait_for_log(
+        &self,
+        pattern: &str,
+        from: u64,
+        timeout: Duration,
+    ) -> Result<String> {
+        let path = self.log_path();
+        let start = std::time::Instant::now();
+        loop {
+            if let Ok(contents) = fs::read_to_string(&path) {
+                let from = (from as usize).min(contents.len());
+                if let Some(line) = contents[from..].lines().find(|line| line.contains(pattern)) {
+                    return Ok(line.to_string());
+                }
+            }
+            if start.elapsed() > timeout {
+                return Err(Error::Timeout {
+                    message: format!(
+                        "log at {} did not contain {pattern:?} within {timeout:?}",
+                        path.display()
+                    ),
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    /// Number of keys in the current database, via `DBSIZE`.
+    pub async fn dbsize(&self) -> Result<u64> {
+        let raw = self.run(&["DBSIZE"]).await?;
+        raw.trim().parse().map_err(|_| Error::Timeout {
+            message: format!("could not parse DBSIZE response: {raw}"),
+        })
+    }
+
     /// Consume the handle without stopping the server.
     pub fn detach(mut self) {
         self.detached = true;
@@ -2819,6 +2944,82 @@ impl Drop for RedisServerHandle {
             self.stop();
         }
     }
+}
+
+/// Parse `INFO`-shaped output (also used by `CLUSTER INFO`) into a flat
+/// key/value map.
+///
+/// Lines are split on the first `:` since values may themselves contain
+/// colons (e.g. `slave0:ip=127.0.0.1,port=6380,state=online,offset=1,lag=0`).
+/// `# Section` header lines and blank lines are skipped, and a trailing `\r`
+/// is trimmed from each line (the payload is CRLF-terminated).
+pub(crate) fn parse_info(raw: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for line in raw.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            map.insert(key.to_string(), value.to_string());
+        }
+    }
+    map
+}
+
+/// Block until `replica`'s replication link to `master` is up and its
+/// `slave_repl_offset` has caught up to `master`'s current
+/// `master_repl_offset`, or timeout.
+///
+/// `master`'s offset is re-sampled fresh on every poll (rather than sampled
+/// once up front) so writes that land on `master` after the wait begins are
+/// also accounted for; the offset comparison always uses a value the
+/// replica can plausibly have already replicated, which is what makes this
+/// more than a "sleep and hope" check. Each per-node query is bounded by a
+/// short internal timeout so a frozen node (e.g. one mid-partition) can't
+/// hang the wait.
+pub async fn wait_for_replica_sync(
+    replica: &RedisServerHandle,
+    master: &RedisServerHandle,
+    timeout: Duration,
+) -> Result<()> {
+    crate::wait::wait_for(
+        || async {
+            let Ok(Ok(master_info)) = tokio::time::timeout(
+                crate::cli::HEALTH_CHECK_TIMEOUT,
+                master.info(Some("replication")),
+            )
+            .await
+            else {
+                return false;
+            };
+            let Ok(Ok(replica_info)) = tokio::time::timeout(
+                crate::cli::HEALTH_CHECK_TIMEOUT,
+                replica.info(Some("replication")),
+            )
+            .await
+            else {
+                return false;
+            };
+            let master_offset: u64 = master_info
+                .get("master_repl_offset")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            let link_up = replica_info
+                .get("master_link_status")
+                .map(|s| s.as_str() == "up")
+                .unwrap_or(false);
+            let replica_offset: u64 = replica_info
+                .get("slave_repl_offset")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            link_up && replica_offset >= master_offset
+        },
+        timeout,
+        Duration::from_millis(250),
+        "replica did not catch up to master offset in time",
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -3172,5 +3373,87 @@ mod tests {
             .loadmodule_with_args("/x/mod.so", ["stream-prefix", "ks:", "events"]);
         let config = s.generate_config(std::path::Path::new("/tmp/rsw-test"));
         assert!(config.contains("loadmodule \"/x/mod.so\" stream-prefix ks: events\n"));
+    }
+
+    #[test]
+    fn parse_info_splits_on_first_colon_and_skips_sections() {
+        let raw = "# Replication\r\n\
+                   role:master\r\n\
+                   connected_slaves:1\r\n\
+                   slave0:ip=127.0.0.1,port=6380,state=online,offset=100,lag=0\r\n\
+                   \r\n\
+                   # Keyspace\r\n\
+                   db0:keys=5,expires=0,avg_ttl=0\r\n";
+        let map = parse_info(raw);
+        assert_eq!(map.get("role").map(String::as_str), Some("master"));
+        assert_eq!(map.get("connected_slaves").map(String::as_str), Some("1"));
+        assert_eq!(
+            map.get("slave0").map(String::as_str),
+            Some("ip=127.0.0.1,port=6380,state=online,offset=100,lag=0")
+        );
+        assert_eq!(
+            map.get("db0").map(String::as_str),
+            Some("keys=5,expires=0,avg_ttl=0")
+        );
+        assert!(!map.contains_key("# Replication"));
+        assert_eq!(map.len(), 4);
+    }
+
+    #[test]
+    fn parse_info_ignores_blank_lines() {
+        let map = parse_info("\r\n\r\nrole:master\r\n\r\n");
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("role").map(String::as_str), Some("master"));
+    }
+
+    fn handle_with_config(config: RedisServerConfig) -> RedisServerHandle {
+        RedisServerHandle {
+            config,
+            cli: RedisCli::new(),
+            pid: 0,
+            // Never a real process; avoid Drop trying to stop it.
+            detached: true,
+        }
+    }
+
+    #[test]
+    fn log_path_defaults_to_node_dir_redis_log() {
+        let config = RedisServerConfig {
+            port: 6400,
+            dir: PathBuf::from("/tmp/rsw-test"),
+            ..RedisServerConfig::default()
+        };
+        let handle = handle_with_config(config);
+        assert_eq!(
+            handle.log_path(),
+            PathBuf::from("/tmp/rsw-test/node-6400/redis.log")
+        );
+    }
+
+    #[test]
+    fn log_path_absolute_logfile_used_as_is() {
+        let config = RedisServerConfig {
+            port: 6400,
+            dir: PathBuf::from("/tmp/rsw-test"),
+            logfile: Some("/var/log/redis.log".to_string()),
+            ..RedisServerConfig::default()
+        };
+        let handle = handle_with_config(config);
+        assert_eq!(handle.log_path(), PathBuf::from("/var/log/redis.log"));
+    }
+
+    #[test]
+    fn log_path_relative_logfile_resolves_against_node_dir() {
+        let config = RedisServerConfig {
+            port: 6400,
+            dir: PathBuf::from("/tmp/rsw-test"),
+            logfile: Some("custom.log".to_string()),
+            ..RedisServerConfig::default()
+        };
+        let handle = handle_with_config(config);
+        assert_eq!(
+            handle.log_path(),
+            PathBuf::from("/tmp/rsw-test/node-6400/custom.log")
+        );
     }
 }

@@ -191,3 +191,98 @@ async fn kill_master_by_slot_removes_node() {
         .expect("killed node not found among cluster nodes");
     assert!(!killed_node.is_alive().await);
 }
+
+#[tokio::test]
+async fn public_slot_helpers_and_key_count() {
+    let cluster = RedisCluster::builder()
+        .masters(3)
+        .replicas_per_master(0)
+        .base_port(17920)
+        .start()
+        .await
+        .expect("failed to start cluster");
+
+    cluster
+        .wait_for_healthy(Duration::from_secs(30))
+        .await
+        .expect("cluster did not become healthy");
+
+    let slot = chaos::keyslot(&cluster, "count-key")
+        .await
+        .expect("keyslot failed");
+    assert!(slot < 16384);
+
+    let owner_port = chaos::slot_owner(&cluster, slot)
+        .await
+        .expect("slot_owner failed");
+    let owner = cluster
+        .nodes()
+        .iter()
+        .find(|n| n.port() == owner_port)
+        .expect("slot owner port did not match any cluster node");
+    owner
+        .run(&["SET", "count-key", "count-value"])
+        .await
+        .expect("SET on slot owner failed");
+
+    let count = chaos::count_keys_in_slot(&cluster, slot)
+        .await
+        .expect("count_keys_in_slot failed");
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn wait_for_slot_owner_change_after_failover() {
+    let cluster = RedisCluster::builder()
+        .masters(3)
+        .replicas_per_master(1)
+        .base_port(17930)
+        .start()
+        .await
+        .expect("failed to start cluster");
+
+    cluster
+        .wait_for_healthy(Duration::from_secs(30))
+        .await
+        .expect("cluster did not become healthy");
+
+    let slot = chaos::keyslot(&cluster, "failover-slot-key")
+        .await
+        .expect("keyslot failed");
+    let old_owner_port = chaos::slot_owner(&cluster, slot)
+        .await
+        .expect("slot_owner failed");
+
+    // Find the replica that replicates the slot's current owner, via its
+    // own INFO replication view rather than assuming an index pairing --
+    // `redis-cli --cluster create` doesn't guarantee replica i replicates
+    // master i.
+    let mut target_replica = None;
+    for replica in cluster.replica_nodes() {
+        let repl_info = replica
+            .info(Some("replication"))
+            .await
+            .expect("INFO replication failed");
+        let master_port: u16 = repl_info
+            .get("master_port")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        if master_port == old_owner_port {
+            target_replica = Some(replica);
+            break;
+        }
+    }
+    let replica = target_replica.expect("no replica found for the slot's current owner");
+
+    chaos::trigger_failover(replica)
+        .await
+        .expect("trigger_failover failed");
+
+    let new_owner_port =
+        chaos::wait_for_slot_owner_change(&cluster, slot, old_owner_port, Duration::from_secs(30))
+            .await
+            .expect("wait_for_slot_owner_change failed");
+
+    assert_ne!(new_owner_port, old_owner_port);
+    assert_eq!(new_owner_port, replica.port());
+}
