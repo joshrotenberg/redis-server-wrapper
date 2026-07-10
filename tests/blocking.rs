@@ -100,6 +100,59 @@ fn blocking_server_logfile() {
 }
 
 #[test]
+fn blocking_server_memory_and_lazyfree_tuning() {
+    let server = RedisServer::new()
+        .port(16550)
+        .maxmemory_samples(10)
+        .maxmemory_eviction_tenacity(50)
+        .lazyfree_lazy_eviction(true)
+        .lazyfree_lazy_user_flush(true)
+        .start()
+        .expect("failed to start redis-server");
+
+    assert!(server.is_alive());
+    let samples = server.run(&["CONFIG", "GET", "maxmemory-samples"]).unwrap();
+    assert!(samples.contains("10"));
+    let lazyfree = server
+        .run(&["CONFIG", "GET", "lazyfree-lazy-eviction"])
+        .unwrap();
+    assert!(lazyfree.contains("yes"));
+}
+
+#[test]
+fn blocking_server_cluster_directive_tuning() {
+    let server = RedisServer::new()
+        .port(16551)
+        .cluster_enabled(true)
+        .cluster_replica_no_failover(true)
+        .cluster_migration_barrier(1)
+        .start()
+        .expect("failed to start redis-server");
+
+    assert!(server.is_alive());
+    let no_failover = server
+        .run(&["CONFIG", "GET", "cluster-replica-no-failover"])
+        .unwrap();
+    assert!(no_failover.contains("yes"));
+}
+
+#[test]
+fn blocking_server_data_structure_tuning() {
+    let server = RedisServer::new()
+        .port(16552)
+        .hash_max_listpack_entries(64)
+        .list_max_listpack_size(4)
+        .start()
+        .expect("failed to start redis-server");
+
+    assert!(server.is_alive());
+    let entries = server
+        .run(&["CONFIG", "GET", "hash-max-listpack-entries"])
+        .unwrap();
+    assert!(entries.contains("64"));
+}
+
+#[test]
 fn blocking_cli_run_command() {
     let _server = RedisServer::new()
         .port(16543)

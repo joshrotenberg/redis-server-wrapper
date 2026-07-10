@@ -679,9 +679,77 @@ impl RedisServer {
         self
     }
 
+    /// Set the number of keys sampled per eviction round (Redis default: 5).
+    pub fn maxmemory_samples(mut self, n: u32) -> Self {
+        self.inner = self.inner.maxmemory_samples(n);
+        self
+    }
+
+    /// Set per-client memory limit (e.g. `"0"` to disable).
+    pub fn maxmemory_clients(mut self, limit: impl Into<String>) -> Self {
+        self.inner = self.inner.maxmemory_clients(limit);
+        self
+    }
+
+    /// Set eviction processing effort (1-100, Redis default: 10).
+    pub fn maxmemory_eviction_tenacity(mut self, tenacity: u32) -> Self {
+        self.inner = self.inner.maxmemory_eviction_tenacity(tenacity);
+        self
+    }
+
     /// Set the maximum number of simultaneous client connections.
     pub fn maxclients(mut self, n: u32) -> Self {
         self.inner = self.inner.maxclients(n);
+        self
+    }
+
+    /// Set the logarithmic factor for the LFU frequency counter (Redis default: 10).
+    pub fn lfu_log_factor(mut self, factor: u32) -> Self {
+        self.inner = self.inner.lfu_log_factor(factor);
+        self
+    }
+
+    /// Set the LFU counter decay time in minutes (Redis default: 1).
+    pub fn lfu_decay_time(mut self, minutes: u32) -> Self {
+        self.inner = self.inner.lfu_decay_time(minutes);
+        self
+    }
+
+    /// Set the effort spent on active key expiration (1-100, Redis default: 10).
+    pub fn active_expire_effort(mut self, effort: u32) -> Self {
+        self.inner = self.inner.active_expire_effort(effort);
+        self
+    }
+
+    // -- lazyfree --
+
+    /// Enable or disable background deletion during eviction.
+    pub fn lazyfree_lazy_eviction(mut self, enable: bool) -> Self {
+        self.inner = self.inner.lazyfree_lazy_eviction(enable);
+        self
+    }
+
+    /// Enable or disable background deletion of expired keys.
+    pub fn lazyfree_lazy_expire(mut self, enable: bool) -> Self {
+        self.inner = self.inner.lazyfree_lazy_expire(enable);
+        self
+    }
+
+    /// Enable or disable background deletion for implicit `DEL` (e.g. `RENAME`).
+    pub fn lazyfree_lazy_server_del(mut self, enable: bool) -> Self {
+        self.inner = self.inner.lazyfree_lazy_server_del(enable);
+        self
+    }
+
+    /// Make explicit `DEL` behave like `UNLINK` (background deletion).
+    pub fn lazyfree_lazy_user_del(mut self, enable: bool) -> Self {
+        self.inner = self.inner.lazyfree_lazy_user_del(enable);
+        self
+    }
+
+    /// Make `FLUSHDB`/`FLUSHALL` default to `ASYNC`.
+    pub fn lazyfree_lazy_user_flush(mut self, enable: bool) -> Self {
+        self.inner = self.inner.lazyfree_lazy_user_flush(enable);
         self
     }
 
@@ -942,6 +1010,225 @@ impl RedisServer {
     /// Set the cluster node timeout in milliseconds.
     pub fn cluster_node_timeout(mut self, ms: u64) -> Self {
         self.inner = self.inner.cluster_node_timeout(ms);
+        self
+    }
+
+    /// Set a custom cluster config file path (overrides auto-generated default).
+    pub fn cluster_config_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.cluster_config_file(path);
+        self
+    }
+
+    /// Require full hash slot coverage for the cluster to accept writes.
+    pub fn cluster_require_full_coverage(mut self, require: bool) -> Self {
+        self.inner = self.inner.cluster_require_full_coverage(require);
+        self
+    }
+
+    /// Allow reads when the cluster is down.
+    pub fn cluster_allow_reads_when_down(mut self, allow: bool) -> Self {
+        self.inner = self.inner.cluster_allow_reads_when_down(allow);
+        self
+    }
+
+    /// Allow pubsub shard channels when the cluster is down.
+    pub fn cluster_allow_pubsubshard_when_down(mut self, allow: bool) -> Self {
+        self.inner = self.inner.cluster_allow_pubsubshard_when_down(allow);
+        self
+    }
+
+    /// Allow automatic replica migration between masters.
+    pub fn cluster_allow_replica_migration(mut self, allow: bool) -> Self {
+        self.inner = self.inner.cluster_allow_replica_migration(allow);
+        self
+    }
+
+    /// Set the minimum number of replicas a master must retain before one can migrate.
+    pub fn cluster_migration_barrier(mut self, barrier: u32) -> Self {
+        self.inner = self.inner.cluster_migration_barrier(barrier);
+        self
+    }
+
+    /// Prevent this replica from ever attempting a failover.
+    pub fn cluster_replica_no_failover(mut self, no_failover: bool) -> Self {
+        self.inner = self.inner.cluster_replica_no_failover(no_failover);
+        self
+    }
+
+    /// Set the replica validity factor (multiplied by node timeout).
+    pub fn cluster_replica_validity_factor(mut self, factor: u32) -> Self {
+        self.inner = self.inner.cluster_replica_validity_factor(factor);
+        self
+    }
+
+    /// Set the IP address this node announces to the cluster bus.
+    pub fn cluster_announce_ip(mut self, ip: impl Into<String>) -> Self {
+        self.inner = self.inner.cluster_announce_ip(ip);
+        self
+    }
+
+    /// Set the client port this node announces to the cluster.
+    pub fn cluster_announce_port(mut self, port: u16) -> Self {
+        self.inner = self.inner.cluster_announce_port(port);
+        self
+    }
+
+    /// Set the cluster bus port this node announces.
+    pub fn cluster_announce_bus_port(mut self, port: u16) -> Self {
+        self.inner = self.inner.cluster_announce_bus_port(port);
+        self
+    }
+
+    /// Set the TLS port this node announces to the cluster.
+    pub fn cluster_announce_tls_port(mut self, port: u16) -> Self {
+        self.inner = self.inner.cluster_announce_tls_port(port);
+        self
+    }
+
+    /// Set the hostname this node announces to the cluster.
+    pub fn cluster_announce_hostname(mut self, hostname: impl Into<String>) -> Self {
+        self.inner = self.inner.cluster_announce_hostname(hostname);
+        self
+    }
+
+    /// Set the human-readable node name announced to the cluster.
+    pub fn cluster_announce_human_nodename(mut self, name: impl Into<String>) -> Self {
+        self.inner = self.inner.cluster_announce_human_nodename(name);
+        self
+    }
+
+    /// Set the dedicated cluster bus port (0 = auto with +10000 offset).
+    pub fn cluster_port(mut self, port: u16) -> Self {
+        self.inner = self.inner.cluster_port(port);
+        self
+    }
+
+    /// Set the preferred endpoint type for cluster redirections (e.g. `"ip"`, `"hostname"`).
+    pub fn cluster_preferred_endpoint_type(mut self, endpoint_type: impl Into<String>) -> Self {
+        self.inner = self.inner.cluster_preferred_endpoint_type(endpoint_type);
+        self
+    }
+
+    /// Set the send buffer limit in bytes for cluster bus links.
+    pub fn cluster_link_sendbuf_limit(mut self, limit: u64) -> Self {
+        self.inner = self.inner.cluster_link_sendbuf_limit(limit);
+        self
+    }
+
+    /// Set the compatibility sample ratio percentage.
+    pub fn cluster_compatibility_sample_ratio(mut self, ratio: u32) -> Self {
+        self.inner = self.inner.cluster_compatibility_sample_ratio(ratio);
+        self
+    }
+
+    /// Set the maximum lag in bytes before slot migration handoff.
+    pub fn cluster_slot_migration_handoff_max_lag_bytes(mut self, bytes: u64) -> Self {
+        self.inner = self
+            .inner
+            .cluster_slot_migration_handoff_max_lag_bytes(bytes);
+        self
+    }
+
+    /// Set the write pause timeout in milliseconds during slot migration.
+    pub fn cluster_slot_migration_write_pause_timeout(mut self, ms: u64) -> Self {
+        self.inner = self.inner.cluster_slot_migration_write_pause_timeout(ms);
+        self
+    }
+
+    /// Enable per-slot statistics collection.
+    pub fn cluster_slot_stats_enabled(mut self, enable: bool) -> Self {
+        self.inner = self.inner.cluster_slot_stats_enabled(enable);
+        self
+    }
+
+    // -- data structures --
+
+    /// Set the maximum number of entries in a hash before converting from listpack to hash table.
+    pub fn hash_max_listpack_entries(mut self, n: u32) -> Self {
+        self.inner = self.inner.hash_max_listpack_entries(n);
+        self
+    }
+
+    /// Set the maximum size of a hash entry value before converting from listpack to hash table.
+    pub fn hash_max_listpack_value(mut self, n: u32) -> Self {
+        self.inner = self.inner.hash_max_listpack_value(n);
+        self
+    }
+
+    /// Set the maximum listpack size for list entries.
+    ///
+    /// Positive values limit the number of elements per listpack node.
+    /// Negative values set a byte-size limit: -1 = 4KB, -2 = 8KB, -3 = 16KB, -4 = 32KB, -5 = 64KB.
+    pub fn list_max_listpack_size(mut self, n: i32) -> Self {
+        self.inner = self.inner.list_max_listpack_size(n);
+        self
+    }
+
+    /// Set the number of quicklist nodes at each end of the list that are not compressed.
+    ///
+    /// `0` disables compression. `1` means the head and tail are uncompressed, etc.
+    pub fn list_compress_depth(mut self, n: u32) -> Self {
+        self.inner = self.inner.list_compress_depth(n);
+        self
+    }
+
+    /// Set the maximum number of integer entries in a set before converting from intset to hash table.
+    pub fn set_max_intset_entries(mut self, n: u32) -> Self {
+        self.inner = self.inner.set_max_intset_entries(n);
+        self
+    }
+
+    /// Set the maximum number of entries in a set before converting from listpack to hash table.
+    pub fn set_max_listpack_entries(mut self, n: u32) -> Self {
+        self.inner = self.inner.set_max_listpack_entries(n);
+        self
+    }
+
+    /// Set the maximum size of a set entry value before converting from listpack to hash table.
+    pub fn set_max_listpack_value(mut self, n: u32) -> Self {
+        self.inner = self.inner.set_max_listpack_value(n);
+        self
+    }
+
+    /// Set the maximum number of entries in a sorted set before converting from listpack to skiplist.
+    pub fn zset_max_listpack_entries(mut self, n: u32) -> Self {
+        self.inner = self.inner.zset_max_listpack_entries(n);
+        self
+    }
+
+    /// Set the maximum size of a sorted set entry value before converting from listpack to skiplist.
+    pub fn zset_max_listpack_value(mut self, n: u32) -> Self {
+        self.inner = self.inner.zset_max_listpack_value(n);
+        self
+    }
+
+    /// Set the maximum number of bytes for the sparse representation of a HyperLogLog.
+    pub fn hll_sparse_max_bytes(mut self, n: u32) -> Self {
+        self.inner = self.inner.hll_sparse_max_bytes(n);
+        self
+    }
+
+    /// Set the maximum number of bytes in a single stream listpack node.
+    pub fn stream_node_max_bytes(mut self, n: u32) -> Self {
+        self.inner = self.inner.stream_node_max_bytes(n);
+        self
+    }
+
+    /// Set the maximum number of entries in a single stream listpack node.
+    pub fn stream_node_max_entries(mut self, n: u32) -> Self {
+        self.inner = self.inner.stream_node_max_entries(n);
+        self
+    }
+
+    /// Set the duration in milliseconds for stream ID de-duplication.
+    pub fn stream_idmp_duration(mut self, ms: u64) -> Self {
+        self.inner = self.inner.stream_idmp_duration(ms);
+        self
+    }
+
+    /// Set the maximum number of entries tracked for stream ID de-duplication.
+    pub fn stream_idmp_maxsize(mut self, n: u64) -> Self {
+        self.inner = self.inner.stream_idmp_maxsize(n);
         self
     }
 
@@ -1478,6 +1765,15 @@ impl RedisCluster {
 }
 
 /// Synchronous builder for a Redis Cluster.
+///
+/// This builder does not mirror [`cluster::RedisClusterBuilder::with_node_config`].
+/// That callback's signature is built from async-side types
+/// (`FnMut(NodeContext) -> RedisServer`, where `RedisServer` is
+/// [`crate::RedisServer`], the async builder), so it cannot be exposed
+/// through the blocking surface without leaking async types. Per-node
+/// customization from blocking code should instead be done through the
+/// uniform builder methods on this type plus [`RedisClusterBuilder::extra`]
+/// for anything not covered by a dedicated method.
 pub struct RedisClusterBuilder {
     inner: cluster::RedisClusterBuilder,
 }
