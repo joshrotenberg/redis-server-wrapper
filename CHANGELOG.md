@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.4.2...v0.4.3) - 2026-07-10
+
+### Added
+
+- expose chaos and fault-injection functionality to the blocking API ([#114](https://github.com/joshrotenberg/redis-server-wrapper/pull/114))
+
+### Other
+
+- document chaos and fault-injection APIs in README and crate root ([#113](https://github.com/joshrotenberg/redis-server-wrapper/pull/113))
+
 ## [0.4.2](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.4.1...v0.4.2) - 2026-07-10
 
 ### Added
