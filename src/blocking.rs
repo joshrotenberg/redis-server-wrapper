@@ -5,9 +5,11 @@
 //! the underlying async handle (and its `Drop` impl) keeps working correctly.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use tokio::net::ToSocketAddrs;
 use tokio::runtime::Runtime;
 
 use crate::error::Result;
@@ -2116,5 +2118,256 @@ impl RedisSentinelHandle {
     /// Stop everything.
     pub fn stop(&self) {
         self.inner.stop();
+    }
+}
+
+// ── chaos ─────────────────────────────────────────────────────────────────────
+
+/// Synchronous wrappers for [`crate::chaos`], operating on the blocking handle
+/// types in this module instead of the async ones.
+///
+/// Every function here mirrors an async function of the same name in
+/// [`crate::chaos`]. Calls that are async upstream block the calling thread
+/// on the handle's own [`Runtime`] (the same runtime that drives the rest of
+/// that handle's blocking methods); calls that are already synchronous
+/// upstream (signal sends) delegate directly.
+///
+/// [`crate::chaos::ReshardGuard`] is not wrapped here -- it's built around
+/// borrowed async handles held across multiple calls, which doesn't have a
+/// natural blocking shape. Use the async API directly if you need deterministic
+/// control over an in-flight slot migration.
+pub mod chaos {
+    use super::{RedisClusterHandle, RedisServerHandle};
+    use crate::error::Result;
+    use std::time::Duration;
+
+    /// Kill a node immediately with SIGKILL. See [`crate::chaos::kill_node`].
+    pub fn kill_node(handle: &RedisServerHandle) {
+        crate::chaos::kill_node(&handle.inner);
+    }
+
+    /// Freeze a node by sending SIGSTOP. See [`crate::chaos::freeze_node`].
+    pub fn freeze_node(handle: &RedisServerHandle) {
+        crate::chaos::freeze_node(&handle.inner);
+    }
+
+    /// Resume a frozen node by sending SIGCONT. See [`crate::chaos::resume_node`].
+    pub fn resume_node(handle: &RedisServerHandle) {
+        crate::chaos::resume_node(&handle.inner);
+    }
+
+    /// Freeze a node for a fixed duration, then resume it automatically.
+    ///
+    /// Sends SIGSTOP immediately and returns without blocking. Unlike the
+    /// other functions here, this one enters `handle`'s runtime (via
+    /// [`Runtime::enter`](tokio::runtime::Runtime::enter)) before delegating,
+    /// so the background resume task that
+    /// [`crate::chaos::pause_node`] spawns internally lands on that runtime
+    /// instead of panicking for lack of a runtime context.
+    pub fn pause_node(handle: &RedisServerHandle, duration: Duration) {
+        let _guard = handle.rt.enter();
+        crate::chaos::pause_node(&handle.inner, duration);
+    }
+
+    /// Pause client connections for a duration using `CLIENT PAUSE`. Blocks
+    /// on the handle's runtime. See [`crate::chaos::slow_down`].
+    pub fn slow_down(handle: &RedisServerHandle, millis: u64) -> Result<String> {
+        handle
+            .rt
+            .block_on(crate::chaos::slow_down(&handle.inner, millis))
+    }
+
+    /// Trigger a background RDB save. Blocks on the handle's runtime. See
+    /// [`crate::chaos::trigger_save`].
+    pub fn trigger_save(handle: &RedisServerHandle) -> Result<String> {
+        handle
+            .rt
+            .block_on(crate::chaos::trigger_save(&handle.inner))
+    }
+
+    /// Flush all data from a node. Blocks on the handle's runtime. See
+    /// [`crate::chaos::flushall`].
+    pub fn flushall(handle: &RedisServerHandle) -> Result<String> {
+        handle.rt.block_on(crate::chaos::flushall(&handle.inner))
+    }
+
+    /// Fill a node with `count` keys holding fixed-size values. Blocks on the
+    /// handle's runtime. See [`crate::chaos::fill_memory`].
+    pub fn fill_memory(handle: &RedisServerHandle, prefix: &str, count: usize) -> Result<()> {
+        handle
+            .rt
+            .block_on(crate::chaos::fill_memory(&handle.inner, prefix, count))
+    }
+
+    /// Kill the master node that owns a given hash slot. Blocks on the
+    /// cluster's runtime. See [`crate::chaos::kill_master_by_slot`].
+    pub fn kill_master_by_slot(cluster: &RedisClusterHandle, slot: u16) -> Result<u16> {
+        cluster
+            .rt
+            .block_on(crate::chaos::kill_master_by_slot(&cluster.inner, slot))
+    }
+
+    /// Kill the master node that owns the hash slot for a given key. Blocks
+    /// on the cluster's runtime. See [`crate::chaos::kill_master_by_key`].
+    pub fn kill_master_by_key(cluster: &RedisClusterHandle, key: &str) -> Result<u16> {
+        cluster
+            .rt
+            .block_on(crate::chaos::kill_master_by_key(&cluster.inner, key))
+    }
+
+    /// Freeze the master node that owns a given hash slot. Blocks on the
+    /// cluster's runtime. See [`crate::chaos::freeze_master_by_slot`].
+    pub fn freeze_master_by_slot(cluster: &RedisClusterHandle, slot: u16) -> Result<u16> {
+        cluster
+            .rt
+            .block_on(crate::chaos::freeze_master_by_slot(&cluster.inner, slot))
+    }
+
+    /// Trigger a `CLUSTER FAILOVER` on a replica node. Blocks on the
+    /// replica's runtime. See [`crate::chaos::trigger_failover`].
+    pub fn trigger_failover(replica: &RedisServerHandle) -> Result<String> {
+        replica
+            .rt
+            .block_on(crate::chaos::trigger_failover(&replica.inner))
+    }
+
+    /// Simulate a network partition by freezing every node not in
+    /// `reachable`. See [`crate::chaos::partition`].
+    pub fn partition(cluster: &RedisClusterHandle, reachable: &[usize]) -> Vec<u16> {
+        crate::chaos::partition(&cluster.inner, reachable)
+    }
+
+    /// Resume all nodes in a cluster by sending SIGCONT. See
+    /// [`crate::chaos::recover`].
+    pub fn recover(cluster: &RedisClusterHandle) {
+        crate::chaos::recover(&cluster.inner);
+    }
+
+    /// Migrate a single hash slot from one master to another. Blocks on the
+    /// cluster's runtime. See [`crate::chaos::migrate_slot`].
+    ///
+    /// `from` and `to` are node indices, matching the order of
+    /// [`RedisClusterHandle::node_addrs`], rather than node handles like the
+    /// async version. The blocking cluster handle doesn't expose individual
+    /// nodes as blocking handle types (each would need its own runtime, and
+    /// this operation needs both nodes driven from a single `block_on` call),
+    /// so indices are resolved internally against the cluster's underlying
+    /// async node handles instead.
+    pub fn migrate_slot(
+        cluster: &RedisClusterHandle,
+        slot: u16,
+        from: usize,
+        to: usize,
+    ) -> Result<usize> {
+        cluster.rt.block_on(crate::chaos::migrate_slot(
+            &cluster.inner,
+            slot,
+            cluster.inner.node(from),
+            cluster.inner.node(to),
+        ))
+    }
+
+    /// Migrate a range of hash slots from one master to another. Blocks on
+    /// the cluster's runtime. See [`crate::chaos::migrate_slots`].
+    ///
+    /// `from` and `to` are node indices; see [`migrate_slot`] for why.
+    pub fn migrate_slots(
+        cluster: &RedisClusterHandle,
+        slots: std::ops::RangeInclusive<u16>,
+        from: usize,
+        to: usize,
+    ) -> Result<usize> {
+        cluster.rt.block_on(crate::chaos::migrate_slots(
+            &cluster.inner,
+            slots,
+            cluster.inner.node(from),
+            cluster.inner.node(to),
+        ))
+    }
+}
+
+// ── FaultProxy ────────────────────────────────────────────────────────────────
+
+pub use crate::fault_proxy::{Delay, Direction};
+
+/// Synchronous wrapper for [`crate::fault_proxy::FaultProxy`].
+///
+/// Owns a dedicated multi-thread [`Runtime`] that drives the proxy's accept
+/// loop and per-connection forwarding tasks for as long as this handle is
+/// alive. Dropping the handle drops the inner
+/// [`crate::fault_proxy::FaultProxy`] first, which aborts its accept task so
+/// no new connections are accepted, and then drops the runtime, which tears
+/// down any connections that were still being forwarded.
+///
+/// Fault controls (`set_delay`, `close_after`, `set_chunk_size`,
+/// `set_drop_all`, `reset`, ...) are synchronous in the async API already, so
+/// they delegate directly here without touching the runtime.
+pub struct FaultProxy {
+    inner: crate::fault_proxy::FaultProxy,
+    // Never read directly after construction; kept alive so its worker
+    // threads keep running the accept loop and per-connection forwarding
+    // tasks spawned during `spawn`, and so it shuts them down on drop.
+    #[allow(dead_code)]
+    rt: Runtime,
+}
+
+impl FaultProxy {
+    /// Bind an ephemeral local TCP listener that proxies to `upstream_addr`
+    /// and return a handle to it, backed by a new dedicated [`Runtime`]. The
+    /// proxy starts in clean-passthrough mode. See
+    /// [`crate::fault_proxy::FaultProxy::spawn`].
+    pub fn spawn(upstream_addr: impl ToSocketAddrs) -> Result<Self> {
+        let rt = Runtime::new()?;
+        let inner = rt.block_on(crate::fault_proxy::FaultProxy::spawn(upstream_addr))?;
+        Ok(Self { inner, rt })
+    }
+
+    /// The local address clients should connect to.
+    pub fn addr(&self) -> SocketAddr {
+        self.inner.addr()
+    }
+
+    /// Set (or replace) the delay applied before forwarding data in `direction`.
+    pub fn set_delay(&self, direction: Direction, delay: Delay) {
+        self.inner.set_delay(direction, delay);
+    }
+
+    /// Remove any delay configured for `direction`.
+    pub fn clear_delay(&self, direction: Direction) {
+        self.inner.clear_delay(direction);
+    }
+
+    /// Close the connection once `bytes` total have been forwarded in
+    /// `direction`, cutting mid-buffer if the triggering read straddles the
+    /// threshold.
+    pub fn close_after(&self, direction: Direction, bytes: u64) {
+        self.inner.close_after(direction, bytes);
+    }
+
+    /// Remove the close-after threshold configured for `direction`.
+    pub fn clear_close_after(&self, direction: Direction) {
+        self.inner.clear_close_after(direction);
+    }
+
+    /// Split forwarded writes into pieces of at most `size` bytes, in both
+    /// directions.
+    pub fn set_chunk_size(&self, size: usize) {
+        self.inner.set_chunk_size(size);
+    }
+
+    /// Stop chunking writes; forward reads in whatever size they arrive.
+    pub fn clear_chunk_size(&self) {
+        self.inner.clear_chunk_size();
+    }
+
+    /// Enable or disable black-hole mode.
+    pub fn set_drop_all(&self, drop_all: bool) {
+        self.inner.set_drop_all(drop_all);
+    }
+
+    /// Clear every fault control, returning the proxy to clean passthrough
+    /// for new connections.
+    pub fn reset(&self) {
+        self.inner.reset();
     }
 }
