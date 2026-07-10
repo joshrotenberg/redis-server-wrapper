@@ -680,7 +680,6 @@ impl TlsConfig {
 /// A running Redis Sentinel topology. Stops everything on Drop.
 pub struct RedisSentinelHandle {
     master: RedisServerHandle,
-    #[allow(dead_code)] // Kept alive for Drop cleanup
     replicas: Vec<RedisServerHandle>,
     sentinel_ports: Vec<u16>,
     sentinel_pids: Vec<u32>,
@@ -754,6 +753,56 @@ impl RedisSentinelHandle {
                 .host(&self.bind)
                 .port(self.sentinel_ports[0]),
         )
+    }
+
+    /// Build a `RedisCli` targeting the sentinel at `index` (applies TLS and
+    /// the configured `redis-cli` binary, the same way [`Self::cli`] does for
+    /// the seed sentinel).
+    ///
+    /// Internal: used by [`crate::chaos::crash_sentinel_during_failover`] to
+    /// reach an arbitrary sentinel by index. Not exposed publicly because a
+    /// caller composing this externally from [`Self::sentinel_addrs`] would
+    /// silently lose the TLS settings and custom `redis-cli` binary applied
+    /// here.
+    pub(crate) fn sentinel_cli(&self, index: usize) -> Result<RedisCli> {
+        let port = self
+            .sentinel_ports
+            .get(index)
+            .copied()
+            .ok_or(Error::SentinelIndex {
+                index,
+                len: self.sentinel_ports.len(),
+            })?;
+        Ok(self.tls.apply(
+            RedisCli::new()
+                .bin(&self.redis_cli_bin)
+                .host(&self.bind)
+                .port(port),
+        ))
+    }
+
+    /// The initially-started master data node.
+    ///
+    /// Does **not** track failover: after sentinel promotes a replica, this
+    /// handle still points at the original master process, which is now
+    /// demoted (or dead, if it was killed to trigger the failover). Pass it
+    /// to [`crate::chaos`] functions -- e.g. [`crate::chaos::kill_node`] or
+    /// [`crate::chaos::freeze_node`] -- to inject a real fault against the
+    /// master and drive an actual sentinel-managed failover; pair with
+    /// [`Self::wait_for_new_master`] to observe the promotion completing.
+    pub fn master(&self) -> &RedisServerHandle {
+        &self.master
+    }
+
+    /// The initially-started replica data nodes (same caveat as
+    /// [`Self::master`]: after a failover, roles may no longer match this
+    /// startup ordering).
+    ///
+    /// Pass individual entries to [`crate::chaos`] functions to fault a
+    /// specific replica, e.g. to test how the topology reacts to a replica
+    /// going down independently of the master.
+    pub fn replicas(&self) -> &[RedisServerHandle] {
+        &self.replicas
     }
 
     /// All monitored master names.
@@ -890,6 +939,52 @@ impl RedisSentinelHandle {
             "sentinel topology did not become healthy in time",
         )
         .await
+    }
+
+    /// Poll `SENTINEL MASTER <name>` (via [`Self::poke_master`]'s underlying
+    /// discovery path) until it reports a healthy `master` (no `o_down` /
+    /// `s_down`) at an address different from `old_addr`, or timeout. Returns
+    /// the new master's `"ip:port"`.
+    ///
+    /// The assertion twin of faulting the master directly through
+    /// [`Self::master`] and [`crate::chaos`] (e.g. `chaos::kill_node`): those
+    /// calls return as soon as the signal is delivered, well before sentinel
+    /// has actually elected and promoted a replacement. This polls the
+    /// sentinels' own view of the topology until the promotion has actually
+    /// completed, rather than sleeping a fixed, guessed duration.
+    ///
+    /// Requiring `flags == "master"` -- not just a changed address -- avoids
+    /// returning during the subjective-down window before a replacement has
+    /// actually been elected, where sentinel may still report the old
+    /// address with a down flag.
+    pub async fn wait_for_new_master(&self, old_addr: &str, timeout: Duration) -> Result<String> {
+        let found = std::cell::Cell::new(String::new());
+        crate::wait::wait_for(
+            || async {
+                let Ok(info) = self
+                    .poke_master_bounded(&self.master_name, Some(crate::cli::HEALTH_CHECK_TIMEOUT))
+                    .await
+                else {
+                    return false;
+                };
+                let flags = info.get("flags").map(String::as_str).unwrap_or("");
+                let (Some(ip), Some(port)) = (info.get("ip"), info.get("port")) else {
+                    return false;
+                };
+                let addr = format!("{ip}:{port}");
+                if flags == "master" && addr != old_addr {
+                    found.set(addr);
+                    true
+                } else {
+                    false
+                }
+            },
+            timeout,
+            Duration::from_millis(500),
+            format!("no new master (differing from {old_addr}) reported in time"),
+        )
+        .await?;
+        Ok(found.into_inner())
     }
 
     /// Stop everything via an escalating shutdown strategy.

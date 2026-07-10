@@ -75,6 +75,15 @@ pub enum Error {
         message: String,
     },
 
+    /// A sentinel index passed to a per-sentinel operation was out of range.
+    #[error("sentinel index {index} out of range (topology has {len} sentinels)")]
+    SentinelIndex {
+        /// The requested index.
+        index: usize,
+        /// The number of sentinels actually running.
+        len: usize,
+    },
+
     /// A required binary was not found on PATH.
     #[error("{binary} not found on PATH")]
     BinaryNotFound {
