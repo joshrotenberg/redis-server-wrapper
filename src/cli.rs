@@ -670,21 +670,16 @@ impl RedisCli {
 
     /// Wait until the server responds to PING or timeout expires.
     pub async fn wait_for_ready(&self, timeout: std::time::Duration) -> Result<()> {
-        let start = std::time::Instant::now();
-        loop {
-            if self.ping().await {
-                return Ok(());
-            }
-            if start.elapsed() > timeout {
-                return Err(Error::Timeout {
-                    message: format!(
-                        "{}:{} did not respond within {timeout:?}",
-                        self.host, self.port
-                    ),
-                });
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        }
+        crate::wait::wait_for(
+            || self.ping(),
+            timeout,
+            Duration::from_millis(250),
+            format!(
+                "{}:{} did not respond within {timeout:?}",
+                self.host, self.port
+            ),
+        )
+        .await
     }
 
     /// Run `redis-cli --cluster create ...` to form a cluster.

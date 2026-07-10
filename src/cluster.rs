@@ -6,7 +6,7 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cli::RedisCli;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::server::{
     AppendFsync, LogLevel, RedisServer, RedisServerHandle, ReplDisklessLoad, SavePolicy,
 };
@@ -1120,6 +1120,14 @@ impl RedisClusterHandle {
     /// Bounded by a modest internal timeout (not the general
     /// [`RedisServerHandle::run`] path) so a frozen node can't hang
     /// [`Self::wait_for_healthy`] forever.
+    ///
+    /// Returns healthy as soon as *any single* node reports
+    /// `cluster_state:ok` with all slots assigned -- a cheap liveness probe
+    /// against the cluster's own view of itself, not a convergence check.
+    /// This can pass while a just-recovered node still reports
+    /// `cluster_state:fail`; use [`Self::wait_for_all_healthy`] when every
+    /// node needs to independently agree the cluster has converged (e.g.
+    /// after healing a partition).
     pub async fn is_healthy(&self) -> bool {
         for node in &self.nodes {
             if let Ok(info) = node
@@ -1137,18 +1145,73 @@ impl RedisClusterHandle {
 
     /// Wait until the cluster is healthy or timeout.
     pub async fn wait_for_healthy(&self, timeout: Duration) -> Result<()> {
-        let start = std::time::Instant::now();
-        loop {
-            if self.is_healthy().await {
-                return Ok(());
-            }
-            if start.elapsed() > timeout {
-                return Err(Error::Timeout {
-                    message: "cluster did not become healthy in time".into(),
-                });
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
+        crate::wait::wait_for(
+            || self.is_healthy(),
+            timeout,
+            Duration::from_millis(500),
+            "cluster did not become healthy in time",
+        )
+        .await
+    }
+
+    /// `CLUSTER INFO` on the node at `node_index`, parsed into a flat
+    /// key/value map (the same `key:value` line shape [`RedisServerHandle::info`]
+    /// parses).
+    ///
+    /// Common keys: `cluster_state` (`"ok"` or `"fail"`),
+    /// `cluster_slots_assigned`, `cluster_slots_ok`, `cluster_slots_pfail`,
+    /// `cluster_slots_fail`, `cluster_known_nodes`, `cluster_size`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `node_index >= total_nodes`, matching [`Self::node`].
+    pub async fn cluster_info(&self, node_index: usize) -> Result<HashMap<String, String>> {
+        let raw = self.nodes[node_index].run(&["CLUSTER", "INFO"]).await?;
+        Ok(crate::server::parse_info(&raw))
+    }
+
+    /// Wait until *every* node reports `cluster_state:ok` with
+    /// `cluster_slots_ok` equal to `cluster_slots_assigned`, or timeout.
+    ///
+    /// Unlike [`Self::is_healthy`], which returns healthy as soon as any
+    /// single node agrees, this is the convergence check partition/recover
+    /// tests need: a node that just healed from a partition can still
+    /// report `cluster_state:fail` for a window after other nodes have
+    /// already moved on. Each per-node query is bounded so an unresponsive
+    /// node counts as not-yet-healthy rather than hanging the whole wait.
+    pub async fn wait_for_all_healthy(&self, timeout: Duration) -> Result<()> {
+        crate::wait::wait_for(
+            || async {
+                for node in &self.nodes {
+                    let Ok(Ok(raw)) = tokio::time::timeout(
+                        crate::cli::HEALTH_CHECK_TIMEOUT,
+                        node.run(&["CLUSTER", "INFO"]),
+                    )
+                    .await
+                    else {
+                        return false;
+                    };
+                    let info = crate::server::parse_info(&raw);
+                    let state_ok = info.get("cluster_state").map(String::as_str) == Some("ok");
+                    let slots_assigned: u32 = info
+                        .get("cluster_slots_assigned")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    let slots_ok: u32 = info
+                        .get("cluster_slots_ok")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    if !state_ok || slots_ok != slots_assigned {
+                        return false;
+                    }
+                }
+                true
+            },
+            timeout,
+            Duration::from_millis(500),
+            "cluster did not converge to all-nodes-healthy in time",
+        )
+        .await
     }
 
     /// Access a specific node by index.
@@ -1446,5 +1509,33 @@ mod tests {
         assert_eq!(b.include, vec![PathBuf::from("/etc/redis/shared.conf")]);
         assert_eq!(b.tls_key_file_pass.as_deref(), Some("hunter2"));
         assert_eq!(b.tls_protocols.as_deref(), Some("TLSv1.2 TLSv1.3"));
+    }
+
+    #[test]
+    fn cluster_info_parsing_shape() {
+        // CLUSTER INFO uses the same key:value line shape INFO does; reuse
+        // the shared parser and check the fields wait_for_all_healthy reads.
+        let raw = "cluster_state:ok\r\n\
+                   cluster_slots_assigned:16384\r\n\
+                   cluster_slots_ok:16384\r\n\
+                   cluster_slots_pfail:0\r\n\
+                   cluster_slots_fail:0\r\n\
+                   cluster_known_nodes:6\r\n\
+                   cluster_size:3\r\n";
+        let map = crate::server::parse_info(raw);
+        assert_eq!(map.get("cluster_state").map(String::as_str), Some("ok"));
+        assert_eq!(
+            map.get("cluster_slots_assigned").map(String::as_str),
+            Some("16384")
+        );
+        assert_eq!(
+            map.get("cluster_slots_ok").map(String::as_str),
+            Some("16384")
+        );
+        assert_eq!(
+            map.get("cluster_known_nodes").map(String::as_str),
+            Some("6")
+        );
+        assert_eq!(map.get("cluster_size").map(String::as_str), Some("3"));
     }
 }

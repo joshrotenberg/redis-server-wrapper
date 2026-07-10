@@ -1,5 +1,5 @@
 use redis_server_wrapper::RedisCluster;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[tokio::test]
 async fn cluster_start_and_health() {
@@ -264,6 +264,44 @@ async fn cluster_config_directives() {
         assert!(
             debug.to_uppercase().contains("OK"),
             "DEBUG SET-ACTIVE-EXPIRE should succeed, got: {debug}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn wait_for_all_healthy_and_cluster_info() {
+    let cluster = RedisCluster::builder()
+        .masters(3)
+        .replicas_per_master(1)
+        .base_port(17910)
+        .start()
+        .await
+        .expect("failed to start cluster");
+
+    // wait_for_healthy only requires one node to agree; wait_for_all_healthy
+    // additionally requires every node to independently converge.
+    cluster
+        .wait_for_healthy(Duration::from_secs(30))
+        .await
+        .expect("cluster did not become healthy");
+    cluster
+        .wait_for_all_healthy(Duration::from_secs(30))
+        .await
+        .expect("cluster did not converge to all-nodes-healthy");
+
+    for index in 0..cluster.nodes().len() {
+        let info = cluster
+            .cluster_info(index)
+            .await
+            .expect("cluster_info failed");
+        assert_eq!(info.get("cluster_state").map(String::as_str), Some("ok"));
+        assert_eq!(
+            info.get("cluster_slots_assigned").map(String::as_str),
+            Some("16384")
+        );
+        assert_eq!(
+            info.get("cluster_slots_ok").map(String::as_str),
+            Some("16384")
         );
     }
 }

@@ -1,5 +1,6 @@
-use redis_server_wrapper::{Error, LogLevel, RedisServer};
+use redis_server_wrapper::{Error, LogLevel, RedisServer, chaos, server};
 use std::fs;
+use std::time::Duration;
 
 #[tokio::test]
 async fn start_and_ping() {
@@ -164,4 +165,116 @@ async fn port_already_in_use_returns_server_start_error() {
         .await;
 
     assert!(matches!(result, Err(Error::ServerStart { port: 16409 })));
+}
+
+#[tokio::test]
+async fn info_and_role_report_replication_fields() {
+    let server = RedisServer::new()
+        .port(17900)
+        .start()
+        .await
+        .expect("failed to start redis-server");
+
+    let full = server.info(None).await.expect("INFO failed");
+    assert!(full.contains_key("redis_version"));
+
+    let repl = server
+        .info(Some("replication"))
+        .await
+        .expect("INFO replication failed");
+    assert_eq!(repl.get("role").map(String::as_str), Some("master"));
+
+    assert_eq!(server.role().await.expect("role failed"), "master");
+}
+
+#[tokio::test]
+async fn wait_until_role_master_immediately() {
+    let server = RedisServer::new()
+        .port(17901)
+        .start()
+        .await
+        .expect("failed to start redis-server");
+
+    server
+        .wait_until_role("master", Duration::from_secs(5))
+        .await
+        .expect("a freshly started standalone server should already be master");
+}
+
+#[tokio::test]
+async fn wait_for_replica_sync_after_write() {
+    let master = RedisServer::new()
+        .port(17902)
+        .start()
+        .await
+        .expect("failed to start master");
+
+    let replica = RedisServer::new()
+        .port(17903)
+        .replicaof("127.0.0.1", 17902)
+        .start()
+        .await
+        .expect("failed to start replica");
+
+    replica
+        .wait_until_role("slave", Duration::from_secs(10))
+        .await
+        .expect("replica did not report role slave");
+
+    master
+        .run(&["SET", "sync-key", "sync-value"])
+        .await
+        .expect("SET on master failed");
+
+    server::wait_for_replica_sync(&replica, &master, Duration::from_secs(10))
+        .await
+        .expect("replica did not catch up to master");
+
+    let val = replica
+        .run(&["GET", "sync-key"])
+        .await
+        .expect("GET on replica failed");
+    assert_eq!(val.trim(), "sync-value");
+}
+
+#[tokio::test]
+async fn dbsize_exact_count() {
+    let server = RedisServer::new()
+        .port(17904)
+        .start()
+        .await
+        .expect("failed to start redis-server");
+
+    // fill_memory writes exactly `count` keys; DBSIZE should match exactly,
+    // not just contain the count as a substring (150 also contains "50").
+    chaos::fill_memory(&server, "k:", 150)
+        .await
+        .expect("fill_memory failed");
+
+    let size = server.dbsize().await.expect("dbsize failed");
+    assert_eq!(size, 150);
+}
+
+#[tokio::test]
+async fn wait_for_log_after_bgsave() {
+    let server = RedisServer::new()
+        .port(17905)
+        .loglevel(LogLevel::Notice)
+        .start()
+        .await
+        .expect("failed to start redis-server");
+
+    let from = server.log_len().expect("log_len failed");
+
+    chaos::trigger_save(&server).await.expect("BGSAVE failed");
+
+    let line = server
+        .wait_for_log(
+            "Background saving terminated with success",
+            from,
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("wait_for_log did not find the bgsave completion line");
+    assert!(line.contains("Background saving terminated with success"));
 }

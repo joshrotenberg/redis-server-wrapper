@@ -12,9 +12,36 @@ use std::time::Duration;
 use tokio::net::ToSocketAddrs;
 use tokio::runtime::Runtime;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::server::{AppendFsync, LogLevel, ReplDisklessLoad};
 use crate::{cli, cluster, sentinel, server};
+
+// ── wait_for ──────────────────────────────────────────────────────────────────
+
+/// Synchronous mirror of [`crate::wait::wait_for`]: poll `check` until it
+/// returns `true`, or fail with `Error::Timeout` once `timeout` elapses.
+///
+/// Same ordering as the async version: check first (so a first-try success
+/// never sleeps), then compare elapsed time against `timeout`, then sleep
+/// for `interval` on the calling thread.
+pub fn wait_for(
+    mut check: impl FnMut() -> bool,
+    timeout: Duration,
+    interval: Duration,
+    message: impl Into<String>,
+) -> Result<()> {
+    let message = message.into();
+    let start = std::time::Instant::now();
+    loop {
+        if check() {
+            return Ok(());
+        }
+        if start.elapsed() > timeout {
+            return Err(Error::Timeout { message });
+        }
+        std::thread::sleep(interval);
+    }
+}
 
 // ── RedisCli ──────────────────────────────────────────────────────────────────
 
@@ -1734,6 +1761,50 @@ impl RedisServerHandle {
         self.rt.block_on(self.inner.run(args))
     }
 
+    /// `INFO [section]` parsed into a flat key/value map. See
+    /// [`crate::server::RedisServerHandle::info`].
+    pub fn info(&self, section: Option<&str>) -> Result<HashMap<String, String>> {
+        self.rt.block_on(self.inner.info(section))
+    }
+
+    /// Shorthand for `info(Some("replication"))["role"]`. See
+    /// [`crate::server::RedisServerHandle::role`].
+    pub fn role(&self) -> Result<String> {
+        self.rt.block_on(self.inner.role())
+    }
+
+    /// Block until [`Self::role`] returns `role`, or timeout. See
+    /// [`crate::server::RedisServerHandle::wait_until_role`].
+    pub fn wait_until_role(&self, role: &str, timeout: Duration) -> Result<()> {
+        self.rt.block_on(self.inner.wait_until_role(role, timeout))
+    }
+
+    /// Path to this node's log file. See
+    /// [`crate::server::RedisServerHandle::log_path`].
+    pub fn log_path(&self) -> PathBuf {
+        self.inner.log_path()
+    }
+
+    /// Current byte length of [`Self::log_path`]. See
+    /// [`crate::server::RedisServerHandle::log_len`].
+    pub fn log_len(&self) -> Result<u64> {
+        self.inner.log_len()
+    }
+
+    /// Poll the log file until a line past byte offset `from` contains
+    /// `pattern`, or timeout. See
+    /// [`crate::server::RedisServerHandle::wait_for_log`].
+    pub fn wait_for_log(&self, pattern: &str, from: u64, timeout: Duration) -> Result<String> {
+        self.rt
+            .block_on(self.inner.wait_for_log(pattern, from, timeout))
+    }
+
+    /// Number of keys in the current database, via `DBSIZE`. See
+    /// [`crate::server::RedisServerHandle::dbsize`].
+    pub fn dbsize(&self) -> Result<u64> {
+        self.rt.block_on(self.inner.dbsize())
+    }
+
     /// Consume the handle without stopping the server.
     pub fn detach(self) {
         self.inner.detach();
@@ -1748,6 +1819,21 @@ impl RedisServerHandle {
     pub fn wait_for_ready(&self, timeout: Duration) -> Result<()> {
         self.rt.block_on(self.inner.wait_for_ready(timeout))
     }
+}
+
+/// Block until `replica`'s replication link to `master` is up and caught up,
+/// or timeout. Blocks on `replica`'s runtime. See
+/// [`crate::server::wait_for_replica_sync`].
+pub fn wait_for_replica_sync(
+    replica: &RedisServerHandle,
+    master: &RedisServerHandle,
+    timeout: Duration,
+) -> Result<()> {
+    replica.rt.block_on(crate::server::wait_for_replica_sync(
+        &replica.inner,
+        &master.inner,
+        timeout,
+    ))
 }
 
 // ── RedisCluster ──────────────────────────────────────────────────────────────
@@ -2303,6 +2389,19 @@ impl RedisClusterHandle {
     pub fn wait_for_healthy(&self, timeout: Duration) -> Result<()> {
         self.rt.block_on(self.inner.wait_for_healthy(timeout))
     }
+
+    /// `CLUSTER INFO` on the node at `node_index`, parsed into a flat
+    /// key/value map. See
+    /// [`crate::cluster::RedisClusterHandle::cluster_info`].
+    pub fn cluster_info(&self, node_index: usize) -> Result<HashMap<String, String>> {
+        self.rt.block_on(self.inner.cluster_info(node_index))
+    }
+
+    /// Wait until every node reports the cluster as healthy, or timeout.
+    /// See [`crate::cluster::RedisClusterHandle::wait_for_all_healthy`].
+    pub fn wait_for_all_healthy(&self, timeout: Duration) -> Result<()> {
+        self.rt.block_on(self.inner.wait_for_all_healthy(timeout))
+    }
 }
 
 // ── RedisSentinel ─────────────────────────────────────────────────────────────
@@ -2777,6 +2876,49 @@ pub mod chaos {
             cluster.inner.node(from),
             cluster.inner.node(to),
         ))
+    }
+
+    /// Compute the hash slot for a key via `CLUSTER KEYSLOT`. Blocks on the
+    /// cluster's runtime. See [`crate::chaos::keyslot`].
+    pub fn keyslot(cluster: &RedisClusterHandle, key: &str) -> Result<u16> {
+        cluster
+            .rt
+            .block_on(crate::chaos::keyslot(&cluster.inner, key))
+    }
+
+    /// The port of the master node that currently owns `slot`. Blocks on
+    /// the cluster's runtime. See [`crate::chaos::slot_owner`].
+    pub fn slot_owner(cluster: &RedisClusterHandle, slot: u16) -> Result<u16> {
+        cluster
+            .rt
+            .block_on(crate::chaos::slot_owner(&cluster.inner, slot))
+    }
+
+    /// Poll until `slot` is owned by a port different from `old_port`, or
+    /// timeout. Returns the new owner's port. Blocks on the cluster's
+    /// runtime. See [`crate::chaos::wait_for_slot_owner_change`].
+    pub fn wait_for_slot_owner_change(
+        cluster: &RedisClusterHandle,
+        slot: u16,
+        old_port: u16,
+        timeout: Duration,
+    ) -> Result<u16> {
+        cluster
+            .rt
+            .block_on(crate::chaos::wait_for_slot_owner_change(
+                &cluster.inner,
+                slot,
+                old_port,
+                timeout,
+            ))
+    }
+
+    /// Number of keys currently stored in `slot`. Blocks on the cluster's
+    /// runtime. See [`crate::chaos::count_keys_in_slot`].
+    pub fn count_keys_in_slot(cluster: &RedisClusterHandle, slot: u16) -> Result<usize> {
+        cluster
+            .rt
+            .block_on(crate::chaos::count_keys_in_slot(&cluster.inner, slot))
     }
 }
 
