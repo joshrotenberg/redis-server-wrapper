@@ -1,5 +1,7 @@
-use redis_server_wrapper::{RedisCluster, RedisServer, chaos};
+use redis_server_wrapper::chaos::{ClientKillFilter, ClientType};
+use redis_server_wrapper::{RedisCluster, RedisServer, chaos, server};
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
 
 #[cfg_attr(not(unix), ignore)]
 #[tokio::test]
@@ -285,4 +287,329 @@ async fn wait_for_slot_owner_change_after_failover() {
 
     assert_ne!(new_owner_port, old_owner_port);
     assert_eq!(new_owner_port, replica.port());
+}
+
+#[cfg_attr(not(unix), ignore)]
+#[tokio::test]
+async fn restart_node_after_kill() {
+    let mut server = RedisServer::new()
+        .port(18000)
+        .start()
+        .await
+        .expect("failed to start server");
+
+    assert!(server.is_alive().await);
+    let old_pid = server.pid();
+
+    chaos::kill_node(&server).expect("kill_node failed");
+
+    // Poll until the process is confirmed dead before restarting.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while server.is_alive().await {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "killed node never stopped responding"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    chaos::restart_node(&mut server, Duration::from_secs(10))
+        .await
+        .expect("restart_node failed");
+
+    assert!(server.is_alive().await);
+    assert_ne!(server.pid(), old_pid);
+}
+
+#[tokio::test]
+async fn kill_client_connections_by_type() {
+    let server = RedisServer::new()
+        .port(18010)
+        .start()
+        .await
+        .expect("failed to start server");
+
+    // A raw connection with no command sent still registers as a `normal`
+    // client the moment Redis accepts it.
+    let mut extra = tokio::net::TcpStream::connect((server.host(), server.port()))
+        .await
+        .expect("connect failed");
+
+    let killed =
+        chaos::kill_client_connections(&server, ClientKillFilter::of_type(ClientType::Normal))
+            .await
+            .expect("kill_client_connections failed");
+    assert!(killed >= 1, "expected at least one client killed");
+
+    // The killed connection observes the close (EOF) on its next read --
+    // bounded so a wrong-filter bug can't hang the test.
+    let mut buf = [0u8; 8];
+    let n = tokio::time::timeout(Duration::from_secs(2), extra.read(&mut buf))
+        .await
+        .expect("read timed out")
+        .expect("read failed");
+    assert_eq!(n, 0, "expected the killed connection to observe EOF");
+}
+
+#[tokio::test]
+async fn kill_client_connections_by_addr() {
+    let server = RedisServer::new()
+        .port(18011)
+        .start()
+        .await
+        .expect("failed to start server");
+
+    let mut extra = tokio::net::TcpStream::connect((server.host(), server.port()))
+        .await
+        .expect("connect failed");
+    let local_addr = extra.local_addr().expect("local_addr failed");
+
+    let killed =
+        chaos::kill_client_connections(&server, ClientKillFilter::by_addr(local_addr.to_string()))
+            .await
+            .expect("kill_client_connections failed");
+    assert_eq!(killed, 1);
+
+    let mut buf = [0u8; 8];
+    let n = tokio::time::timeout(Duration::from_secs(2), extra.read(&mut buf))
+        .await
+        .expect("read timed out")
+        .expect("read failed");
+    assert_eq!(n, 0, "expected the killed connection to observe EOF");
+}
+
+#[tokio::test]
+async fn block_event_loop_blocks_then_recovers() {
+    let server = RedisServer::new()
+        .port(18020)
+        .enable_debug_command("yes")
+        .start()
+        .await
+        .expect("failed to start server");
+
+    assert!(server.is_alive().await);
+
+    chaos::block_event_loop(&server, Duration::from_secs(1)).expect("block_event_loop failed");
+
+    // Give the spawned task a moment to actually issue DEBUG SLEEP, then
+    // confirm the server is unresponsive while the sleep is in effect: a
+    // short bounded PING should time out rather than return quickly.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let blocked = tokio::time::timeout(Duration::from_millis(200), server.run(&["PING"])).await;
+    assert!(
+        blocked.is_err(),
+        "expected PING to be blocked while DEBUG SLEEP is in effect"
+    );
+
+    // Poll until the server recovers -- bounded so a real failure doesn't
+    // hang the suite.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if server.is_alive().await {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "server did not recover after block_event_loop"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn force_full_resync_triggers_replica_full_sync() {
+    let master = RedisServer::new()
+        .port(18030)
+        .enable_debug_command("yes")
+        .start()
+        .await
+        .expect("failed to start master");
+
+    let replica = RedisServer::new()
+        .port(18031)
+        .replicaof("127.0.0.1", 18030)
+        .start()
+        .await
+        .expect("failed to start replica");
+
+    replica
+        .wait_until_role("slave", Duration::from_secs(10))
+        .await
+        .expect("replica did not report role slave");
+
+    server::wait_for_replica_sync(&replica, &master, Duration::from_secs(10))
+        .await
+        .expect("replica did not catch up initially");
+
+    // `sync_full` lives in the `# Stats` section of `INFO`, not `#
+    // Replication`.
+    let sync_full_before: u64 = master
+        .info(Some("stats"))
+        .await
+        .expect("INFO stats failed")
+        .get("sync_full")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    chaos::force_full_resync(&master)
+        .await
+        .expect("force_full_resync failed");
+
+    // Poll until the master counts a new full resync -- proves the replica
+    // reconnected via a full SYNC rather than a partial one.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let sync_full: u64 = master
+            .info(Some("stats"))
+            .await
+            .expect("INFO stats failed")
+            .get("sync_full")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        if sync_full > sync_full_before {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "master did not record a new full resync after force_full_resync"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // The replica should be healthy again afterward.
+    master
+        .run(&["SET", "resync-key", "resync-value"])
+        .await
+        .expect("SET on master failed");
+    server::wait_for_replica_sync(&replica, &master, Duration::from_secs(10))
+        .await
+        .expect("replica did not resync after force_full_resync");
+    let val = replica
+        .run(&["GET", "resync-key"])
+        .await
+        .expect("GET on replica failed");
+    assert_eq!(val.trim(), "resync-value");
+}
+
+#[tokio::test]
+async fn break_persistence_rejects_writes_then_restores() {
+    let server = RedisServer::new()
+        .port(18040)
+        .save(true)
+        .start()
+        .await
+        .expect("failed to start server");
+
+    let guard = match chaos::break_persistence(&server, Duration::from_secs(10)).await {
+        Ok(guard) => guard,
+        Err(redis_server_wrapper::Error::PrivilegeRequired { message }) => {
+            eprintln!("skipping break_persistence_rejects_writes_then_restores: {message}");
+            return;
+        }
+        Err(e) => panic!("break_persistence failed: {e}"),
+    };
+
+    let result = server.run(&["SET", "k", "v"]).await;
+    let saw_miscount = match &result {
+        Err(e) => e.to_string().to_uppercase().contains("MISCONF"),
+        Ok(s) => s.to_uppercase().contains("MISCONF"),
+    };
+    assert!(saw_miscount, "expected a MISCONF error, got: {result:?}");
+
+    guard
+        .restore(Duration::from_secs(10))
+        .await
+        .expect("restore failed");
+
+    server
+        .run(&["SET", "k", "v"])
+        .await
+        .expect("SET after restore failed");
+}
+
+#[tokio::test]
+async fn exhaust_maxclients_rejects_new_connections() {
+    let server = RedisServer::new()
+        .port(18050)
+        .start()
+        .await
+        .expect("failed to start server");
+
+    let guard = chaos::exhaust_maxclients(&server, Some(5))
+        .await
+        .expect("exhaust_maxclients failed");
+
+    // While exhausted, a fresh connection should be rejected immediately.
+    let mut extra = tokio::net::TcpStream::connect((server.host(), server.port()))
+        .await
+        .expect("connect failed");
+    let mut buf = [0u8; 128];
+    let n = tokio::time::timeout(Duration::from_secs(2), extra.read(&mut buf))
+        .await
+        .expect("read timed out")
+        .expect("read failed");
+    assert!(
+        String::from_utf8_lossy(&buf[..n]).contains("max number of clients reached"),
+        "expected a max-clients rejection"
+    );
+
+    guard.release().await.expect("release failed");
+
+    // After release, the server accepts and answers commands again.
+    let pong = server
+        .run(&["PING"])
+        .await
+        .expect("PING failed after release");
+    assert_eq!(pong.trim(), "PONG");
+}
+
+#[cfg_attr(not(unix), ignore)]
+#[tokio::test]
+async fn flap_node_cycles_and_leaves_running_on_drop() {
+    let server = RedisServer::new()
+        .port(18060)
+        .start()
+        .await
+        .expect("failed to start server");
+
+    assert!(server.is_alive().await);
+
+    let guard = chaos::flap_node(
+        &server,
+        Duration::from_millis(150),
+        Duration::from_millis(150),
+    )
+    .expect("flap_node failed");
+
+    // Poll-based: expect to observe at least one "down" window within a few
+    // cycles.
+    let mut saw_down = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        let ping = tokio::time::timeout(Duration::from_millis(80), server.is_alive()).await;
+        if !matches!(ping, Ok(true)) {
+            saw_down = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    assert!(
+        saw_down,
+        "expected to observe at least one down window while flapping"
+    );
+
+    drop(guard);
+
+    // Poll until the node is confirmed running again after the guard drops.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if server.is_alive().await {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "node did not resume running after dropping FlapGuard"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }

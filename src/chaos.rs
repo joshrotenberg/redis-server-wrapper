@@ -40,9 +40,19 @@ use crate::error::{Error, Result};
 #[cfg(feature = "tokio")]
 use crate::server::RedisServerHandle;
 
+#[cfg(feature = "tokio")]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(feature = "tokio")]
+use std::path::PathBuf;
 use std::process::Command;
 #[cfg(feature = "tokio")]
+use std::sync::Arc;
+#[cfg(feature = "tokio")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "tokio")]
 use std::time::Duration;
+#[cfg(feature = "tokio")]
+use tokio::io::AsyncReadExt;
 
 /// Send a POSIX signal to `pid` via `kill <signal_flag> <pid>`.
 ///
@@ -193,6 +203,515 @@ pub async fn fill_memory(handle: &RedisServerHandle, prefix: &str, count: usize)
         ])
         .await?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Process / connection / persistence fault primitives
+// ---------------------------------------------------------------------------
+
+/// Relaunch a node killed with [`kill_node`] from its existing on-disk
+/// `redis.conf`.
+///
+/// Completes the crash-recovery loop `kill_node` starts: without this, a
+/// killed node is a one-way door and tests cannot exercise client
+/// reconnect-after-crash. The config file and data directory both survive
+/// `SIGKILL`, so this replays the exact same launch path the server used the
+/// first time it started, then refreshes `handle`'s pid.
+///
+/// This proves the process comes back and answers `PING`, not that any
+/// particular key survived -- that depends entirely on the save/`appendonly`
+/// configuration the node was started with, not on this call.
+#[cfg(feature = "tokio")]
+pub async fn restart_node(handle: &mut RedisServerHandle, timeout: Duration) -> Result<()> {
+    handle.restart(timeout).await
+}
+
+/// Connection-type filter used by `CLIENT KILL TYPE`, matching the values
+/// Redis accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientType {
+    /// A normal (non-replication, non-pubsub) client connection.
+    Normal,
+    /// This server's connection to its own master (i.e. this server is a
+    /// replica).
+    Master,
+    /// A connection from a replica of this server.
+    Replica,
+    /// A client subscribed via `SUBSCRIBE`/`PSUBSCRIBE`.
+    PubSub,
+}
+
+impl ClientType {
+    fn as_redis_arg(self) -> &'static str {
+        match self {
+            ClientType::Normal => "normal",
+            ClientType::Master => "master",
+            ClientType::Replica => "replica",
+            ClientType::PubSub => "pubsub",
+        }
+    }
+}
+
+/// Filter selecting which connections [`kill_client_connections`] closes.
+///
+/// At least one of `ty` / `addr` should be set: an empty filter is sent to
+/// Redis as a bare `CLIENT KILL` with no filter arguments, which Redis
+/// rejects as a syntax error. Build one directly, or use
+/// [`ClientKillFilter::of_type`] / [`ClientKillFilter::by_addr`].
+#[derive(Debug, Clone, Default)]
+pub struct ClientKillFilter {
+    /// Restrict to this connection type (`CLIENT KILL TYPE <ty>`).
+    pub ty: Option<ClientType>,
+    /// Restrict to this remote address (`CLIENT KILL ADDR <ip:port>`).
+    pub addr: Option<String>,
+}
+
+impl ClientKillFilter {
+    /// Filter by connection type only.
+    pub fn of_type(ty: ClientType) -> Self {
+        Self {
+            ty: Some(ty),
+            addr: None,
+        }
+    }
+
+    /// Filter by remote address only.
+    pub fn by_addr(addr: impl Into<String>) -> Self {
+        Self {
+            ty: None,
+            addr: Some(addr.into()),
+        }
+    }
+}
+
+/// Sever client connections matching `filter` via `CLIENT KILL`, returning
+/// the number of connections killed.
+///
+/// `SKIPME` defaults to `yes` (Redis's own default), so the `redis-cli`
+/// connection this call runs over is never counted or killed -- the harness
+/// can't accidentally cut off its own control channel.
+///
+/// This is the mechanism Redis Sentinel itself uses to force clients to
+/// reconnect after a reconfiguration: killing [`ClientType::Replica`]
+/// connections on a master forces every replica to reconnect and resync
+/// (see [`force_full_resync`] for pairing this with a full resync), and
+/// killing [`ClientType::Normal`] connections (optionally narrowed with
+/// `addr`) simulates a server-side connection reset that a client's own
+/// reconnect logic must handle. The client only notices the connection is
+/// gone the next time it sends a command.
+#[cfg(feature = "tokio")]
+pub async fn kill_client_connections(
+    handle: &RedisServerHandle,
+    filter: ClientKillFilter,
+) -> Result<u64> {
+    let mut args: Vec<String> = vec!["CLIENT".into(), "KILL".into()];
+    if let Some(ty) = filter.ty {
+        args.push("TYPE".into());
+        args.push(ty.as_redis_arg().into());
+    }
+    if let Some(addr) = filter.addr {
+        args.push("ADDR".into());
+        args.push(addr);
+    }
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = handle.run(&arg_refs).await?;
+    out.trim().parse::<u64>().map_err(|_| Error::Timeout {
+        message: format!("could not parse CLIENT KILL response: {out}"),
+    })
+}
+
+/// Block the server's event loop for `duration` via `DEBUG SLEEP`.
+///
+/// Requires the server to have been started with
+/// `.enable_debug_command("yes")` (Redis 7+ gates `DEBUG` behind that
+/// setting); otherwise the spawned `DEBUG SLEEP` call fails with an unknown
+/// command error that this function has no way to report back, since it
+/// returns before that reply comes in.
+///
+/// Spawns a background tokio task that issues `DEBUG SLEEP <seconds>` and
+/// returns to the caller immediately. A direct
+/// `handle.run(&["DEBUG", "SLEEP", ..])` call would block the calling task
+/// for the full duration instead: `redis-cli` doesn't get a reply until the
+/// server wakes back up, so awaiting it directly would defeat the point of a
+/// fire-and-forget fault -- the caller wants to keep running other
+/// assertions (e.g. against a *different* node, or the client under test)
+/// while this node is wedged.
+///
+/// Distinct from [`slow_down`] (`CLIENT PAUSE`, which keeps the event loop
+/// and replication alive) and [`freeze_node`] (`SIGSTOP`, which suspends the
+/// whole process): `DEBUG SLEEP` keeps the process running and connections
+/// accepted by the kernel, but the single command-processing thread never
+/// answers anything until the sleep ends -- the same shape a runaway Lua
+/// script or a large O(N) command produces in a real incident.
+#[cfg(feature = "tokio")]
+pub fn block_event_loop(handle: &RedisServerHandle, duration: Duration) -> Result<()> {
+    let cli = handle.cli().clone();
+    tokio::spawn(async move {
+        let secs = duration.as_secs_f64().to_string();
+        let _ = cli.run(&["DEBUG", "SLEEP", &secs]).await;
+    });
+    Ok(())
+}
+
+/// Force the next replica reconnect on `master` to be a full resync instead
+/// of a partial one.
+///
+/// Runs `DEBUG CHANGE-REPL-ID` to invalidate the master's replication
+/// history, then `CLIENT KILL TYPE replica` to drop the existing replica
+/// links -- when they reconnect, `PSYNC` no longer recognizes the
+/// replication ID they last saw and falls back to a full sync. Requires the
+/// server to have been started with `.enable_debug_command("yes")` (Redis 7+
+/// gates `DEBUG` behind that setting).
+///
+/// Useful for testing client and application behavior during the full-sync
+/// window: the master forking/`BGSAVE`-ing to build the snapshot, the
+/// replica flushing its dataset and reloading, and stale reads on the
+/// replica while that happens.
+#[cfg(feature = "tokio")]
+pub async fn force_full_resync(master: &RedisServerHandle) -> Result<()> {
+    master.run(&["DEBUG", "CHANGE-REPL-ID"]).await?;
+    master.run(&["CLIENT", "KILL", "TYPE", "replica"]).await?;
+    Ok(())
+}
+
+/// Returns `true` if the current process is running as root (`id -u` == 0).
+///
+/// Used to short-circuit [`break_persistence`]: chmod permission bits are
+/// ignored for root, and CI containers commonly run as root, so without this
+/// check the function would silently fail to break anything instead of
+/// erroring out.
+#[cfg(feature = "tokio")]
+fn running_as_root() -> bool {
+    Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|s| s.trim() == "0")
+        .unwrap_or(false)
+}
+
+/// Get a single scalar config value via `CONFIG GET <key>`. `redis-cli`'s
+/// raw output for `CONFIG GET` is the key name on one line followed by the
+/// value on the next; this returns just the value.
+#[cfg(feature = "tokio")]
+async fn config_get_single(handle: &RedisServerHandle, key: &str) -> Result<String> {
+    let raw = handle.run(&["CONFIG", "GET", key]).await?;
+    let mut lines = raw.lines();
+    lines.next(); // the key itself, echoed back
+    let value = lines.next().ok_or_else(|| Error::Timeout {
+        message: format!("CONFIG GET {key} returned unexpected output: {raw}"),
+    })?;
+    Ok(value.trim().to_string())
+}
+
+/// Guard returned by [`break_persistence`]. Restores write access to the
+/// node's data directory and confirms persistence has recovered.
+///
+/// If dropped without calling [`PersistenceGuard::restore`], makes a
+/// best-effort synchronous attempt to restore the directory's original
+/// permissions -- matching [`ReshardGuard`]'s Drop behavior -- but cannot
+/// run the confirming `BGSAVE`/poll since `Drop` cannot `await`. Call
+/// [`PersistenceGuard::restore`] explicitly whenever the test needs writes
+/// working again afterward.
+#[cfg(feature = "tokio")]
+pub struct PersistenceGuard<'a> {
+    handle: &'a RedisServerHandle,
+    dir: PathBuf,
+    original_mode: u32,
+    resolved: bool,
+}
+
+/// Make a node's data directory unwritable so `BGSAVE` fails and, with the
+/// default `stop-writes-on-bgsave-error yes`, subsequent writes are rejected
+/// with `-MISCONF` until [`PersistenceGuard::restore`] is called.
+///
+/// Reproduces one of the most common real Redis production incidents:
+/// clients must surface a failed-persistence `-MISCONF` correctly rather
+/// than treating it like any other error.
+///
+/// Errors immediately if the current process is running as root
+/// ([`Error::PrivilegeRequired`]): chmod permission bits are ignored for
+/// root, so nothing would actually break, and CI containers commonly run as
+/// root.
+#[cfg(feature = "tokio")]
+pub async fn break_persistence(
+    handle: &RedisServerHandle,
+    timeout: Duration,
+) -> Result<PersistenceGuard<'_>> {
+    if running_as_root() {
+        return Err(Error::PrivilegeRequired {
+            message: "break_persistence cannot chmod the data directory unwritable while \
+                      running as root (permission bits are ignored for root); refusing rather \
+                      than silently failing to break anything"
+                .to_string(),
+        });
+    }
+
+    let dir = PathBuf::from(config_get_single(handle, "dir").await?);
+    let metadata = std::fs::metadata(&dir)?;
+    let original_mode = metadata.permissions().mode();
+
+    let mut perms = metadata.permissions();
+    perms.set_mode(0o500);
+    std::fs::set_permissions(&dir, perms)?;
+
+    handle.run(&["BGSAVE"]).await?;
+
+    crate::wait::wait_for(
+        || async {
+            matches!(
+                handle.info(Some("persistence")).await,
+                Ok(info) if info.get("rdb_last_bgsave_status").map(String::as_str) == Some("err")
+            )
+        },
+        timeout,
+        Duration::from_millis(250),
+        "BGSAVE did not report a failed status after breaking persistence",
+    )
+    .await?;
+
+    Ok(PersistenceGuard {
+        handle,
+        dir,
+        original_mode,
+        resolved: false,
+    })
+}
+
+#[cfg(feature = "tokio")]
+impl<'a> PersistenceGuard<'a> {
+    /// Restore write access to the data directory, then confirm persistence
+    /// has recovered by triggering a `BGSAVE` and polling `INFO persistence`
+    /// for `rdb_last_bgsave_status:ok`.
+    ///
+    /// Writes stay rejected with `-MISCONF` until a save actually succeeds,
+    /// so restoring permissions alone is not enough to undo
+    /// [`break_persistence`].
+    pub async fn restore(mut self, timeout: Duration) -> Result<()> {
+        let mut perms = std::fs::metadata(&self.dir)?.permissions();
+        perms.set_mode(self.original_mode);
+        std::fs::set_permissions(&self.dir, perms)?;
+
+        self.handle.run(&["BGSAVE"]).await?;
+
+        crate::wait::wait_for(
+            || async {
+                matches!(
+                    self.handle.info(Some("persistence")).await,
+                    Ok(info) if info.get("rdb_last_bgsave_status").map(String::as_str) == Some("ok")
+                )
+            },
+            timeout,
+            Duration::from_millis(250),
+            "BGSAVE did not report success after restoring persistence",
+        )
+        .await?;
+
+        self.resolved = true;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "tokio")]
+impl Drop for PersistenceGuard<'_> {
+    fn drop(&mut self) {
+        if self.resolved {
+            return;
+        }
+        // Best-effort: at least restore write access synchronously so the
+        // node's data directory isn't left unwritable if the test never
+        // calls `restore`. Can't await here, so this doesn't confirm BGSAVE
+        // has recovered -- call `restore` explicitly to be sure.
+        if let Ok(metadata) = std::fs::metadata(&self.dir) {
+            let mut perms = metadata.permissions();
+            perms.set_mode(self.original_mode);
+            let _ = std::fs::set_permissions(&self.dir, perms);
+        }
+    }
+}
+
+/// Guard returned by [`exhaust_maxclients`]. Holds every TCP connection
+/// opened to fill the server's `maxclients` limit, plus the previous
+/// `maxclients` value if this call lowered it.
+///
+/// Dropping the guard without calling [`ClientFloodGuard::release`] closes
+/// the held sockets (freeing up client slots) but leaves `maxclients` at the
+/// lowered value -- restoring it needs a live connection, which `Drop`
+/// cannot obtain since it cannot `await`. Call
+/// [`ClientFloodGuard::release`] explicitly to restore the limit too.
+#[cfg(feature = "tokio")]
+pub struct ClientFloodGuard<'a> {
+    handle: &'a RedisServerHandle,
+    sockets: Vec<tokio::net::TcpStream>,
+    previous_maxclients: Option<String>,
+}
+
+/// Open and hold connections until the server's `maxclients` limit is
+/// reached, so the next connection attempt is rejected with `-ERR max
+/// number of clients reached`.
+///
+/// If `maxclients` is `Some(n)`, first runs `CONFIG SET maxclients n` to
+/// lower the ceiling (remembering the previous value so
+/// [`ClientFloodGuard::release`] can restore it) -- this makes exhaustion
+/// cheap and deterministic instead of opening potentially thousands of
+/// connections. If `None`, opens connections against whatever `maxclients`
+/// is already configured.
+///
+/// Detects exhaustion by reading the reply on each newly opened connection
+/// (bounded by a short per-connection read timeout) rather than by counting
+/// connects: the kernel accept backlog completes the TCP handshake
+/// regardless of whether Redis itself has a free client slot, so only the
+/// application-level `-ERR max number of clients reached` reply (sent
+/// immediately, unprompted, before the connection is closed) tells rejection
+/// apart from a live slot.
+///
+/// While the guard is held, `handle.run()` / `handle.is_alive()` and any
+/// other new connection to this node are also rejected -- the harness's own
+/// control connections are not exempt. Call [`ClientFloodGuard::release`] to
+/// free the held sockets and restore `maxclients`.
+#[cfg(feature = "tokio")]
+pub async fn exhaust_maxclients(
+    handle: &RedisServerHandle,
+    maxclients: Option<u32>,
+) -> Result<ClientFloodGuard<'_>> {
+    let previous_maxclients = if let Some(n) = maxclients {
+        let previous = config_get_single(handle, "maxclients").await?;
+        handle
+            .run(&["CONFIG", "SET", "maxclients", &n.to_string()])
+            .await?;
+        Some(previous)
+    } else {
+        None
+    };
+
+    let effective_maxclients: usize = config_get_single(handle, "maxclients")
+        .await?
+        .parse()
+        .unwrap_or(10_000);
+    // Safety cap so a detection mismatch (e.g. an unexpected error string)
+    // can't spin this loop forever instead of returning an error.
+    let attempt_cap = effective_maxclients + 8;
+
+    let host = handle.host().to_string();
+    let port = handle.port();
+    let mut sockets = Vec::new();
+    let mut exhausted = false;
+    for _ in 0..attempt_cap {
+        let mut stream = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
+        let mut buf = [0u8; 128];
+        match tokio::time::timeout(Duration::from_millis(200), stream.read(&mut buf)).await {
+            Ok(Ok(0)) => {
+                // Connection closed immediately with no data: exhausted.
+                exhausted = true;
+                break;
+            }
+            Ok(Ok(n))
+                if String::from_utf8_lossy(&buf[..n]).contains("max number of clients reached") =>
+            {
+                exhausted = true;
+                break;
+            }
+            _ => sockets.push(stream),
+        }
+    }
+
+    if !exhausted {
+        return Err(Error::Timeout {
+            message: format!(
+                "did not observe \"max number of clients reached\" within {attempt_cap} connection attempts"
+            ),
+        });
+    }
+
+    Ok(ClientFloodGuard {
+        handle,
+        sockets,
+        previous_maxclients,
+    })
+}
+
+#[cfg(feature = "tokio")]
+impl<'a> ClientFloodGuard<'a> {
+    /// Free the held sockets, then restore `maxclients` to its value before
+    /// [`exhaust_maxclients`] was called (if it lowered one).
+    ///
+    /// Order matters: sockets must close *before* the `CONFIG SET` call --
+    /// while the server is exhausted, even the harness's own `redis-cli`
+    /// invocations are rejected the same way external clients are, so there
+    /// is no free slot to run `CONFIG SET` on until connections are freed
+    /// first.
+    pub async fn release(mut self) -> Result<()> {
+        self.sockets.clear();
+        if let Some(previous) = self.previous_maxclients.take() {
+            self.handle
+                .run(&["CONFIG", "SET", "maxclients", &previous])
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+/// Guard returned by [`flap_node`]. Stops the flap loop and guarantees the
+/// node is left running (a final `SIGCONT`) when dropped.
+#[cfg(feature = "tokio")]
+pub struct FlapGuard {
+    pid: u32,
+    stop: Arc<AtomicBool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// Cycle a node down (`SIGSTOP`) and up (`SIGCONT`) on a timer in a
+/// background tokio task, simulating a flapping host that repeatedly enters
+/// and leaves failure-detection windows (`cluster-node-timeout`, Sentinel's
+/// `down-after-milliseconds`). Stresses client retry/backoff logic and
+/// half-triggered failovers in a way a single [`pause_node`] does not.
+///
+/// Sends the first `SIGSTOP` immediately and returns once that signal is
+/// confirmed delivered -- the same convention [`pause_node`] uses -- so a
+/// dead target process surfaces as an error right away instead of a guard
+/// that silently never flaps. The rest of the cycle (the deferred
+/// `SIGCONT`/`SIGSTOP` pairs) runs in a background task and is best-effort,
+/// same as [`pause_node`]'s deferred resume.
+///
+/// Drop the returned [`FlapGuard`] to stop the loop; it always sends a final
+/// `SIGCONT` on drop (harmless if the node is already running), so the node
+/// is never left frozen.
+#[cfg(feature = "tokio")]
+pub fn flap_node(handle: &RedisServerHandle, down: Duration, up: Duration) -> Result<FlapGuard> {
+    let pid = handle.pid();
+    send_signal(pid, "-STOP")?;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let task = {
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(down).await;
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                let _ = send_signal(pid, "-CONT");
+                tokio::time::sleep(up).await;
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                let _ = send_signal(pid, "-STOP");
+            }
+        })
+    };
+
+    Ok(FlapGuard { pid, stop, task })
+}
+
+#[cfg(feature = "tokio")]
+impl Drop for FlapGuard {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.task.abort();
+        let _ = send_signal(self.pid, "-CONT");
+    }
 }
 
 // ---------------------------------------------------------------------------

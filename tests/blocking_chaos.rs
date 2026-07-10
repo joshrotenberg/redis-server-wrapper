@@ -1,5 +1,6 @@
 #![cfg(feature = "blocking")]
 
+use redis_server_wrapper::blocking::chaos::{ClientKillFilter, ClientType};
 use redis_server_wrapper::blocking::{RedisCluster, RedisServer, chaos};
 use std::time::Duration;
 
@@ -195,4 +196,139 @@ fn chaos_wait_for_slot_owner_change_after_failover() {
 
     assert_ne!(new_owner_port, old_owner_port);
     assert_eq!(new_owner_port, replica_port);
+}
+
+#[cfg_attr(not(unix), ignore)]
+#[test]
+fn restart_node_after_kill() {
+    let mut server = RedisServer::new()
+        .port(18100)
+        .start()
+        .expect("failed to start server");
+
+    assert!(server.is_alive());
+    let old_pid = server.pid();
+
+    chaos::kill_node(&server).expect("kill_node failed");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while server.is_alive() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "killed node never stopped responding"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    chaos::restart_node(&mut server, Duration::from_secs(10)).expect("restart_node failed");
+
+    assert!(server.is_alive());
+    assert_ne!(server.pid(), old_pid);
+}
+
+#[test]
+fn kill_client_connections_by_type() {
+    use std::io::Read;
+
+    let server = RedisServer::new()
+        .port(18110)
+        .start()
+        .expect("failed to start server");
+
+    let mut extra =
+        std::net::TcpStream::connect((server.host(), server.port())).expect("connect failed");
+    extra
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set_read_timeout failed");
+
+    let killed =
+        chaos::kill_client_connections(&server, ClientKillFilter::of_type(ClientType::Normal))
+            .expect("kill_client_connections failed");
+    assert!(killed >= 1, "expected at least one client killed");
+
+    let mut buf = [0u8; 8];
+    let n = extra.read(&mut buf).expect("read failed");
+    assert_eq!(n, 0, "expected the killed connection to observe EOF");
+}
+
+#[test]
+fn break_persistence_rejects_writes_then_restores() {
+    let server = RedisServer::new()
+        .port(18120)
+        .save(true)
+        .start()
+        .expect("failed to start server");
+
+    let guard = match chaos::break_persistence(&server, Duration::from_secs(10)) {
+        Ok(guard) => guard,
+        Err(redis_server_wrapper::Error::PrivilegeRequired { message }) => {
+            eprintln!("skipping break_persistence_rejects_writes_then_restores: {message}");
+            return;
+        }
+        Err(e) => panic!("break_persistence failed: {e}"),
+    };
+
+    let result = server.run(&["SET", "k", "v"]);
+    let saw_miscount = match &result {
+        Err(e) => e.to_string().to_uppercase().contains("MISCONF"),
+        Ok(s) => s.to_uppercase().contains("MISCONF"),
+    };
+    assert!(saw_miscount, "expected a MISCONF error, got: {result:?}");
+
+    guard
+        .restore(Duration::from_secs(10))
+        .expect("restore failed");
+
+    server
+        .run(&["SET", "k", "v"])
+        .expect("SET after restore failed");
+}
+
+#[cfg_attr(not(unix), ignore)]
+#[test]
+fn flap_node_cycles_and_leaves_running_on_drop() {
+    let server = RedisServer::new()
+        .port(18130)
+        .start()
+        .expect("failed to start server");
+
+    assert!(server.is_alive());
+
+    let down = Duration::from_millis(300);
+    let up = Duration::from_millis(150);
+    let guard = chaos::flap_node(&server, down, up).expect("flap_node failed");
+
+    // `run` has no internal timeout (unlike `is_alive`), so a call that
+    // starts while the node is `SIGSTOP`ped simply waits in the kernel
+    // accept queue until the node resumes and answers: its elapsed time
+    // reveals whether it caught a down window. Repeat until one call takes
+    // a large enough chunk of the down window to prove it did.
+    let mut saw_down = false;
+    let test_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < test_deadline {
+        let start = std::time::Instant::now();
+        let _ = server.run(&["PING"]);
+        if start.elapsed() >= down / 2 {
+            saw_down = true;
+            break;
+        }
+    }
+    assert!(
+        saw_down,
+        "expected to observe at least one down window while flapping"
+    );
+
+    drop(guard);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if server.is_alive() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "node did not resume running after dropping FlapGuard"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
