@@ -98,6 +98,67 @@ async fn failover_and_recover_cluster() {
     assert!(cluster.all_alive().await);
 }
 
+#[cfg_attr(not(unix), ignore)]
+#[tokio::test]
+async fn pause_node_resumes_automatically() {
+    let server = RedisServer::new()
+        .port(17704)
+        .start()
+        .await
+        .expect("failed to start server");
+
+    assert!(server.is_alive().await);
+
+    chaos::pause_node(&server, Duration::from_millis(300));
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let resumed_ping = tokio::time::timeout(Duration::from_secs(2), server.is_alive()).await;
+    assert_eq!(resumed_ping, Ok(true));
+}
+
+#[tokio::test]
+async fn fill_memory_writes_keys() {
+    let server = RedisServer::new()
+        .port(17705)
+        .start()
+        .await
+        .expect("failed to start server");
+
+    chaos::fill_memory(&server, "k:", 50)
+        .await
+        .expect("fill_memory failed");
+
+    let dbsize = server.run(&["DBSIZE"]).await.expect("DBSIZE failed");
+    assert!(dbsize.contains("50"));
+}
+
+#[cfg_attr(not(unix), ignore)]
+#[tokio::test]
+async fn partition_freezes_unreachable_nodes() {
+    let cluster = RedisCluster::builder()
+        .masters(3)
+        .replicas_per_master(0)
+        .base_port(17740)
+        .start()
+        .await
+        .expect("failed to start cluster");
+
+    cluster
+        .wait_for_healthy(Duration::from_secs(30))
+        .await
+        .expect("cluster did not become healthy");
+
+    let frozen = chaos::partition(&cluster, &[0]);
+    assert!(!frozen.is_empty());
+    assert_eq!(frozen.len(), cluster.nodes().len() - 1);
+
+    chaos::recover(&cluster);
+
+    let node0 = &cluster.nodes()[0];
+    assert!(node0.run(&["PING"]).await.is_ok());
+}
+
 #[tokio::test]
 async fn kill_master_by_slot_removes_node() {
     let cluster = RedisCluster::builder()

@@ -41,6 +41,8 @@ use crate::error::Result;
 use crate::server::RedisServerHandle;
 
 use std::process::Command;
+#[cfg(feature = "tokio")]
+use std::time::Duration;
 
 // ---------------------------------------------------------------------------
 // Node-level operations
@@ -80,6 +82,23 @@ pub fn resume_node(handle: &RedisServerHandle) {
     let _ = Command::new("kill").args(["-CONT", &pid]).output();
 }
 
+/// Freeze a node for a fixed duration, then resume it automatically.
+///
+/// Sends SIGSTOP immediately and returns without blocking. A background
+/// tokio task sleeps for `duration` and then sends SIGCONT, so the node
+/// comes back on its own -- there's no need to call [`resume_node`] or
+/// [`recover`] afterward. Useful for testing timeout handling where the
+/// outage has a bounded, known length.
+#[cfg(feature = "tokio")]
+pub fn pause_node(handle: &RedisServerHandle, duration: Duration) {
+    let pid = handle.pid().to_string();
+    let _ = Command::new("kill").args(["-STOP", &pid]).output();
+    tokio::spawn(async move {
+        tokio::time::sleep(duration).await;
+        let _ = Command::new("kill").args(["-CONT", &pid]).output();
+    });
+}
+
 /// Pause client connections for a duration using `CLIENT PAUSE`.
 ///
 /// Unlike [`freeze_node`], the server process stays responsive for
@@ -100,6 +119,22 @@ pub async fn trigger_save(handle: &RedisServerHandle) -> Result<String> {
 #[cfg(feature = "tokio")]
 pub async fn flushall(handle: &RedisServerHandle) -> Result<String> {
     handle.run(&["FLUSHALL"]).await
+}
+
+/// Fill a node with `count` keys holding fixed-size values.
+///
+/// Writes keys named `<prefix>0` through `<prefix>{count-1}`, each holding a
+/// 1 KiB value. Useful for exercising `maxmemory` and eviction-policy
+/// behavior with a deterministic, bounded key count.
+#[cfg(feature = "tokio")]
+pub async fn fill_memory(handle: &RedisServerHandle, prefix: &str, count: usize) -> Result<()> {
+    let value = "x".repeat(1024);
+    for i in 0..count {
+        handle
+            .run(&["SET", &format!("{prefix}{i}"), &value])
+            .await?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +189,25 @@ pub async fn trigger_failover(replica: &RedisServerHandle) -> Result<String> {
         return replica.run(&["CLUSTER", "FAILOVER", "FORCE"]).await;
     }
     Ok(result)
+}
+
+/// Simulate a network partition by freezing every node not in `reachable`.
+///
+/// `reachable` holds the indices, matching the order of
+/// [`RedisClusterHandle::nodes`], of the nodes that stay up; every other
+/// node is sent SIGSTOP. Returns the ports of the frozen nodes. Call
+/// [`recover`] to heal the partition.
+#[cfg(feature = "tokio")]
+pub fn partition(cluster: &RedisClusterHandle, reachable: &[usize]) -> Vec<u16> {
+    let mut frozen = Vec::new();
+    for (i, node) in cluster.nodes().iter().enumerate() {
+        if !reachable.contains(&i) {
+            let pid = node.pid().to_string();
+            let _ = Command::new("kill").args(["-STOP", &pid]).output();
+            frozen.push(node.port());
+        }
+    }
+    frozen
 }
 
 /// Resume all nodes in a cluster by sending SIGCONT.
