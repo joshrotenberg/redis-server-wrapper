@@ -951,6 +951,16 @@ impl RedisServer {
         self
     }
 
+    /// Load a Redis module at startup with load-time arguments.
+    pub fn loadmodule_with_args(
+        mut self,
+        path: impl Into<PathBuf>,
+        args: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.inner = self.inner.loadmodule_with_args(path, args);
+        self
+    }
+
     // -- advanced --
 
     /// Set the server tick frequency in Hz.
