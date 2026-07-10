@@ -272,12 +272,24 @@ pub fn partition(cluster: &RedisClusterHandle, reachable: &[usize]) -> Result<Ve
 /// Useful after freezing nodes for partition simulation. Sends SIGCONT to
 /// every node regardless of whether it was frozen -- signaling an
 /// already-running node with SIGCONT is a no-op, not an error.
+///
+/// Every node is attempted before any failure is reported, so a dead node
+/// (e.g. one removed with [`kill_node`]) does not prevent later frozen nodes
+/// from resuming. Returns the first failure, if any, after the full pass.
 #[cfg(feature = "tokio")]
 pub fn recover(cluster: &RedisClusterHandle) -> Result<()> {
+    let mut first_err = None;
     for node in cluster.nodes() {
-        send_signal(node.pid(), "-CONT")?;
+        if let Err(e) = send_signal(node.pid(), "-CONT")
+            && first_err.is_none()
+        {
+            first_err = Some(e);
+        }
     }
-    Ok(())
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 // ---------------------------------------------------------------------------
