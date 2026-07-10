@@ -1755,6 +1755,30 @@ impl RedisClusterBuilder {
         self
     }
 
+    // -- modules --
+
+    /// Load a Redis module at startup on every cluster node.
+    pub fn loadmodule(mut self, path: impl Into<PathBuf>) -> Self {
+        self.inner = self.inner.loadmodule(path);
+        self
+    }
+
+    /// Load a Redis module at startup on every cluster node, with load-time arguments.
+    pub fn loadmodule_with_args(
+        mut self,
+        path: impl Into<PathBuf>,
+        args: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.inner = self.inner.loadmodule_with_args(path, args);
+        self
+    }
+
+    /// Enable the MODULE command on every cluster node.
+    pub fn enable_module_command(mut self, mode: impl Into<String>) -> Self {
+        self.inner = self.inner.enable_module_command(mode);
+        self
+    }
+
     /// Set an arbitrary config directive for all cluster nodes.
     pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.inner = self.inner.extra(key, value);

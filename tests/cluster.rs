@@ -184,3 +184,26 @@ async fn cluster_with_node_config() {
         "node 0 should have slowlog-max-len 512, got: {val}"
     );
 }
+
+#[tokio::test]
+async fn cluster_enable_module_command() {
+    let cluster = RedisCluster::builder()
+        .masters(3)
+        .replicas_per_master(0)
+        .base_port(17050)
+        .enable_module_command("yes")
+        .start()
+        .await
+        .expect("failed to start cluster");
+
+    cluster
+        .wait_for_healthy(std::time::Duration::from_secs(30))
+        .await
+        .expect("cluster did not become healthy");
+
+    for node in cluster.nodes() {
+        node.run(&["MODULE", "LIST"])
+            .await
+            .expect("MODULE LIST should succeed on every node");
+    }
+}

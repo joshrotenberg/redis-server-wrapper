@@ -111,6 +111,8 @@ pub struct RedisClusterBuilder {
     tls_auth_clients: Option<bool>,
     tls_replication: Option<bool>,
     tls_cluster: Option<bool>,
+    loadmodule: Vec<(PathBuf, Vec<String>)>,
+    enable_module_command: Option<String>,
     extra: HashMap<String, String>,
     redis_server_bin: String,
     redis_cli_bin: String,
@@ -417,6 +419,31 @@ impl RedisClusterBuilder {
         self
     }
 
+    // -- modules --
+
+    /// Load a Redis module at startup on every cluster node.
+    pub fn loadmodule(mut self, path: impl Into<PathBuf>) -> Self {
+        self.loadmodule.push((path.into(), Vec::new()));
+        self
+    }
+
+    /// Load a Redis module at startup on every cluster node, with load-time arguments.
+    pub fn loadmodule_with_args(
+        mut self,
+        path: impl Into<PathBuf>,
+        args: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.loadmodule
+            .push((path.into(), args.into_iter().map(Into::into).collect()));
+        self
+    }
+
+    /// Enable the MODULE command (`"yes"`, `"local"`, or `"no"`) on every cluster node.
+    pub fn enable_module_command(mut self, mode: impl Into<String>) -> Self {
+        self.enable_module_command = Some(mode.into());
+        self
+    }
+
     /// Set a per-node configuration callback.
     ///
     /// The callback receives a [`NodeContext`] containing the pre-configured
@@ -671,6 +698,12 @@ impl RedisClusterBuilder {
             if let Some(v) = self.tls_cluster {
                 server = server.tls_cluster(v);
             }
+            for (path, args) in &self.loadmodule {
+                server = server.loadmodule_with_args(path.clone(), args.iter().cloned());
+            }
+            if let Some(ref mode) = self.enable_module_command {
+                server = server.enable_module_command(mode.clone());
+            }
             for (key, value) in &self.extra {
                 server = server.extra(key.clone(), value.clone());
             }
@@ -820,6 +853,8 @@ impl RedisCluster {
             tls_auth_clients: None,
             tls_replication: None,
             tls_cluster: None,
+            loadmodule: Vec::new(),
+            enable_module_command: None,
             extra: HashMap::new(),
             redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),
@@ -1096,5 +1131,24 @@ mod tests {
             .extra("maxmemory", "10mb");
         assert_eq!(b.logfile.as_deref(), Some("/tmp/cluster.log"));
         assert_eq!(b.extra.get("maxmemory").map(String::as_str), Some("10mb"));
+    }
+
+    #[test]
+    fn builder_modules() {
+        let b = RedisCluster::builder()
+            .loadmodule("/x/mod.so")
+            .loadmodule_with_args("/y/mod.so", ["a", "b"])
+            .enable_module_command("yes");
+        assert_eq!(
+            b.loadmodule,
+            vec![
+                (PathBuf::from("/x/mod.so"), Vec::<String>::new()),
+                (
+                    PathBuf::from("/y/mod.so"),
+                    vec!["a".to_string(), "b".to_string()]
+                ),
+            ]
+        );
+        assert_eq!(b.enable_module_command.as_deref(), Some("yes"));
     }
 }

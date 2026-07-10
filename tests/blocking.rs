@@ -153,6 +153,27 @@ fn blocking_cluster_start_and_health() {
 }
 
 #[test]
+fn blocking_cluster_enable_module_command() {
+    let cluster = RedisCluster::builder()
+        .masters(3)
+        .replicas_per_master(0)
+        .base_port(17110)
+        .enable_module_command("yes")
+        .start()
+        .expect("failed to start redis cluster");
+
+    cluster
+        .wait_for_healthy(std::time::Duration::from_secs(30))
+        .expect("cluster did not become healthy");
+
+    for index in 0..cluster.node_addrs().len() {
+        cluster
+            .node_run(index, &["MODULE", "LIST"])
+            .expect("MODULE LIST should succeed on every node");
+    }
+}
+
+#[test]
 fn blocking_sentinel_start_and_health() {
     let sentinel = RedisSentinel::builder()
         .master_port(16590)
