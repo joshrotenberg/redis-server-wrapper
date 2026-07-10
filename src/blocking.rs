@@ -2166,39 +2166,48 @@ pub mod chaos {
     use std::time::Duration;
 
     /// Kill a node immediately with SIGKILL. See [`crate::chaos::kill_node`].
-    pub fn kill_node(handle: &RedisServerHandle) {
-        crate::chaos::kill_node(&handle.inner);
+    pub fn kill_node(handle: &RedisServerHandle) -> Result<()> {
+        crate::chaos::kill_node(&handle.inner)
     }
 
     /// Freeze a node by sending SIGSTOP. See [`crate::chaos::freeze_node`].
-    pub fn freeze_node(handle: &RedisServerHandle) {
-        crate::chaos::freeze_node(&handle.inner);
+    pub fn freeze_node(handle: &RedisServerHandle) -> Result<()> {
+        crate::chaos::freeze_node(&handle.inner)
     }
 
     /// Resume a frozen node by sending SIGCONT. See [`crate::chaos::resume_node`].
-    pub fn resume_node(handle: &RedisServerHandle) {
-        crate::chaos::resume_node(&handle.inner);
+    pub fn resume_node(handle: &RedisServerHandle) -> Result<()> {
+        crate::chaos::resume_node(&handle.inner)
     }
 
     /// Freeze a node for a fixed duration, then resume it automatically.
     ///
-    /// Sends SIGSTOP immediately and returns without blocking. Unlike the
-    /// other functions here, this one enters `handle`'s runtime (via
-    /// [`Runtime::enter`](tokio::runtime::Runtime::enter)) before delegating,
-    /// so the background resume task that
+    /// Sends SIGSTOP immediately and returns once that signal is confirmed
+    /// delivered. Unlike the other functions here, this one enters `handle`'s
+    /// runtime (via [`Runtime::enter`](tokio::runtime::Runtime::enter))
+    /// before delegating, so the background resume task that
     /// [`crate::chaos::pause_node`] spawns internally lands on that runtime
     /// instead of panicking for lack of a runtime context.
-    pub fn pause_node(handle: &RedisServerHandle, duration: Duration) {
+    pub fn pause_node(handle: &RedisServerHandle, duration: Duration) -> Result<()> {
         let _guard = handle.rt.enter();
-        crate::chaos::pause_node(&handle.inner, duration);
+        crate::chaos::pause_node(&handle.inner, duration)
     }
 
-    /// Pause client connections for a duration using `CLIENT PAUSE`. Blocks
-    /// on the handle's runtime. See [`crate::chaos::slow_down`].
+    /// Pause client connections for a duration using `CLIENT PAUSE ... ALL`.
+    /// Blocks on the handle's runtime. See [`crate::chaos::slow_down`].
     pub fn slow_down(handle: &RedisServerHandle, millis: u64) -> Result<String> {
         handle
             .rt
             .block_on(crate::chaos::slow_down(&handle.inner, millis))
+    }
+
+    /// Pause only write commands for a duration using `CLIENT PAUSE ...
+    /// WRITE`. Blocks on the handle's runtime. See
+    /// [`crate::chaos::slow_down_writes`].
+    pub fn slow_down_writes(handle: &RedisServerHandle, millis: u64) -> Result<String> {
+        handle
+            .rt
+            .block_on(crate::chaos::slow_down_writes(&handle.inner, millis))
     }
 
     /// Trigger a background RDB save. Blocks on the handle's runtime. See
@@ -2257,14 +2266,14 @@ pub mod chaos {
 
     /// Simulate a network partition by freezing every node not in
     /// `reachable`. See [`crate::chaos::partition`].
-    pub fn partition(cluster: &RedisClusterHandle, reachable: &[usize]) -> Vec<u16> {
+    pub fn partition(cluster: &RedisClusterHandle, reachable: &[usize]) -> Result<Vec<u16>> {
         crate::chaos::partition(&cluster.inner, reachable)
     }
 
     /// Resume all nodes in a cluster by sending SIGCONT. See
     /// [`crate::chaos::recover`].
-    pub fn recover(cluster: &RedisClusterHandle) {
-        crate::chaos::recover(&cluster.inner);
+    pub fn recover(cluster: &RedisClusterHandle) -> Result<()> {
+        crate::chaos::recover(&cluster.inner)
     }
 
     /// Migrate a single hash slot from one master to another. Blocks on the

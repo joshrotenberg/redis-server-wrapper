@@ -46,6 +46,19 @@ pub enum Error {
         message: String,
     },
 
+    /// Sending a POSIX signal to a node process failed, either because the
+    /// `kill` invocation itself could not be spawned or because it exited
+    /// with a non-zero status (e.g. the target PID no longer exists).
+    #[error("failed to send signal {signal} to pid {pid}: {detail}")]
+    Signal {
+        /// The `kill` signal flag that was sent (e.g. `-9`, `-STOP`, `-CONT`).
+        signal: String,
+        /// The target process ID.
+        pid: u32,
+        /// Stderr output or other detail from the failed invocation.
+        detail: String,
+    },
+
     /// No sentinel was reachable.
     #[error("no reachable sentinel")]
     NoReachableSentinel,

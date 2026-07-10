@@ -142,7 +142,7 @@
 //! let server = RedisServer::new().port(6400).start().await.unwrap();
 //!
 //! // Freeze the node for 2 seconds, then resume it automatically.
-//! chaos::pause_node(&server, Duration::from_secs(2));
+//! chaos::pause_node(&server, Duration::from_secs(2)).unwrap();
 //! # }
 //! ```
 //!

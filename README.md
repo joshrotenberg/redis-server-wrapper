@@ -209,7 +209,7 @@ async fn test_chaos_pause() {
     let server = RedisServer::new().port(6400).start().await.unwrap();
 
     // Freeze the node for 2 seconds, then resume it automatically.
-    chaos::pause_node(&server, Duration::from_secs(2));
+    chaos::pause_node(&server, Duration::from_secs(2)).unwrap();
 
     // ... test client behavior while the node is frozen ...
 }
@@ -217,7 +217,12 @@ async fn test_chaos_pause() {
 
 `chaos::partition` and `chaos::recover` simulate a network partition across a cluster by
 freezing every node outside a reachable set, and `chaos::fill_memory` writes a bounded number
-of fixed-size keys for exercising `maxmemory` and eviction behavior.
+of fixed-size keys for exercising `maxmemory` and eviction behavior. `chaos::slow_down` and
+`chaos::slow_down_writes` use `CLIENT PAUSE` to delay all commands or writes only.
+
+Signal-sending functions (`kill_node`, `freeze_node`, `resume_node`, `pause_node`, `partition`,
+`recover`, and the cluster `*_by_slot`/`*_by_key` variants) return `Result` -- a failed `kill`
+invocation or a non-zero exit status is surfaced as an error instead of being silently ignored.
 
 `FaultProxy` operates at the byte level instead of the process level, injecting faults into
 the TCP connection itself -- delay, mid-frame drops, chunked writes -- without touching the

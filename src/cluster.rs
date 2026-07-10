@@ -890,9 +890,16 @@ impl RedisClusterHandle {
     }
 
     /// Check CLUSTER INFO for state=ok and all slots assigned.
+    ///
+    /// Bounded by a modest internal timeout (not the general
+    /// [`RedisServerHandle::run`] path) so a frozen node can't hang
+    /// [`Self::wait_for_healthy`] forever.
     pub async fn is_healthy(&self) -> bool {
         for node in &self.nodes {
-            if let Ok(info) = node.run(&["CLUSTER", "INFO"]).await
+            if let Ok(info) = node
+                .cli()
+                .run_bounded(&["CLUSTER", "INFO"], crate::cli::HEALTH_CHECK_TIMEOUT)
+                .await
                 && info.contains("cluster_state:ok")
                 && info.contains("cluster_slots_ok:16384")
             {
