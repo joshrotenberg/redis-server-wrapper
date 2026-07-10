@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.4.1...v0.4.2) - 2026-07-10
+
+### Added
+
+- support load-time arguments in loadmodule ([#110](https://github.com/joshrotenberg/redis-server-wrapper/pull/110))
+- additional chaos module operations ([#108](https://github.com/joshrotenberg/redis-server-wrapper/pull/108))
+- byte-level TCP fault-injection proxy module ([#107](https://github.com/joshrotenberg/redis-server-wrapper/pull/107))
+- add cli() accessor to blocking handles ([#105](https://github.com/joshrotenberg/redis-server-wrapper/pull/105))
+- add addr() to RedisSentinelHandle for cross-topology parity ([#100](https://github.com/joshrotenberg/redis-server-wrapper/pull/100))
+- cluster slot-migration (reshard) orchestration helper ([#102](https://github.com/joshrotenberg/redis-server-wrapper/pull/102))
+
+### Fixed
+
+- use unique per-invocation temp dir for cluster node working dirs ([#104](https://github.com/joshrotenberg/redis-server-wrapper/pull/104))
+- retry sentinel pidfile read on startup ([#95](https://github.com/joshrotenberg/redis-server-wrapper/pull/95))
+- quote path values in generated Redis config ([#94](https://github.com/joshrotenberg/redis-server-wrapper/pull/94))
+
+### Other
+
+- add integration tests for existing chaos module operations ([#106](https://github.com/joshrotenberg/redis-server-wrapper/pull/106))
+- document Unix-only platform requirement and enforce at compile time ([#99](https://github.com/joshrotenberg/redis-server-wrapper/pull/99))
+- add blocking API parity tests for password, extra config, logfile, cli ([#98](https://github.com/joshrotenberg/redis-server-wrapper/pull/98))
+- cover BinaryNotFound and ServerStart error paths ([#101](https://github.com/joshrotenberg/redis-server-wrapper/pull/101))
+- add TLS roundtrip tests for generate_test_certs ([#103](https://github.com/joshrotenberg/redis-server-wrapper/pull/103))
+- add feature flag documentation to crate root ([#86](https://github.com/joshrotenberg/redis-server-wrapper/pull/86)) ([#97](https://github.com/joshrotenberg/redis-server-wrapper/pull/97))
+- add executor context to README examples (closes #82) ([#93](https://github.com/joshrotenberg/redis-server-wrapper/pull/93))
+
 ## [0.4.1](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.4.0...v0.4.1) - 2026-04-13
 
 ### Fixed
