@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.4.3...v0.5.0) - 2026-07-11
+
+### Added
+
+- additional chaos primitives for process, connection, and persistence faults ([#135](https://github.com/joshrotenberg/redis-server-wrapper/pull/135))
+- observability and assertion primitives for fault testing ([#132](https://github.com/joshrotenberg/redis-server-wrapper/pull/132))
+- sentinel builder password and module support with tier-aware config ([#134](https://github.com/joshrotenberg/redis-server-wrapper/pull/134))
+- add core and extended config directives to the cluster builder ([#133](https://github.com/joshrotenberg/redis-server-wrapper/pull/133))
+- FaultProxy parity upgrades for stats and connection-level faults ([#131](https://github.com/joshrotenberg/redis-server-wrapper/pull/131))
+- mirror the 46 missing async builder methods on the blocking server builder ([#130](https://github.com/joshrotenberg/redis-server-wrapper/pull/130))
+- add loadmodule and enable_module_command to the cluster builder ([#124](https://github.com/joshrotenberg/redis-server-wrapper/pull/124))
+
+### Fixed
+
+- chaos and cli consistency pass ([#129](https://github.com/joshrotenberg/redis-server-wrapper/pull/129))
+
 ## [0.4.3](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.4.2...v0.4.3) - 2026-07-10
 
 ### Added
