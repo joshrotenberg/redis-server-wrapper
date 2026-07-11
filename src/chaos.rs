@@ -38,6 +38,8 @@ use crate::cluster::RedisClusterHandle;
 #[cfg(feature = "tokio")]
 use crate::error::{Error, Result};
 #[cfg(feature = "tokio")]
+use crate::sentinel::RedisSentinelHandle;
+#[cfg(feature = "tokio")]
 use crate::server::RedisServerHandle;
 
 #[cfg(feature = "tokio")]
@@ -809,6 +811,60 @@ pub fn recover(cluster: &RedisClusterHandle) -> Result<()> {
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Sentinel-level operations
+// ---------------------------------------------------------------------------
+
+/// Which point in a failover to crash a sentinel at, via `SENTINEL
+/// SIMULATE-FAILURE`.
+///
+/// Both points are implemented in Redis's `sentinel.c` (since Redis 3.2),
+/// purpose-built for testing an interrupted failover: the armed sentinel
+/// crashes immediately after reaching the chosen point, leaving another
+/// sentinel to notice and finish the job.
+#[cfg(feature = "tokio")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SentinelCrashPoint {
+    /// Crash immediately after winning the leader election, before
+    /// promoting the replica.
+    AfterElection,
+    /// Crash immediately after promoting the replica to master.
+    AfterPromotion,
+}
+
+/// Arm a sentinel to crash mid-failover, then trigger the failover on that
+/// same sentinel.
+///
+/// `SENTINEL FAILOVER` is executed by the sentinel that receives it, so the
+/// sentinel armed via `SENTINEL SIMULATE-FAILURE` must also be the one that
+/// triggers the failover -- arming one sentinel and triggering on another
+/// would never exercise the crash at all.
+///
+/// Both `SIMULATE-FAILURE` and `FAILOVER` reply `+OK` before the process
+/// actually crashes, so a successful `Ok(())` here means the crash was armed
+/// and the failover requested, not that the crash has already happened. The
+/// targeted sentinel process crashes and is left down afterward -- this
+/// crate does not restart it; [`RedisSentinelHandle`]'s `stop()`/`Drop`
+/// already tolerate a dead sentinel PID. The topology is intentionally left
+/// with one fewer sentinel for the remaining sentinels to finish the
+/// failover.
+#[cfg(feature = "tokio")]
+pub async fn crash_sentinel_during_failover(
+    handle: &RedisSentinelHandle,
+    sentinel_idx: usize,
+    point: SentinelCrashPoint,
+) -> Result<()> {
+    let cli = handle.sentinel_cli(sentinel_idx)?;
+    let mode = match point {
+        SentinelCrashPoint::AfterElection => "crash-after-election",
+        SentinelCrashPoint::AfterPromotion => "crash-after-promotion",
+    };
+    cli.run(&["SENTINEL", "SIMULATE-FAILURE", mode]).await?;
+    cli.run(&["SENTINEL", "FAILOVER", handle.master_name()])
+        .await?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
