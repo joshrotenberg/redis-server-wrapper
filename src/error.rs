@@ -63,6 +63,18 @@ pub enum Error {
     #[error("no reachable sentinel")]
     NoReachableSentinel,
 
+    /// A chaos primitive refused to run because doing so under the current
+    /// process privileges would have no effect.
+    ///
+    /// Currently only returned by [`crate::chaos::break_persistence`]: chmod
+    /// permission bits are ignored for the root user, so it refuses to run
+    /// as root rather than silently failing to break anything.
+    #[error("{message}")]
+    PrivilegeRequired {
+        /// Human-readable description of the refused operation and why.
+        message: String,
+    },
+
     /// A required binary was not found on PATH.
     #[error("{binary} not found on PATH")]
     BinaryNotFound {

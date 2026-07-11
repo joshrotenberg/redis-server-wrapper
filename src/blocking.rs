@@ -2724,6 +2724,9 @@ pub mod chaos {
     use super::{RedisClusterHandle, RedisServerHandle};
     use crate::error::Result;
     use std::time::Duration;
+    use tokio::runtime::Runtime;
+
+    pub use crate::chaos::{ClientKillFilter, ClientType, FlapGuard};
 
     /// Kill a node immediately with SIGKILL. See [`crate::chaos::kill_node`].
     pub fn kill_node(handle: &RedisServerHandle) -> Result<()> {
@@ -2919,6 +2922,138 @@ pub mod chaos {
         cluster
             .rt
             .block_on(crate::chaos::count_keys_in_slot(&cluster.inner, slot))
+    }
+
+    /// Relaunch `redis-server` from this node's existing on-disk
+    /// `redis.conf`, refreshing the handle's pid. Blocks on the handle's
+    /// runtime. See [`crate::chaos::restart_node`].
+    pub fn restart_node(handle: &mut RedisServerHandle, timeout: Duration) -> Result<()> {
+        let RedisServerHandle { inner, rt } = handle;
+        rt.block_on(crate::chaos::restart_node(inner, timeout))
+    }
+
+    /// Sever client connections matching `filter` via `CLIENT KILL`,
+    /// returning the number killed. Blocks on the handle's runtime. See
+    /// [`crate::chaos::kill_client_connections`].
+    pub fn kill_client_connections(
+        handle: &RedisServerHandle,
+        filter: ClientKillFilter,
+    ) -> Result<u64> {
+        handle
+            .rt
+            .block_on(crate::chaos::kill_client_connections(&handle.inner, filter))
+    }
+
+    /// Block the server's event loop for `duration` via `DEBUG SLEEP`.
+    ///
+    /// Enters `handle`'s runtime (via [`Runtime::enter`]) before delegating,
+    /// so the background task [`crate::chaos::block_event_loop`] spawns
+    /// internally lands on that runtime instead of panicking for lack of a
+    /// runtime context -- the same reason [`pause_node`] does this. See
+    /// [`crate::chaos::block_event_loop`].
+    pub fn block_event_loop(handle: &RedisServerHandle, duration: Duration) -> Result<()> {
+        let _guard = handle.rt.enter();
+        crate::chaos::block_event_loop(&handle.inner, duration)
+    }
+
+    /// Force the next replica reconnect on `master` to be a full resync
+    /// instead of a partial one. Blocks on the master's runtime. See
+    /// [`crate::chaos::force_full_resync`].
+    pub fn force_full_resync(master: &RedisServerHandle) -> Result<()> {
+        master
+            .rt
+            .block_on(crate::chaos::force_full_resync(&master.inner))
+    }
+
+    /// Synchronous wrapper for [`crate::chaos::PersistenceGuard`]. Restores
+    /// write access to the node's data directory and confirms persistence
+    /// has recovered.
+    pub struct PersistenceGuard<'a> {
+        inner: Option<crate::chaos::PersistenceGuard<'a>>,
+        rt: &'a Runtime,
+    }
+
+    /// Make a node's data directory unwritable so `BGSAVE` fails and
+    /// subsequent writes are rejected with `-MISCONF`. Blocks on the
+    /// handle's runtime. See [`crate::chaos::break_persistence`].
+    pub fn break_persistence(
+        handle: &RedisServerHandle,
+        timeout: Duration,
+    ) -> Result<PersistenceGuard<'_>> {
+        let inner = handle
+            .rt
+            .block_on(crate::chaos::break_persistence(&handle.inner, timeout))?;
+        Ok(PersistenceGuard {
+            inner: Some(inner),
+            rt: &handle.rt,
+        })
+    }
+
+    impl<'a> PersistenceGuard<'a> {
+        /// Restore write access and confirm persistence has recovered.
+        /// Blocks on the handle's runtime. See
+        /// [`crate::chaos::PersistenceGuard::restore`].
+        pub fn restore(mut self, timeout: Duration) -> Result<()> {
+            let inner = self
+                .inner
+                .take()
+                .expect("PersistenceGuard::restore called twice");
+            self.rt.block_on(inner.restore(timeout))
+        }
+    }
+
+    /// Synchronous wrapper for [`crate::chaos::ClientFloodGuard`]. Holds
+    /// every TCP connection opened to fill the server's `maxclients` limit.
+    pub struct ClientFloodGuard<'a> {
+        inner: Option<crate::chaos::ClientFloodGuard<'a>>,
+        rt: &'a Runtime,
+    }
+
+    /// Open and hold connections until the server's `maxclients` limit is
+    /// reached. Blocks on the handle's runtime. See
+    /// [`crate::chaos::exhaust_maxclients`].
+    pub fn exhaust_maxclients(
+        handle: &RedisServerHandle,
+        maxclients: Option<u32>,
+    ) -> Result<ClientFloodGuard<'_>> {
+        let inner = handle
+            .rt
+            .block_on(crate::chaos::exhaust_maxclients(&handle.inner, maxclients))?;
+        Ok(ClientFloodGuard {
+            inner: Some(inner),
+            rt: &handle.rt,
+        })
+    }
+
+    impl<'a> ClientFloodGuard<'a> {
+        /// Free the held sockets, then restore `maxclients` to its previous
+        /// value. Blocks on the handle's runtime. See
+        /// [`crate::chaos::ClientFloodGuard::release`].
+        pub fn release(mut self) -> Result<()> {
+            let inner = self
+                .inner
+                .take()
+                .expect("ClientFloodGuard::release called twice");
+            self.rt.block_on(inner.release())
+        }
+    }
+
+    /// Cycle a node down (`SIGSTOP`) and up (`SIGCONT`) on a timer in a
+    /// background task.
+    ///
+    /// Sends the first `SIGSTOP` synchronously (surfacing a dead target as
+    /// an error immediately), then enters `handle`'s runtime (via
+    /// [`Runtime::enter`]) before delegating, so the background flap task
+    /// [`crate::chaos::flap_node`] spawns internally lands on that runtime
+    /// instead of panicking for lack of a runtime context -- the same
+    /// reason [`pause_node`] does this. See [`crate::chaos::flap_node`].
+    pub fn flap_node(
+        handle: &RedisServerHandle,
+        down: Duration,
+        up: Duration,
+    ) -> Result<FlapGuard> {
+        let _guard = handle.rt.enter();
+        crate::chaos::flap_node(&handle.inner, down, up)
     }
 }
 

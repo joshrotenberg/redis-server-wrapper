@@ -2013,80 +2013,7 @@ impl RedisServer {
 
         fs::create_dir_all(&node_dir)?;
 
-        let conf_path = node_dir.join("redis.conf");
-        let conf_content = self.generate_config(&node_dir);
-        fs::write(&conf_path, conf_content)?;
-
-        let module_args = if self.config.no_stack_modules {
-            Vec::new()
-        } else {
-            crate::stack::detect_stack_modules(&self.config.redis_server_bin)
-        };
-        let status = Command::new(&self.config.redis_server_bin)
-            .arg(&conf_path)
-            .args(&module_args)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .await?;
-
-        if !status.success() {
-            return Err(Error::ServerStart {
-                port: self.config.port,
-            });
-        }
-
-        // The plain `port` always speaks unencrypted Redis protocol; `tls-port`
-        // is the only listener that speaks TLS. When the plain port is
-        // disabled (0), the server is only reachable over `tls-port`, so the
-        // admin CLI must connect there with TLS enabled instead.
-        let tls_only = self.config.port == 0;
-        let admin_port = if tls_only {
-            self.config.tls_port.unwrap_or(self.config.port)
-        } else {
-            self.config.port
-        };
-        let mut cli = RedisCli::new()
-            .bin(&self.config.redis_cli_bin)
-            .host(&self.config.bind)
-            .port(admin_port);
-        if let Some(ref pw) = self.config.password {
-            cli = cli.password(pw);
-        }
-        if tls_only && self.config.tls_cert_file.is_some() && self.config.tls_key_file.is_some() {
-            cli = cli.tls(true);
-            if let Some(ref ca) = self.config.tls_ca_cert_file {
-                cli = cli.cacert(ca);
-            } else {
-                cli = cli.insecure(true);
-            }
-            if let Some(ref cert) = self.config.tls_cert_file {
-                cli = cli.cert(cert);
-            }
-            if let Some(ref key) = self.config.tls_key_file {
-                cli = cli.key(key);
-            }
-        }
-
-        cli.wait_for_ready(Duration::from_secs(10)).await?;
-
-        let pid_path = node_dir.join("redis.pid");
-        let pid: u32 = {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-            loop {
-                if let Ok(s) = fs::read_to_string(&pid_path)
-                    && let Ok(p) = s.trim().parse::<u32>()
-                {
-                    break p;
-                }
-                if std::time::Instant::now() >= deadline {
-                    return Err(Error::ServerStart {
-                        port: self.config.port,
-                    });
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-        };
+        let (cli, pid) = launch_server(&self.config, &node_dir, Duration::from_secs(10)).await?;
 
         Ok(RedisServerHandle {
             config: self.config,
@@ -2739,6 +2666,95 @@ impl Default for RedisServer {
     }
 }
 
+/// Write `config`'s conf file into `node_dir`, launch `redis-server` against
+/// it, wait for it to answer `PING`, and return a [`RedisCli`] wired up for
+/// it plus the pid it wrote to `redis.pid`.
+///
+/// Shared by [`RedisServer::start`] and [`RedisServerHandle::restart`] so a
+/// restart relaunches through the exact same path a fresh start does instead
+/// of a parallel, easily-divergent implementation.
+async fn launch_server(
+    config: &RedisServerConfig,
+    node_dir: &std::path::Path,
+    ready_timeout: Duration,
+) -> Result<(RedisCli, u32)> {
+    let conf_path = node_dir.join("redis.conf");
+    let conf_content = RedisServer {
+        config: config.clone(),
+    }
+    .generate_config(node_dir);
+    fs::write(&conf_path, conf_content)?;
+
+    let module_args = if config.no_stack_modules {
+        Vec::new()
+    } else {
+        crate::stack::detect_stack_modules(&config.redis_server_bin)
+    };
+    let status = Command::new(&config.redis_server_bin)
+        .arg(&conf_path)
+        .args(&module_args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await?;
+
+    if !status.success() {
+        return Err(Error::ServerStart { port: config.port });
+    }
+
+    // The plain `port` always speaks unencrypted Redis protocol; `tls-port`
+    // is the only listener that speaks TLS. When the plain port is
+    // disabled (0), the server is only reachable over `tls-port`, so the
+    // admin CLI must connect there with TLS enabled instead.
+    let tls_only = config.port == 0;
+    let admin_port = if tls_only {
+        config.tls_port.unwrap_or(config.port)
+    } else {
+        config.port
+    };
+    let mut cli = RedisCli::new()
+        .bin(&config.redis_cli_bin)
+        .host(&config.bind)
+        .port(admin_port);
+    if let Some(ref pw) = config.password {
+        cli = cli.password(pw);
+    }
+    if tls_only && config.tls_cert_file.is_some() && config.tls_key_file.is_some() {
+        cli = cli.tls(true);
+        if let Some(ref ca) = config.tls_ca_cert_file {
+            cli = cli.cacert(ca);
+        } else {
+            cli = cli.insecure(true);
+        }
+        if let Some(ref cert) = config.tls_cert_file {
+            cli = cli.cert(cert);
+        }
+        if let Some(ref key) = config.tls_key_file {
+            cli = cli.key(key);
+        }
+    }
+
+    cli.wait_for_ready(ready_timeout).await?;
+
+    let pid_path = node_dir.join("redis.pid");
+    let pid: u32 = {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            if let Ok(s) = fs::read_to_string(&pid_path)
+                && let Ok(p) = s.trim().parse::<u32>()
+            {
+                break p;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(Error::ServerStart { port: config.port });
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    };
+
+    Ok((cli, pid))
+}
+
 /// Handle to a running Redis server. Stops the server on Drop.
 pub struct RedisServerHandle {
     config: RedisServerConfig,
@@ -2935,6 +2951,32 @@ impl RedisServerHandle {
     /// Wait until the server is ready (PING -> PONG).
     pub async fn wait_for_ready(&self, timeout: Duration) -> Result<()> {
         self.cli.wait_for_ready(timeout).await
+    }
+
+    /// Relaunch `redis-server` from this node's existing on-disk
+    /// `redis.conf`, refreshing [`Self::pid`] from the new process.
+    ///
+    /// Backs [`crate::chaos::restart_node`], which completes the
+    /// crash-recovery loop after [`crate::chaos::kill_node`]: the config
+    /// file and data directory both survive `SIGKILL`, so this replays the
+    /// same launch path [`RedisServer::start`] uses (via [`launch_server`])
+    /// rather than a parallel implementation.
+    ///
+    /// Deletes the stale pidfile before relaunching -- after `SIGKILL` it
+    /// still holds the dead process's pid, and the pid-poll loop
+    /// [`launch_server`] runs would otherwise read it back immediately
+    /// instead of waiting for the new process's pid. Module arguments are
+    /// re-detected as part of [`launch_server`] too, since Redis Stack
+    /// modules are passed on the command line rather than baked into the
+    /// config file.
+    pub(crate) async fn restart(&mut self, timeout: Duration) -> Result<()> {
+        let node_dir = self.config.dir.join(format!("node-{}", self.config.port));
+        let _ = fs::remove_file(node_dir.join("redis.pid"));
+
+        let (cli, pid) = launch_server(&self.config, &node_dir, timeout).await?;
+        self.cli = cli;
+        self.pid = pid;
+        Ok(())
     }
 }
 
