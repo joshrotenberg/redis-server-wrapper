@@ -53,6 +53,37 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install redis
 
+      # tests/module_loading.rs skips itself unless REDIS_TEST_MODULE points at
+      # a compiled module. Building the fixture needs redismodule.h, which the
+      # distro Redis packages do not ship, so fetch the one matching the
+      # version actually installed.
+      #
+      # Best effort: a fetch or compile failure leaves the variable unset and
+      # the module tests skip rather than failing the run. The compatibility
+      # workflow builds Redis from source and has the real header, which is
+      # where module coverage is authoritative.
+      - name: Build Redis test module
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          version="$(redis-server --version | sed -n 's/.*v=\([0-9][0-9.]*\).*/\1/p')"
+          echo "detected Redis $version"
+          curl -fsSL -o "${RUNNER_TEMP}/redismodule.h" \
+            "https://raw.githubusercontent.com/redis/redis/${version}/src/redismodule.h"
+          cc -fPIC -shared -I "${RUNNER_TEMP}" \
+            tests/support/rsw_test_module.c \
+            -o "${RUNNER_TEMP}/rsw_test_module.so"
+          echo "REDIS_TEST_MODULE=${RUNNER_TEMP}/rsw_test_module.so" >> "$GITHUB_ENV"
+          echo "module fixture built for Redis $version"
+
+      - name: Report module test coverage
+        run: |
+          if [ -n "${REDIS_TEST_MODULE:-}" ]; then
+            echo "module tests will run against ${REDIS_TEST_MODULE}"
+          else
+            echo "::warning::module fixture unavailable, module tests will skip"
+          fi
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
