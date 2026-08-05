@@ -2630,6 +2630,22 @@ impl RedisSentinelBuilder {
 }
 
 /// Handle to a running Redis Sentinel topology. Stops everything on Drop.
+///
+/// Unlike [`RedisClusterHandle`] (which exposes cluster-level chaos helpers
+/// that resolve node indices internally, e.g. [`chaos::kill_master_by_slot`]),
+/// this handle does not mirror
+/// [`crate::sentinel::RedisSentinelHandle::master`] or
+/// [`crate::sentinel::RedisSentinelHandle::replicas`]. Each async
+/// `RedisServerHandle` those return is not on this handle's [`Runtime`], and
+/// wrapping one would need its own dedicated runtime the way top-level
+/// blocking handles do -- awkward for a borrowed reference into an existing
+/// topology. Node-targeted chaos against sentinel data nodes (e.g.
+/// `chaos::kill_node` on the master) is therefore async-only; use
+/// [`crate::sentinel::RedisSentinelHandle`] directly for that. What *is*
+/// mirrored here -- [`Self::wait_for_new_master`] and
+/// [`chaos::crash_sentinel_during_failover`] -- is self-contained: both work
+/// entirely through `redis-cli` calls driven by this handle's own runtime,
+/// with no node handle to bridge.
 pub struct RedisSentinelHandle {
     inner: sentinel::RedisSentinelHandle,
     rt: Runtime,
@@ -2699,6 +2715,14 @@ impl RedisSentinelHandle {
         self.rt.block_on(self.inner.wait_for_healthy(timeout))
     }
 
+    /// Poll until sentinel reports a healthy master at an address different
+    /// from `old_addr`, or timeout. Returns the new master's `"ip:port"`.
+    /// See [`crate::sentinel::RedisSentinelHandle::wait_for_new_master`].
+    pub fn wait_for_new_master(&self, old_addr: &str, timeout: Duration) -> Result<String> {
+        self.rt
+            .block_on(self.inner.wait_for_new_master(old_addr, timeout))
+    }
+
     /// Stop everything.
     pub fn stop(&self) {
         self.inner.stop();
@@ -2721,12 +2745,14 @@ impl RedisSentinelHandle {
 /// natural blocking shape. Use the async API directly if you need deterministic
 /// control over an in-flight slot migration.
 pub mod chaos {
-    use super::{RedisClusterHandle, RedisServerHandle};
+    use super::{RedisClusterHandle, RedisSentinelHandle, RedisServerHandle};
     use crate::error::Result;
     use std::time::Duration;
     use tokio::runtime::Runtime;
 
     pub use crate::chaos::{ClientKillFilter, ClientType, FlapGuard};
+
+    pub use crate::chaos::SentinelCrashPoint;
 
     /// Kill a node immediately with SIGKILL. See [`crate::chaos::kill_node`].
     pub fn kill_node(handle: &RedisServerHandle) -> Result<()> {
@@ -3054,6 +3080,23 @@ pub mod chaos {
     ) -> Result<FlapGuard> {
         let _guard = handle.rt.enter();
         crate::chaos::flap_node(&handle.inner, down, up)
+    }
+
+    /// Arm a sentinel to crash mid-failover, then trigger the failover on
+    /// that same sentinel. Blocks on the handle's runtime. See
+    /// [`crate::chaos::crash_sentinel_during_failover`].
+    pub fn crash_sentinel_during_failover(
+        handle: &RedisSentinelHandle,
+        sentinel_idx: usize,
+        point: SentinelCrashPoint,
+    ) -> Result<()> {
+        handle
+            .rt
+            .block_on(crate::chaos::crash_sentinel_during_failover(
+                &handle.inner,
+                sentinel_idx,
+                point,
+            ))
     }
 }
 
