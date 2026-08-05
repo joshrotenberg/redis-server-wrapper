@@ -6,7 +6,7 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cli::RedisCli;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::server::{
     AppendFsync, LogLevel, RedisServer, RedisServerHandle, ReplDisklessLoad, SavePolicy,
 };
@@ -668,6 +668,91 @@ impl RedisClusterBuilder {
         (0..total).map(move |i| base + i)
     }
 
+    /// Reject a topology that cannot be started, before anything is created.
+    ///
+    /// Checks the shape of the request rather than the state of the machine,
+    /// so the same builder is rejected identically on every host.
+    fn validate_topology(&self) -> Result<()> {
+        let invalid = |message: String| Err(Error::InvalidTopology { message });
+
+        if self.masters == 0 {
+            return invalid("a cluster needs at least 1 master, got 0".to_string());
+        }
+
+        // `redis-cli --cluster create` refuses fewer than 3 masters, so catch
+        // it here with an explanation rather than surfacing its error later.
+        if self.masters < 3 {
+            return invalid(format!(
+                "redis-cli --cluster create requires at least 3 masters, got {}",
+                self.masters
+            ));
+        }
+
+        let total = (self.masters as u32) * (1 + self.replicas_per_master as u32);
+        if total > u16::MAX as u32 {
+            return invalid(format!(
+                "{} masters with {} replicas each is more nodes than the port space allows",
+                self.masters, self.replicas_per_master
+            ));
+        }
+
+        // Every node needs a client port and a bus port, and neither range may
+        // run off the end of the port space.
+        let highest_client = (self.base_port as u32) + total - 1;
+        if highest_client > u16::MAX as u32 {
+            return invalid(format!(
+                "base port {} with {total} nodes runs past port {}",
+                self.base_port,
+                u16::MAX
+            ));
+        }
+        let highest_client = highest_client as u16;
+        if crate::preflight::bus_port(highest_client).is_none() {
+            return invalid(format!(
+                "node port {highest_client} has no bus port: Redis derives it as port + 10000, \
+                 which exceeds {}. Use a lower base port.",
+                u16::MAX
+            ));
+        }
+
+        // The bus range starts 10000 above the client range. They overlap when
+        // the cluster is large enough to span that gap.
+        if total > 10000 {
+            return invalid(format!(
+                "{total} nodes starting at {} makes the client and bus port ranges overlap: \
+                 Redis derives each bus port as its client port + 10000",
+                self.base_port
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Fail with the first occupied port rather than clearing it.
+    ///
+    /// Client ports are checked before bus ports so the error names the port
+    /// the caller actually chose.
+    fn ensure_ports_free(&self) -> Result<()> {
+        let mut wanted = Vec::new();
+        for port in self.ports() {
+            wanted.push((port, crate::preflight::PortRole::ClusterNode));
+        }
+
+        // Bus ports are only predictable while Redis derives them as client
+        // port + 10000. An explicit `cluster_port` replaces that rule, so skip
+        // the bus check rather than probe ports the nodes will not use.
+        if self.cluster_port.is_none() {
+            for port in self.ports() {
+                // `validate_topology` runs first and rejects the overflow.
+                if let Some(bus) = crate::preflight::bus_port(port) {
+                    wanted.push((bus, crate::preflight::PortRole::ClusterBus));
+                }
+            }
+        }
+
+        crate::preflight::ensure_ports_available(&self.bind, wanted)
+    }
+
     /// Whether TLS is configured (cert + key present).
     fn has_tls(&self) -> bool {
         self.tls_cert_file.is_some() && self.tls_key_file.is_some()
@@ -693,20 +778,15 @@ impl RedisClusterBuilder {
     }
 
     /// Start all nodes and form the cluster.
+    ///
+    /// Validates the topology and confirms every port it needs is free before
+    /// starting anything. An occupied port fails with [`Error::PortInUse`]
+    /// rather than being cleared: the wrapper cannot tell a leftover node of
+    /// its own from an unrelated Redis, and stopping the latter would lose
+    /// data it never owned.
     pub async fn start(mut self) -> Result<RedisClusterHandle> {
-        // Stop any leftover nodes from previous runs.
-        for port in self.ports() {
-            let mut cli = RedisCli::new()
-                .bin(&self.redis_cli_bin)
-                .host(&self.bind)
-                .port(port);
-            if let Some(ref password) = self.password {
-                cli = cli.password(password);
-            }
-            cli = self.apply_tls_to_cli(cli);
-            cli.shutdown();
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        self.validate_topology()?;
+        self.ensure_ports_free()?;
 
         // Start each node.
         let total_nodes = self.total_nodes();
@@ -1427,6 +1507,64 @@ mod tests {
             .extra("maxmemory", "10mb");
         assert_eq!(b.logfile.as_deref(), Some("/tmp/cluster.log"));
         assert_eq!(b.extra.get("maxmemory").map(String::as_str), Some("10mb"));
+    }
+
+    // -- topology validation (#137) --
+
+    fn cluster(masters: u16, replicas: u16, base_port: u16) -> RedisClusterBuilder {
+        RedisCluster::builder()
+            .masters(masters)
+            .replicas_per_master(replicas)
+            .base_port(base_port)
+    }
+
+    #[test]
+    fn valid_topology_is_accepted() {
+        assert!(cluster(3, 1, 7000).validate_topology().is_ok());
+        assert!(cluster(3, 0, 7000).validate_topology().is_ok());
+    }
+
+    #[test]
+    fn zero_masters_is_rejected() {
+        let err = cluster(0, 0, 7000)
+            .validate_topology()
+            .expect_err("0 masters must be rejected");
+        assert!(matches!(err, Error::InvalidTopology { .. }), "{err}");
+    }
+
+    #[test]
+    fn fewer_than_three_masters_is_rejected() {
+        // redis-cli --cluster create refuses these, so reject them with an
+        // explanation rather than surfacing its error after startup.
+        for masters in [1, 2] {
+            let err = cluster(masters, 0, 7000)
+                .validate_topology()
+                .expect_err("fewer than 3 masters must be rejected");
+            assert!(
+                format!("{err}").contains("at least 3 masters"),
+                "unexpected message: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn base_port_running_past_the_port_space_is_rejected() {
+        let err = cluster(3, 1, 65530)
+            .validate_topology()
+            .expect_err("a range past u16::MAX must be rejected");
+        assert!(matches!(err, Error::InvalidTopology { .. }), "{err}");
+    }
+
+    #[test]
+    fn node_port_without_a_bus_port_is_rejected() {
+        // Bus port is client port + 10000, so anything above 55535 has none.
+        let err = cluster(3, 0, 60000)
+            .validate_topology()
+            .expect_err("a node with no bus port must be rejected");
+        assert!(
+            format!("{err}").contains("bus port"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]

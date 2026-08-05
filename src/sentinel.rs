@@ -377,6 +377,80 @@ impl RedisSentinelBuilder {
         (0..n).map(move |i| base + i)
     }
 
+    /// Reject a topology that cannot be started, before anything is created.
+    fn validate_topology(&self) -> Result<()> {
+        let invalid = |message: String| Err(Error::InvalidTopology { message });
+
+        if self.num_sentinels == 0 {
+            return invalid("a Sentinel topology needs at least 1 sentinel, got 0".to_string());
+        }
+        if self.quorum == 0 {
+            return invalid("quorum must be at least 1, got 0".to_string());
+        }
+        if self.quorum > self.num_sentinels {
+            return invalid(format!(
+                "quorum {} exceeds the {} sentinel(s) in the topology, so a failover could \
+                 never be agreed",
+                self.quorum, self.num_sentinels
+            ));
+        }
+
+        // Port arithmetic must stay inside the port space.
+        let end = |base: u16, count: u16, what: &str| -> Result<u16> {
+            match base.checked_add(count.saturating_sub(1)) {
+                Some(end) => Ok(end),
+                None => Err(Error::InvalidTopology {
+                    message: format!(
+                        "{count} {what} starting at port {base} run past port {}",
+                        u16::MAX
+                    ),
+                }),
+            }
+        };
+        let replica_end = end(self.replica_base_port, self.num_replicas, "replicas")?;
+        let sentinel_end = end(self.sentinel_base_port, self.num_sentinels, "sentinels")?;
+
+        // Overlapping ranges would have two processes claim one port, which
+        // surfaces later as an unrelated bind failure.
+        let ranges: [(&str, u16, u16); 3] = [
+            ("master", self.master_port, self.master_port),
+            ("replica", self.replica_base_port, replica_end),
+            ("sentinel", self.sentinel_base_port, sentinel_end),
+        ];
+        for i in 0..ranges.len() {
+            for j in (i + 1)..ranges.len() {
+                let (a_name, a_lo, a_hi) = ranges[i];
+                let (b_name, b_lo, b_hi) = ranges[j];
+                // Skip ranges that hold no ports at all.
+                if (a_name == "replica" && self.num_replicas == 0)
+                    || (b_name == "replica" && self.num_replicas == 0)
+                {
+                    continue;
+                }
+                if a_lo <= b_hi && b_lo <= a_hi {
+                    return invalid(format!(
+                        "the {a_name} port range {a_lo}-{a_hi} overlaps the {b_name} range \
+                         {b_lo}-{b_hi}"
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Fail with the first occupied port rather than clearing it.
+    fn ensure_ports_free(&self) -> Result<()> {
+        let mut wanted = vec![(self.master_port, crate::preflight::PortRole::SentinelMaster)];
+        for port in self.replica_ports() {
+            wanted.push((port, crate::preflight::PortRole::SentinelReplica));
+        }
+        for port in self.sentinel_ports() {
+            wanted.push((port, crate::preflight::PortRole::Sentinel));
+        }
+        crate::preflight::ensure_ports_available(&self.bind, wanted)
+    }
+
     /// Start the full topology: master, replicas, sentinels.
     pub async fn start(self) -> Result<RedisSentinelHandle> {
         let mut monitored_masters = Vec::with_capacity(1 + self.monitored_masters.len());
@@ -388,27 +462,8 @@ impl RedisSentinelBuilder {
         });
         monitored_masters.extend(self.monitored_masters.iter().cloned());
 
-        // Kill leftover processes. Data nodes (master, replicas) may be
-        // password-protected from a previous run; sentinels never are.
-        let cli_for_shutdown = |port: u16, authed: bool| {
-            let mut cli = RedisCli::new()
-                .bin(&self.redis_cli_bin)
-                .host(&self.bind)
-                .port(port);
-            if authed && let Some(ref password) = self.password {
-                cli = cli.password(password);
-            }
-            cli = self.apply_tls_to_cli(cli);
-            cli.shutdown();
-        };
-        cli_for_shutdown(self.master_port, true);
-        for port in self.replica_ports() {
-            cli_for_shutdown(port, true);
-        }
-        for port in self.sentinel_ports() {
-            cli_for_shutdown(port, false);
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        self.validate_topology()?;
+        self.ensure_ports_free()?;
 
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1095,6 +1150,110 @@ mod tests {
     fn builder_password() {
         let b = RedisSentinel::builder().password("secret");
         assert_eq!(b.password.as_deref(), Some("secret"));
+    }
+
+    // -- topology validation (#137) --
+
+    fn sentinel() -> RedisSentinelBuilder {
+        RedisSentinel::builder()
+            .master_port(6390)
+            .replica_base_port(6391)
+            .sentinel_base_port(26379)
+            .replicas(2)
+            .sentinels(3)
+            .quorum(2)
+    }
+
+    #[test]
+    fn valid_sentinel_topology_is_accepted() {
+        assert!(sentinel().validate_topology().is_ok());
+    }
+
+    #[test]
+    fn zero_replicas_is_accepted() {
+        assert!(sentinel().replicas(0).validate_topology().is_ok());
+    }
+
+    #[test]
+    fn quorum_above_sentinel_count_is_rejected() {
+        let err = sentinel()
+            .sentinels(3)
+            .quorum(4)
+            .validate_topology()
+            .expect_err("an unreachable quorum must be rejected");
+        assert!(
+            format!("{err}").contains("quorum"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn zero_quorum_is_rejected() {
+        let err = sentinel()
+            .quorum(0)
+            .validate_topology()
+            .expect_err("quorum 0 must be rejected");
+        assert!(matches!(err, Error::InvalidTopology { .. }), "{err}");
+    }
+
+    #[test]
+    fn zero_sentinels_is_rejected() {
+        let err = sentinel()
+            .sentinels(0)
+            .quorum(1)
+            .validate_topology()
+            .expect_err("a topology with no sentinels must be rejected");
+        assert!(matches!(err, Error::InvalidTopology { .. }), "{err}");
+    }
+
+    #[test]
+    fn overlapping_master_and_replica_ports_are_rejected() {
+        let err = sentinel()
+            .master_port(6390)
+            .replica_base_port(6390)
+            .validate_topology()
+            .expect_err("overlapping ranges must be rejected");
+        assert!(
+            format!("{err}").contains("overlaps"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn overlapping_replica_and_sentinel_ports_are_rejected() {
+        let err = sentinel()
+            .replicas(4)
+            .replica_base_port(26377)
+            .sentinel_base_port(26379)
+            .validate_topology()
+            .expect_err("overlapping ranges must be rejected");
+        assert!(
+            format!("{err}").contains("overlaps"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn zero_replicas_cannot_collide_with_the_master() {
+        // An empty replica range holds no ports, so it must not be treated as
+        // overlapping just because its base equals another port.
+        assert!(
+            sentinel()
+                .replicas(0)
+                .replica_base_port(6390)
+                .validate_topology()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn sentinel_ports_running_past_the_port_space_are_rejected() {
+        let err = sentinel()
+            .sentinels(10)
+            .sentinel_base_port(65530)
+            .validate_topology()
+            .expect_err("a range past u16::MAX must be rejected");
+        assert!(matches!(err, Error::InvalidTopology { .. }), "{err}");
     }
 
     #[test]

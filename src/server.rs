@@ -2047,6 +2047,15 @@ impl RedisServer {
             crate::process::force_kill(stale_pid);
         }
 
+        // Anything still holding the port after that is not ours: the pidfile
+        // above is the only claim of ownership the wrapper has. Fail with the
+        // port named rather than letting redis-server fail to bind, which a
+        // daemonizing start would not even report.
+        crate::preflight::ensure_ports_available(
+            &self.config.bind,
+            [(self.config.port, crate::preflight::PortRole::Server)],
+        )?;
+
         crate::secure_file::create_dir_all(&node_dir)?;
 
         let (cli, pid) = launch_server(&self.config, &node_dir, Duration::from_secs(10)).await?;

@@ -91,6 +91,32 @@ pub enum Error {
         binary: String,
     },
 
+    /// A port the topology needs is already bound by another process.
+    ///
+    /// Startup fails rather than clearing the port: the wrapper cannot tell a
+    /// leftover node of its own from an unrelated Redis, and stopping the
+    /// latter would lose data it never owned. Free the port, or point the
+    /// builder at a different one.
+    #[error("{role} {host}:{port} is already in use")]
+    PortInUse {
+        /// The host the port was to be bound on.
+        host: String,
+        /// The occupied port.
+        port: u16,
+        /// What the port was needed for, e.g. "cluster bus port".
+        role: String,
+    },
+
+    /// A topology was described in a way that cannot be started.
+    ///
+    /// Returned before anything starts, so a rejected topology leaves no
+    /// processes or directories behind.
+    #[error("invalid topology: {message}")]
+    InvalidTopology {
+        /// What about the topology is unworkable.
+        message: String,
+    },
+
     /// An `extra()` directive collided with one the wrapper generates.
     ///
     /// The wrapper reuses these values after startup for readiness probing and
