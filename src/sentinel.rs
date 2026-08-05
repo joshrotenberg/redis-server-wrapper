@@ -555,8 +555,26 @@ impl RedisSentinelBuilder {
             replicas.push(replica);
         }
 
-        // Let replication link up.
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // Sentinels discover replicas through the master, so the master has to
+        // have acknowledged them before the sentinels come up. Wait for the
+        // link rather than guessing at how long it takes.
+        if self.num_replicas > 0 {
+            let expected = self.num_replicas;
+            crate::wait::wait_for(
+                || async {
+                    let Ok(info) = master.info(Some("replication")).await else {
+                        return false;
+                    };
+                    info.get("connected_slaves")
+                        .and_then(|v| v.parse::<u16>().ok())
+                        .is_some_and(|n| n >= expected)
+                },
+                REPLICATION_LINK_TIMEOUT,
+                Duration::from_millis(100),
+                format!("master did not report {expected} connected replica(s) in time"),
+            )
+            .await?;
+        }
 
         // 3. Start sentinels.
         let mut sentinel_handles = Vec::new();
@@ -678,10 +696,7 @@ impl RedisSentinelBuilder {
             sentinel_handles.push((port, pid, cli));
         }
 
-        // Wait for sentinels to discover each other.
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        Ok(RedisSentinelHandle {
+        let handle = RedisSentinelHandle {
             master,
             replicas,
             sentinel_ports: sentinel_handles.iter().map(|(p, _, _)| *p).collect(),
@@ -696,9 +711,31 @@ impl RedisSentinelBuilder {
                 key_file: self.tls_key_file,
                 ca_cert_file: self.tls_ca_cert_file,
             },
-        })
+        };
+
+        // Sentinels learn about each other through the master they share, so a
+        // freshly started topology is not usable until that gossip has landed.
+        // `is_healthy` already encodes what "converged" means here: the master
+        // reachable and flagged `master`, its replicas counted, and every
+        // sentinel accounted for.
+        //
+        // On timeout the handle drops, which tears down what it started.
+        handle.wait_for_healthy(DISCOVERY_TIMEOUT).await?;
+
+        Ok(handle)
     }
 }
+
+/// How long [`RedisSentinelBuilder::start`] waits for the master to report its
+/// replicas before bringing sentinels up.
+const REPLICATION_LINK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long [`RedisSentinelBuilder::start`] waits for sentinels to discover
+/// the master, its replicas, and each other.
+///
+/// Generous because it only bounds the failure case: a converged topology
+/// returns on the first poll.
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// TLS configuration snapshot stored in the handle for building CLI instances.
 #[derive(Clone, Debug, Default)]

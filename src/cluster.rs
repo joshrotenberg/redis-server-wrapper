@@ -1023,10 +1023,7 @@ impl RedisClusterBuilder {
         cli.cluster_create(&node_addrs, self.replicas_per_master)
             .await?;
 
-        // Wait for convergence.
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        Ok(RedisClusterHandle {
+        let handle = RedisClusterHandle {
             nodes,
             num_masters: self.masters,
             bind: self.bind,
@@ -1039,9 +1036,27 @@ impl RedisClusterBuilder {
                 ca_cert_file: self.tls_ca_cert_file,
             },
             cluster_base,
-        })
+        };
+
+        // `CLUSTER CREATE` returns once the nodes have been told about each
+        // other, not once they agree. Wait for the formed cluster rather than
+        // guessing at how long that takes: returning early hands back a
+        // cluster whose first command can fail, and a fixed sleep is wasted
+        // time on the common path where convergence is immediate.
+        //
+        // On timeout the handle drops, which stops the nodes it started.
+        handle.wait_for_formation(FORMATION_TIMEOUT).await?;
+
+        Ok(handle)
     }
 }
+
+/// How long [`RedisClusterBuilder::start`] waits for a freshly created cluster
+/// to agree on its slot assignment.
+///
+/// Generous because it only bounds the failure case: a converged cluster
+/// returns on the first poll.
+const FORMATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// TLS configuration snapshot stored in the handle for building CLI instances.
 #[derive(Clone, Debug, Default)]
@@ -1290,6 +1305,47 @@ impl RedisClusterHandle {
             timeout,
             Duration::from_millis(500),
             "cluster did not converge to all-nodes-healthy in time",
+        )
+        .await
+    }
+
+    /// Wait until the cluster has finished forming: every node reporting
+    /// `cluster_state:ok` with the full 16384-slot space assigned and healthy.
+    ///
+    /// Stricter than [`Self::wait_for_all_healthy`], which accepts any
+    /// consistent slot count. Immediately after `CLUSTER CREATE` a node can
+    /// report `cluster_state:ok` while it still holds no slots, so formation
+    /// has to check coverage explicitly.
+    async fn wait_for_formation(&self, timeout: Duration) -> Result<()> {
+        const TOTAL_SLOTS: u32 = 16384;
+
+        crate::wait::wait_for(
+            || async {
+                for node in &self.nodes {
+                    let Ok(Ok(raw)) = tokio::time::timeout(
+                        crate::cli::HEALTH_CHECK_TIMEOUT,
+                        node.run(&["CLUSTER", "INFO"]),
+                    )
+                    .await
+                    else {
+                        return false;
+                    };
+                    let info = crate::server::parse_info(&raw);
+                    let field = |key: &str| -> u32 {
+                        info.get(key).and_then(|v| v.parse().ok()).unwrap_or(0)
+                    };
+                    if info.get("cluster_state").map(String::as_str) != Some("ok")
+                        || field("cluster_slots_assigned") != TOTAL_SLOTS
+                        || field("cluster_slots_ok") != TOTAL_SLOTS
+                    {
+                        return false;
+                    }
+                }
+                true
+            },
+            timeout,
+            Duration::from_millis(100),
+            "cluster did not finish forming: nodes never agreed on a full slot assignment",
         )
         .await
     }
