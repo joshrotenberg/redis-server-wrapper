@@ -209,10 +209,12 @@ pub mod chaos;
 pub mod cli;
 #[cfg(feature = "tokio")]
 pub mod cluster;
+pub mod config_token;
 pub mod error;
 #[cfg(feature = "tokio")]
 pub mod fault_proxy;
 pub mod process;
+mod secure_file;
 #[cfg(feature = "tokio")]
 pub mod sentinel;
 #[cfg(feature = "tokio")]

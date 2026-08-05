@@ -160,7 +160,7 @@ async fn port_already_in_use_returns_server_start_error() {
     let result = RedisServer::new()
         .port(16409)
         .dir(std::env::temp_dir().join("rsw-port-conflict-b"))
-        .extra("daemonize", "no")
+        .daemonize(false)
         .start()
         .await;
 

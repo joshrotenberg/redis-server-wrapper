@@ -514,6 +514,15 @@ impl RedisServer {
         self
     }
 
+    /// Run `redis-server` as a daemon (default: on).
+    ///
+    /// See [`crate::server::RedisServer::daemonize`] for why a foreground
+    /// server makes bind failures visible.
+    pub fn daemonize(mut self, daemonize: bool) -> Self {
+        self.inner = self.inner.daemonize(daemonize);
+        self
+    }
+
     /// Set the TCP backlog queue length.
     pub fn tcp_backlog(mut self, backlog: u32) -> Self {
         self.inner = self.inner.tcp_backlog(backlog);

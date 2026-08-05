@@ -611,6 +611,7 @@ impl RedisCli {
         let str_args: Vec<&str> = cli_args.iter().map(|s| s.as_str()).collect();
         let output = TokioCommand::new(&self.bin)
             .args(&str_args)
+            .envs(self.auth_env())
             .output()
             .await?;
 
@@ -646,6 +647,7 @@ impl RedisCli {
         let _ = Command::new(&self.bin)
             .args(self.base_args())
             .args(args)
+            .envs(self.auth_env())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
@@ -701,6 +703,7 @@ impl RedisCli {
         let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let output = TokioCommand::new(&self.bin)
             .args(&str_args)
+            .envs(self.auth_env())
             .output()
             .await?;
 
@@ -711,6 +714,21 @@ impl RedisCli {
                 stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             })
+        }
+    }
+
+    /// The environment redis-cli should be spawned with for authentication.
+    ///
+    /// redis-cli reads `REDISCLI_AUTH` when no `-a` flag is given. Passing the
+    /// password this way keeps it out of the process argument list, which is
+    /// world-readable through `ps` on every platform this crate supports.
+    ///
+    /// Returns an empty vector when no password is set, so callers can apply
+    /// it unconditionally.
+    fn auth_env(&self) -> Vec<(&'static str, String)> {
+        match self.password {
+            Some(ref pw) => vec![("REDISCLI_AUTH", pw.clone())],
+            None => Vec::new(),
         }
     }
 
@@ -736,10 +754,8 @@ impl RedisCli {
             args.push("--user".to_string());
             args.push(user.clone());
         }
-        if let Some(ref pw) = self.password {
-            args.push("-a".to_string());
-            args.push(pw.clone());
-        }
+        // The password is deliberately not passed here. It goes through the
+        // REDISCLI_AUTH environment variable instead: see `auth_env`.
         if self.askpass {
             args.push("--askpass".to_string());
         }
@@ -977,6 +993,7 @@ impl RedisCli {
         TokioCommand::new(&self.bin)
             .args(self.base_args())
             .args(args)
+            .envs(self.auth_env())
             .output()
             .await
     }
@@ -1010,6 +1027,7 @@ impl RedisCli {
         let fut = TokioCommand::new(&self.bin)
             .args(self.base_args())
             .args(args)
+            .envs(self.auth_env())
             .kill_on_drop(true)
             .output();
         match tokio::time::timeout(timeout, fut).await {

@@ -419,7 +419,7 @@ impl RedisSentinelBuilder {
             std::process::id(),
             unique
         ));
-        fs::create_dir_all(&base_dir)?;
+        crate::secure_file::create_dir_all(&base_dir)?;
 
         // 1. Start master.
         let appendonly = self.appendonly.unwrap_or(true);
@@ -507,7 +507,7 @@ impl RedisSentinelBuilder {
         let mut sentinel_handles = Vec::new();
         for port in self.sentinel_ports() {
             let dir = base_dir.join(format!("sentinel-{port}"));
-            fs::create_dir_all(&dir)?;
+            crate::secure_file::create_dir_all(&dir)?;
             let conf_path = dir.join("sentinel.conf");
             let logfile = self
                 .logfile
@@ -582,7 +582,7 @@ impl RedisSentinelBuilder {
             for (key, value) in &self.extra {
                 conf.push_str(&format!("{key} {value}\n"));
             }
-            fs::write(&conf_path, conf)?;
+            crate::secure_file::write(&conf_path, conf)?;
 
             let status = Command::new(&self.redis_server_bin)
                 .arg(&conf_path)

@@ -8,6 +8,7 @@ use std::time::Duration;
 use tokio::process::Command;
 
 use crate::cli::RedisCli;
+use crate::config_token::directive;
 use crate::error::{Error, Result};
 
 /// Full configuration snapshot for a single `redis-server` process.
@@ -779,6 +780,18 @@ impl RedisServer {
         self
     }
 
+    /// Run `redis-server` as a daemon (default: on).
+    ///
+    /// With daemonizing on, `redis-server` forks and its parent exits 0 before
+    /// the child has attempted to bind, so a failure to bind the port is not
+    /// visible in the exit status of the process the wrapper spawned. Setting
+    /// this to `false` keeps the server in the foreground, which makes bind
+    /// failures surface synchronously from [`start`](Self::start).
+    pub fn daemonize(mut self, daemonize: bool) -> Self {
+        self.config.daemonize = daemonize;
+        self
+    }
+
     /// Set the TCP backlog queue length.
     pub fn tcp_backlog(mut self, backlog: u32) -> Self {
         self.config.tcp_backlog = Some(backlog);
@@ -1541,9 +1554,10 @@ impl RedisServer {
 
     /// Load a Redis module at startup with load-time arguments.
     ///
-    /// Renders `loadmodule "<path>" arg1 arg2 ...`. The path is quoted; the
-    /// arguments are appended unquoted and space-separated, matching how Redis
-    /// parses module arguments.
+    /// Renders `loadmodule <path> arg1 arg2 ...`. The path and every argument
+    /// are encoded as individual config tokens, so an argument containing
+    /// whitespace, quotes, or `#` reaches the module as one argument rather
+    /// than several. See [`crate::config_token`].
     pub fn loadmodule_with_args(
         mut self,
         path: impl Into<PathBuf>,
@@ -1978,16 +1992,38 @@ impl RedisServer {
     }
 
     /// Set an arbitrary config directive not covered by dedicated methods.
+    ///
+    /// The value is encoded as a single config token, so it may contain
+    /// whitespace, quotes, or `#` without changing the meaning of the line.
+    ///
+    /// Directives the wrapper generates itself cannot be set this way: the
+    /// wrapper reuses those values after startup for readiness probing and
+    /// teardown, so overriding one would leave the handle describing a server
+    /// that does not exist. [`start`](Self::start) returns
+    /// [`Error::ReservedDirective`] for those keys. Use the dedicated builder
+    /// method instead.
     pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.config.extra.insert(key.into(), value.into());
         self
     }
 
+    /// Reject `extra()` keys that collide with wrapper-generated directives.
+    fn validate_extras(&self) -> Result<()> {
+        for key in self.config.extra.keys() {
+            if crate::config_token::is_reserved(key) {
+                return Err(Error::ReservedDirective { key: key.clone() });
+            }
+        }
+        Ok(())
+    }
+
     /// Start the server. Returns a handle that stops the server on Drop.
     ///
-    /// Verifies that `redis-server` and `redis-cli` binaries are available
-    /// before attempting to launch anything.
+    /// Verifies that `redis-server` and `redis-cli` binaries are available,
+    /// and that no [`extra`](Self::extra) directive collides with one the
+    /// wrapper generates, before attempting to launch anything.
     pub async fn start(self) -> Result<RedisServerHandle> {
+        self.validate_extras()?;
         if which::which(&self.config.redis_server_bin).is_err() {
             return Err(Error::BinaryNotFound {
                 binary: self.config.redis_server_bin.clone(),
@@ -2011,7 +2047,7 @@ impl RedisServer {
             crate::process::force_kill(stale_pid);
         }
 
-        fs::create_dir_all(&node_dir)?;
+        crate::secure_file::create_dir_all(&node_dir)?;
 
         let (cli, pid) = launch_server(&self.config, &node_dir, Duration::from_secs(10)).await?;
 
@@ -2026,21 +2062,18 @@ impl RedisServer {
     fn generate_config(&self, node_dir: &std::path::Path) -> String {
         let yn = |b: bool| if b { "yes" } else { "no" };
 
-        let mut conf = format!(
-            "port {port}\n\
-             bind {bind}\n\
-             daemonize {daemonize}\n\
-             pidfile \"{dir}/redis.pid\"\n\
-             dir \"{dir}\"\n\
-             loglevel {level}\n\
-             protected-mode {protected}\n",
-            port = self.config.port,
-            bind = self.config.bind,
-            daemonize = yn(self.config.daemonize),
-            dir = node_dir.display(),
-            level = self.config.loglevel,
-            protected = yn(self.config.protected_mode),
-        );
+        let dir = node_dir.display().to_string();
+        let mut conf = String::new();
+        conf.push_str(&directive("port", [self.config.port.to_string()]));
+        conf.push_str(&directive("bind", [self.config.bind.clone()]));
+        conf.push_str(&directive("daemonize", [yn(self.config.daemonize)]));
+        conf.push_str(&directive("pidfile", [format!("{dir}/redis.pid")]));
+        conf.push_str(&directive("dir", [dir.clone()]));
+        conf.push_str(&directive("loglevel", [self.config.loglevel.to_string()]));
+        conf.push_str(&directive(
+            "protected-mode",
+            [yn(self.config.protected_mode)],
+        ));
 
         let logfile = self
             .config
@@ -2048,14 +2081,14 @@ impl RedisServer {
             .as_deref()
             .map(str::to_owned)
             .unwrap_or_else(|| format!("{}/redis.log", node_dir.display()));
-        conf.push_str(&format!("logfile \"{logfile}\"\n"));
+        conf.push_str(&directive("logfile", [logfile]));
 
         // -- network --
         if let Some(backlog) = self.config.tcp_backlog {
             conf.push_str(&format!("tcp-backlog {backlog}\n"));
         }
         if let Some(ref path) = self.config.unixsocket {
-            conf.push_str(&format!("unixsocket \"{}\"\n", path.display()));
+            conf.push_str(&directive("unixsocket", [path.display().to_string()]));
         }
         if let Some(perm) = self.config.unixsocketperm {
             conf.push_str(&format!("unixsocketperm {perm}\n"));
@@ -2072,43 +2105,52 @@ impl RedisServer {
             conf.push_str(&format!("tls-port {port}\n"));
         }
         if let Some(ref path) = self.config.tls_cert_file {
-            conf.push_str(&format!("tls-cert-file \"{}\"\n", path.display()));
+            conf.push_str(&directive("tls-cert-file", [path.display().to_string()]));
         }
         if let Some(ref path) = self.config.tls_key_file {
-            conf.push_str(&format!("tls-key-file \"{}\"\n", path.display()));
+            conf.push_str(&directive("tls-key-file", [path.display().to_string()]));
         }
         if let Some(ref pass) = self.config.tls_key_file_pass {
-            conf.push_str(&format!("tls-key-file-pass {pass}\n"));
+            conf.push_str(&directive("tls-key-file-pass", [pass]));
         }
         if let Some(ref path) = self.config.tls_ca_cert_file {
-            conf.push_str(&format!("tls-ca-cert-file \"{}\"\n", path.display()));
+            conf.push_str(&directive("tls-ca-cert-file", [path.display().to_string()]));
         }
         if let Some(ref path) = self.config.tls_ca_cert_dir {
-            conf.push_str(&format!("tls-ca-cert-dir \"{}\"\n", path.display()));
+            conf.push_str(&directive("tls-ca-cert-dir", [path.display().to_string()]));
         }
         if let Some(auth) = self.config.tls_auth_clients {
             conf.push_str(&format!("tls-auth-clients {}\n", yn(auth)));
         }
         if let Some(ref path) = self.config.tls_client_cert_file {
-            conf.push_str(&format!("tls-client-cert-file \"{}\"\n", path.display()));
+            conf.push_str(&directive(
+                "tls-client-cert-file",
+                [path.display().to_string()],
+            ));
         }
         if let Some(ref path) = self.config.tls_client_key_file {
-            conf.push_str(&format!("tls-client-key-file \"{}\"\n", path.display()));
+            conf.push_str(&directive(
+                "tls-client-key-file",
+                [path.display().to_string()],
+            ));
         }
         if let Some(ref pass) = self.config.tls_client_key_file_pass {
-            conf.push_str(&format!("tls-client-key-file-pass {pass}\n"));
+            conf.push_str(&directive("tls-client-key-file-pass", [pass]));
         }
         if let Some(ref path) = self.config.tls_dh_params_file {
-            conf.push_str(&format!("tls-dh-params-file \"{}\"\n", path.display()));
+            conf.push_str(&directive(
+                "tls-dh-params-file",
+                [path.display().to_string()],
+            ));
         }
         if let Some(ref ciphers) = self.config.tls_ciphers {
-            conf.push_str(&format!("tls-ciphers {ciphers}\n"));
+            conf.push_str(&directive("tls-ciphers", [ciphers]));
         }
         if let Some(ref suites) = self.config.tls_ciphersuites {
-            conf.push_str(&format!("tls-ciphersuites {suites}\n"));
+            conf.push_str(&directive("tls-ciphersuites", [suites]));
         }
         if let Some(ref protocols) = self.config.tls_protocols {
-            conf.push_str(&format!("tls-protocols {protocols}\n"));
+            conf.push_str(&directive("tls-protocols", [protocols]));
         }
         if let Some(v) = self.config.tls_prefer_server_ciphers {
             conf.push_str(&format!("tls-prefer-server-ciphers {}\n", yn(v)));
@@ -2136,16 +2178,16 @@ impl RedisServer {
 
         // -- memory --
         if let Some(ref limit) = self.config.maxmemory {
-            conf.push_str(&format!("maxmemory {limit}\n"));
+            conf.push_str(&directive("maxmemory", [limit]));
         }
         if let Some(ref policy) = self.config.maxmemory_policy {
-            conf.push_str(&format!("maxmemory-policy {policy}\n"));
+            conf.push_str(&directive("maxmemory-policy", [policy]));
         }
         if let Some(n) = self.config.maxmemory_samples {
             conf.push_str(&format!("maxmemory-samples {n}\n"));
         }
         if let Some(ref limit) = self.config.maxmemory_clients {
-            conf.push_str(&format!("maxmemory-clients {limit}\n"));
+            conf.push_str(&directive("maxmemory-clients", [limit]));
         }
         if let Some(n) = self.config.maxmemory_eviction_tenacity {
             conf.push_str(&format!("maxmemory-eviction-tenacity {n}\n"));
@@ -2194,13 +2236,13 @@ impl RedisServer {
             conf.push_str("appendonly yes\n");
         }
         if let Some(ref policy) = self.config.appendfsync {
-            conf.push_str(&format!("appendfsync {policy}\n"));
+            conf.push_str(&directive("appendfsync", [policy.to_string()]));
         }
         if let Some(ref name) = self.config.appendfilename {
-            conf.push_str(&format!("appendfilename \"{name}\"\n"));
+            conf.push_str(&directive("appendfilename", [name]));
         }
         if let Some(ref name) = self.config.appenddirname {
-            conf.push_str(&format!("appenddirname \"{}\"\n", name.display()));
+            conf.push_str(&directive("appenddirname", [name.display().to_string()]));
         }
         if let Some(v) = self.config.aof_use_rdb_preamble {
             conf.push_str(&format!("aof-use-rdb-preamble {}\n", yn(v)));
@@ -2232,10 +2274,10 @@ impl RedisServer {
             conf.push_str(&format!("replicaof {host} {port}\n"));
         }
         if let Some(ref pw) = self.config.masterauth {
-            conf.push_str(&format!("masterauth {pw}\n"));
+            conf.push_str(&directive("masterauth", [pw]));
         }
         if let Some(ref user) = self.config.masteruser {
-            conf.push_str(&format!("masteruser {user}\n"));
+            conf.push_str(&directive("masteruser", [user]));
         }
         if let Some(ref size) = self.config.repl_backlog_size {
             conf.push_str(&format!("repl-backlog-size {size}\n"));
@@ -2247,7 +2289,7 @@ impl RedisServer {
             conf.push_str(&format!("repl-disable-tcp-nodelay {}\n", yn(v)));
         }
         if let Some(ref policy) = self.config.repl_diskless_load {
-            conf.push_str(&format!("repl-diskless-load {policy}\n"));
+            conf.push_str(&directive("repl-diskless-load", [policy.to_string()]));
         }
         if let Some(v) = self.config.repl_diskless_sync {
             conf.push_str(&format!("repl-diskless-sync {}\n", yn(v)));
@@ -2265,7 +2307,7 @@ impl RedisServer {
             conf.push_str(&format!("repl-timeout {t}\n"));
         }
         if let Some(ref ip) = self.config.replica_announce_ip {
-            conf.push_str(&format!("replica-announce-ip {ip}\n"));
+            conf.push_str(&directive("replica-announce-ip", [ip]));
         }
         if let Some(port) = self.config.replica_announce_port {
             conf.push_str(&format!("replica-announce-port {port}\n"));
@@ -2303,10 +2345,10 @@ impl RedisServer {
 
         // -- security --
         if let Some(ref pw) = self.config.password {
-            conf.push_str(&format!("requirepass {pw}\n"));
+            conf.push_str(&directive("requirepass", [pw]));
         }
         if let Some(ref path) = self.config.acl_file {
-            conf.push_str(&format!("aclfile \"{}\"\n", path.display()));
+            conf.push_str(&directive("aclfile", [path.display().to_string()]));
         }
 
         // -- cluster --
@@ -2315,9 +2357,9 @@ impl RedisServer {
             if let Some(ref path) = self.config.cluster_config_file {
                 conf.push_str(&format!("cluster-config-file \"{}\"\n", path.display()));
             } else {
-                conf.push_str(&format!(
-                    "cluster-config-file \"{}/nodes.conf\"\n",
-                    node_dir.display()
+                conf.push_str(&directive(
+                    "cluster-config-file",
+                    [format!("{}/nodes.conf", node_dir.display())],
                 ));
             }
             if let Some(timeout) = self.config.cluster_node_timeout {
@@ -2345,7 +2387,7 @@ impl RedisServer {
                 conf.push_str(&format!("cluster-replica-validity-factor {factor}\n"));
             }
             if let Some(ref ip) = self.config.cluster_announce_ip {
-                conf.push_str(&format!("cluster-announce-ip {ip}\n"));
+                conf.push_str(&directive("cluster-announce-ip", [ip]));
             }
             if let Some(port) = self.config.cluster_announce_port {
                 conf.push_str(&format!("cluster-announce-port {port}\n"));
@@ -2357,17 +2399,18 @@ impl RedisServer {
                 conf.push_str(&format!("cluster-announce-tls-port {port}\n"));
             }
             if let Some(ref hostname) = self.config.cluster_announce_hostname {
-                conf.push_str(&format!("cluster-announce-hostname {hostname}\n"));
+                conf.push_str(&directive("cluster-announce-hostname", [hostname]));
             }
             if let Some(ref name) = self.config.cluster_announce_human_nodename {
-                conf.push_str(&format!("cluster-announce-human-nodename {name}\n"));
+                conf.push_str(&directive("cluster-announce-human-nodename", [name]));
             }
             if let Some(port) = self.config.cluster_port {
                 conf.push_str(&format!("cluster-port {port}\n"));
             }
             if let Some(ref endpoint_type) = self.config.cluster_preferred_endpoint_type {
-                conf.push_str(&format!(
-                    "cluster-preferred-endpoint-type {endpoint_type}\n"
+                conf.push_str(&directive(
+                    "cluster-preferred-endpoint-type",
+                    [endpoint_type],
                 ));
             }
             if let Some(limit) = self.config.cluster_link_sendbuf_limit {
@@ -2437,12 +2480,9 @@ impl RedisServer {
 
         // -- modules --
         for (path, args) in &self.config.loadmodule {
-            conf.push_str(&format!("loadmodule \"{}\"", path.display()));
-            for arg in args {
-                conf.push(' ');
-                conf.push_str(arg);
-            }
-            conf.push('\n');
+            let mut tokens = vec![path.display().to_string()];
+            tokens.extend(args.iter().cloned());
+            conf.push_str(&directive("loadmodule", tokens));
         }
 
         // -- advanced --
@@ -2456,7 +2496,7 @@ impl RedisServer {
             conf.push_str(&format!("io-threads-do-reads {}\n", yn(enable)));
         }
         if let Some(ref events) = self.config.notify_keyspace_events {
-            conf.push_str(&format!("notify-keyspace-events {events}\n"));
+            conf.push_str(&directive("notify-keyspace-events", [events]));
         }
 
         // -- slow log --
@@ -2475,7 +2515,7 @@ impl RedisServer {
             conf.push_str(&format!("latency-tracking {}\n", yn(enable)));
         }
         if let Some(ref pcts) = self.config.latency_tracking_info_percentiles {
-            conf.push_str(&format!("latency-tracking-info-percentiles \"{pcts}\"\n"));
+            conf.push_str(&directive("latency-tracking-info-percentiles", [pcts]));
         }
 
         // -- active defragmentation --
@@ -2506,13 +2546,13 @@ impl RedisServer {
             conf.push_str(&format!("syslog-enabled {}\n", yn(enable)));
         }
         if let Some(ref ident) = self.config.syslog_ident {
-            conf.push_str(&format!("syslog-ident {ident}\n"));
+            conf.push_str(&directive("syslog-ident", [ident]));
         }
         if let Some(ref facility) = self.config.syslog_facility {
-            conf.push_str(&format!("syslog-facility {facility}\n"));
+            conf.push_str(&directive("syslog-facility", [facility]));
         }
         if let Some(ref mode) = self.config.supervised {
-            conf.push_str(&format!("supervised {mode}\n"));
+            conf.push_str(&directive("supervised", [mode]));
         }
         if let Some(enable) = self.config.always_show_logo {
             conf.push_str(&format!("always-show-logo {}\n", yn(enable)));
@@ -2521,27 +2561,27 @@ impl RedisServer {
             conf.push_str(&format!("set-proc-title {}\n", yn(enable)));
         }
         if let Some(ref template) = self.config.proc_title_template {
-            conf.push_str(&format!("proc-title-template \"{template}\"\n"));
+            conf.push_str(&directive("proc-title-template", [template]));
         }
 
         // -- security and ACL --
         if let Some(ref default) = self.config.acl_pubsub_default {
-            conf.push_str(&format!("acl-pubsub-default {default}\n"));
+            conf.push_str(&directive("acl-pubsub-default", [default]));
         }
         if let Some(n) = self.config.acllog_max_len {
             conf.push_str(&format!("acllog-max-len {n}\n"));
         }
         if let Some(ref mode) = self.config.enable_debug_command {
-            conf.push_str(&format!("enable-debug-command {mode}\n"));
+            conf.push_str(&directive("enable-debug-command", [mode]));
         }
         if let Some(ref mode) = self.config.enable_module_command {
-            conf.push_str(&format!("enable-module-command {mode}\n"));
+            conf.push_str(&directive("enable-module-command", [mode]));
         }
         if let Some(ref mode) = self.config.enable_protected_configs {
-            conf.push_str(&format!("enable-protected-configs {mode}\n"));
+            conf.push_str(&directive("enable-protected-configs", [mode]));
         }
         for (cmd, new_name) in &self.config.rename_command {
-            conf.push_str(&format!("rename-command {cmd} \"{new_name}\"\n"));
+            conf.push_str(&directive("rename-command", [cmd, new_name]));
         }
         if let Some(ref mode) = self.config.sanitize_dump_payload {
             conf.push_str(&format!("sanitize-dump-payload {mode}\n"));
@@ -2653,7 +2693,7 @@ impl RedisServer {
 
         // -- catch-all --
         for (key, value) in &self.config.extra {
-            conf.push_str(&format!("{key} {value}\n"));
+            conf.push_str(&directive(key, [value]));
         }
 
         conf
@@ -2683,7 +2723,7 @@ async fn launch_server(
         config: config.clone(),
     }
     .generate_config(node_dir);
-    fs::write(&conf_path, conf_content)?;
+    crate::secure_file::write(&conf_path, conf_content)?;
 
     let module_args = if config.no_stack_modules {
         Vec::new()
@@ -2772,6 +2812,22 @@ impl RedisServerHandle {
     /// The server's port.
     pub fn port(&self) -> u16 {
         self.config.port
+    }
+
+    /// Path to the node directory the wrapper generated for this server.
+    ///
+    /// Created with mode `0700`, since the config inside it may carry
+    /// credentials in plaintext.
+    pub fn node_dir(&self) -> PathBuf {
+        self.config.dir.join(format!("node-{}", self.config.port))
+    }
+
+    /// Path to the generated `redis.conf` for this server.
+    ///
+    /// Useful when a test needs to inspect exactly what the wrapper wrote.
+    /// Created with mode `0600` when it carries credentials.
+    pub fn config_path(&self) -> PathBuf {
+        self.node_dir().join("redis.conf")
     }
 
     /// The server's bind address.
@@ -3406,7 +3462,7 @@ mod tests {
     fn loadmodule_config() {
         let s = RedisServer::new().loadmodule("/x/mod.so");
         let config = s.generate_config(std::path::Path::new("/tmp/rsw-test"));
-        assert!(config.contains("loadmodule \"/x/mod.so\"\n"));
+        assert!(config.contains("loadmodule /x/mod.so\n"));
     }
 
     #[test]
@@ -3414,7 +3470,88 @@ mod tests {
         let s = RedisServer::new()
             .loadmodule_with_args("/x/mod.so", ["stream-prefix", "ks:", "events"]);
         let config = s.generate_config(std::path::Path::new("/tmp/rsw-test"));
-        assert!(config.contains("loadmodule \"/x/mod.so\" stream-prefix ks: events\n"));
+        assert!(config.contains("loadmodule /x/mod.so stream-prefix ks: events\n"));
+    }
+
+    #[test]
+    fn loadmodule_arg_with_space_stays_one_token() {
+        let s = RedisServer::new().loadmodule_with_args("/x/mod.so", ["--prefix", "my events"]);
+        let config = s.generate_config(std::path::Path::new("/tmp/rsw-test"));
+        assert!(config.contains("loadmodule /x/mod.so --prefix \"my events\"\n"));
+    }
+
+    #[test]
+    fn loadmodule_path_with_space_is_quoted() {
+        let s = RedisServer::new().loadmodule("/my modules/mod.so");
+        let config = s.generate_config(std::path::Path::new("/tmp/rsw-test"));
+        assert!(config.contains("loadmodule \"/my modules/mod.so\"\n"));
+    }
+
+    #[test]
+    fn loadmodule_arg_cannot_inject_a_directive() {
+        let s = RedisServer::new().loadmodule_with_args("/x/mod.so", ["a\nrequirepass pwned"]);
+        let config = s.generate_config(std::path::Path::new("/tmp/rsw-test"));
+        assert!(!config.contains("\nrequirepass pwned"));
+        assert!(config.contains("loadmodule /x/mod.so \"a\\nrequirepass pwned\"\n"));
+    }
+
+    #[test]
+    fn password_with_metacharacters_is_one_token() {
+        let s = RedisServer::new().password("hunter2 # notes");
+        let config = s.generate_config(std::path::Path::new("/tmp/rsw-test"));
+        assert!(config.contains("requirepass \"hunter2 # notes\"\n"));
+    }
+
+    #[test]
+    fn password_cannot_inject_a_directive() {
+        let s = RedisServer::new().password("pw\nmaxmemory 1kb");
+        let config = s.generate_config(std::path::Path::new("/tmp/rsw-test"));
+        assert!(!config.contains("\nmaxmemory 1kb"));
+    }
+
+    #[test]
+    fn extra_value_is_encoded() {
+        let s = RedisServer::new().extra("proc-title-template", "{title} {listen-addr}");
+        let config = s.generate_config(std::path::Path::new("/tmp/rsw-test"));
+        assert!(config.contains("proc-title-template \"{title} {listen-addr}\"\n"));
+    }
+
+    #[test]
+    fn extra_rejects_reserved_directive() {
+        let err = RedisServer::new()
+            .extra("port", "6380")
+            .validate_extras()
+            .expect_err("reserved directive must be rejected");
+        assert!(
+            matches!(err, Error::ReservedDirective { ref key } if key == "port"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn extra_reserved_check_is_case_insensitive() {
+        let err = RedisServer::new()
+            .extra("LoadModule", "/x/mod.so")
+            .validate_extras()
+            .expect_err("reserved directive must be rejected");
+        assert!(matches!(err, Error::ReservedDirective { .. }), "{err}");
+    }
+
+    #[test]
+    fn extra_allows_unreserved_directive() {
+        let s = RedisServer::new().extra("maxmemory-samples", "7");
+        assert!(s.validate_extras().is_ok());
+    }
+
+    #[tokio::test]
+    async fn start_surfaces_reserved_directive() {
+        let err = RedisServer::new()
+            .extra("dir", "/tmp/elsewhere")
+            .start()
+            .await
+            .err()
+            .expect("start must reject a reserved directive before launching");
+        assert!(matches!(err, Error::ReservedDirective { .. }), "{err}");
     }
 
     #[test]
