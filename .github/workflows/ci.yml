@@ -30,6 +30,10 @@ jobs:
     name: Test Suite
     runs-on: ${{ matrix.os }}
     strategy:
+      # Report every cell. Cancelling the rest on the first failure hides
+      # whether a break is platform-specific or universal, which is the first
+      # thing you need to know when diagnosing one.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
         rust: [stable]
