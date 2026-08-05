@@ -1,5 +1,5 @@
 use redis_server_wrapper::chaos::SentinelCrashPoint;
-use redis_server_wrapper::{RedisCli, RedisSentinel, RedisServer, chaos};
+use redis_server_wrapper::{Error, RedisCli, RedisSentinel, RedisServer, chaos};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[tokio::test]
@@ -123,13 +123,10 @@ async fn sentinel_password_auth() {
 
     // The master rejects an unauthenticated command...
     let unauthed = RedisCli::new().host("127.0.0.1").port(17400);
-    let unauthed_reply = unauthed
-        .run(&["GET", "foo"])
-        .await
-        .expect("redis-cli itself should not fail even on a NOAUTH reply");
+    let unauthed_reply = unauthed.run(&["GET", "foo"]).await;
     assert!(
-        unauthed_reply.contains("NOAUTH"),
-        "expected a NOAUTH reply, got: {unauthed_reply}"
+        matches!(unauthed_reply, Err(Error::Cli { ref detail, .. }) if detail.contains("NOAUTH")),
+        "expected a NOAUTH error, got: {unauthed_reply:?}"
     );
 
     // ...and accepts the same command once authenticated.

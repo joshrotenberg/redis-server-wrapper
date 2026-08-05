@@ -34,18 +34,13 @@ async fn awkward_passwords_round_trip() {
         // The password is actually in force: an unauthenticated client is
         // rejected. Without this the next assertion would pass on a server
         // that simply has no password set.
-        //
-        // The reply is checked by content rather than by `is_err`, because
-        // redis-cli exits 0 on a Redis error reply and `run` currently
-        // surfaces that as `Ok` (see issue #143).
         let unauthenticated = redis_server_wrapper::RedisCli::new()
             .host(server.host())
             .port(server.port())
             .run(&["PING"])
-            .await
-            .unwrap_or_default();
+            .await;
         assert!(
-            unauthenticated.contains("NOAUTH"),
+            matches!(unauthenticated, Err(Error::Cli { ref detail, .. }) if detail.contains("NOAUTH")),
             "password {password:?} was not enforced, got: {unauthenticated:?}"
         );
 
