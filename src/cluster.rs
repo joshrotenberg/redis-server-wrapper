@@ -1309,15 +1309,24 @@ impl RedisClusterHandle {
         .await
     }
 
-    /// Wait until the cluster has finished forming: every node reporting
-    /// `cluster_state:ok` with the full 16384-slot space assigned and healthy.
+    /// Wait until the cluster has finished forming and is actually usable.
     ///
-    /// Stricter than [`Self::wait_for_all_healthy`], which accepts any
-    /// consistent slot count. Immediately after `CLUSTER CREATE` a node can
-    /// report `cluster_state:ok` while it still holds no slots, so formation
-    /// has to check coverage explicitly.
+    /// Three conditions, all of which have to hold on every node:
+    ///
+    /// - `cluster_state:ok` with the full 16384-slot space assigned and healthy.
+    ///   Stricter than [`Self::wait_for_all_healthy`], which accepts any
+    ///   consistent slot count: immediately after `CLUSTER CREATE` a node can
+    ///   report `cluster_state:ok` while it still holds no slots.
+    /// - every node knowing about every other, so gossip has settled rather
+    ///   than each node having only seen part of the topology.
+    /// - every replica reporting `master_link_status:up`. A replica that has
+    ///   not finished its initial sync cannot be failed over to, so returning
+    ///   before then hands back a cluster whose replicas are not yet usable.
+    ///   Role is read from `INFO replication` rather than assumed from node
+    ///   ordering, since `redis-cli --cluster create` decides the pairing.
     async fn wait_for_formation(&self, timeout: Duration) -> Result<()> {
         const TOTAL_SLOTS: u32 = 16384;
+        let total_nodes = self.nodes.len() as u32;
 
         crate::wait::wait_for(
             || async {
@@ -1337,6 +1346,21 @@ impl RedisClusterHandle {
                     if info.get("cluster_state").map(String::as_str) != Some("ok")
                         || field("cluster_slots_assigned") != TOTAL_SLOTS
                         || field("cluster_slots_ok") != TOTAL_SLOTS
+                        || field("cluster_known_nodes") != total_nodes
+                    {
+                        return false;
+                    }
+
+                    let Ok(Ok(repl)) = tokio::time::timeout(
+                        crate::cli::HEALTH_CHECK_TIMEOUT,
+                        node.info(Some("replication")),
+                    )
+                    .await
+                    else {
+                        return false;
+                    };
+                    if repl.get("role").map(String::as_str) == Some("slave")
+                        && repl.get("master_link_status").map(String::as_str) != Some("up")
                     {
                         return false;
                     }
@@ -1345,7 +1369,8 @@ impl RedisClusterHandle {
             },
             timeout,
             Duration::from_millis(100),
-            "cluster did not finish forming: nodes never agreed on a full slot assignment",
+            "cluster did not finish forming: nodes never agreed on a full slot assignment \
+             with every replica synced",
         )
         .await
     }
