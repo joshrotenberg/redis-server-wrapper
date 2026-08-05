@@ -146,25 +146,30 @@ async fn bad_cli_binary_returns_binary_not_found() {
 
 #[tokio::test]
 async fn port_already_in_use_returns_server_start_error() {
-    let _first = RedisServer::new()
+    let first = RedisServer::new()
         .port(16409)
         .dir(std::env::temp_dir().join("rsw-port-conflict-a"))
         .start()
         .await
         .expect("first server should start");
 
-    // A daemonizing redis-server forks and its parent exits 0 before the
-    // child even attempts to bind, so a second daemonized start on the same
-    // port would falsely report success. Run the second attempt in the
-    // foreground so the bind failure surfaces synchronously.
+    // The preflight check catches this before redis-server is spawned, so the
+    // daemonize workaround this test used to need no longer applies: a
+    // daemonizing start would have forked and exited 0 before the child even
+    // attempted to bind.
     let result = RedisServer::new()
         .port(16409)
         .dir(std::env::temp_dir().join("rsw-port-conflict-b"))
-        .daemonize(false)
         .start()
         .await;
 
-    assert!(matches!(result, Err(Error::ServerStart { port: 16409 })));
+    assert!(
+        matches!(result, Err(Error::PortInUse { port: 16409, .. })),
+        "expected PortInUse for the occupied port"
+    );
+
+    // The server that already held the port is untouched.
+    assert!(first.is_alive().await);
 }
 
 #[tokio::test]
