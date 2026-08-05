@@ -107,6 +107,25 @@ pub enum Error {
         role: String,
     },
 
+    /// A module expected to be loaded was not.
+    ///
+    /// A `loadmodule` directive only asks Redis to load a module. A wrong
+    /// path, an ABI mismatch, or a module whose `RedisModule_OnLoad` returns
+    /// an error all leave the server running without it, so the modules that
+    /// are loaded are listed to make a name mismatch obvious.
+    #[error(
+        "module `{name}` is not loaded on port {port} (loaded: {})",
+        if loaded.is_empty() { "none".to_string() } else { loaded.join(", ") }
+    )]
+    ModuleNotLoaded {
+        /// The module name that was expected.
+        name: String,
+        /// The port of the server that was checked.
+        port: u16,
+        /// Names of the modules actually loaded there.
+        loaded: Vec<String>,
+    },
+
     /// A topology was described in a way that cannot be started.
     ///
     /// Returned before anything starts, so a rejected topology leaves no

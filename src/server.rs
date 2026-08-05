@@ -10,6 +10,7 @@ use tokio::process::Command;
 use crate::cli::RedisCli;
 use crate::config_token::directive;
 use crate::error::{Error, Result};
+use crate::modules::ModuleInfo;
 
 /// Full configuration snapshot for a single `redis-server` process.
 ///
@@ -2017,6 +2018,22 @@ impl RedisServer {
         Ok(())
     }
 
+    /// Reject module specs Redis cannot act on.
+    ///
+    /// An empty path renders as `loadmodule ""`, which Redis rejects at
+    /// startup with a message that does not mention the builder call that
+    /// produced it. Catching it here names the problem instead.
+    fn validate_modules(&self) -> Result<()> {
+        for (path, _) in &self.config.loadmodule {
+            if path.as_os_str().is_empty() {
+                return Err(Error::InvalidTopology {
+                    message: "loadmodule path is empty".to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Start the server. Returns a handle that stops the server on Drop.
     ///
     /// Verifies that `redis-server` and `redis-cli` binaries are available,
@@ -2024,6 +2041,7 @@ impl RedisServer {
     /// wrapper generates, before attempting to launch anything.
     pub async fn start(self) -> Result<RedisServerHandle> {
         self.validate_extras()?;
+        self.validate_modules()?;
         if which::which(&self.config.redis_server_bin).is_err() {
             return Err(Error::BinaryNotFound {
                 binary: self.config.redis_server_bin.clone(),
@@ -2839,6 +2857,45 @@ impl RedisServerHandle {
         self.node_dir().join("redis.conf")
     }
 
+    /// The modules this server currently has loaded, via `MODULE LIST`.
+    ///
+    /// Includes modules built into the server as well as ones loaded from
+    /// disk; the two are told apart by [`ModuleInfo::path`], which is empty
+    /// for built-ins.
+    pub async fn modules(&self) -> Result<Vec<ModuleInfo>> {
+        let raw = self.run(&["MODULE", "LIST"]).await?;
+        Ok(crate::modules::parse_module_list(&raw))
+    }
+
+    /// Whether a module with this name is loaded.
+    ///
+    /// The name is the one the module registered with `RedisModule_Init`,
+    /// which is not derived from its filename and often differs from it. Check
+    /// [`Self::modules`] if you are unsure what a module calls itself.
+    ///
+    /// A `loadmodule` directive in the config is not evidence the module
+    /// loaded: a wrong path, an ABI mismatch, or a module whose
+    /// `RedisModule_OnLoad` fails all leave the server running without it.
+    pub async fn has_module(&self, name: &str) -> Result<bool> {
+        Ok(self.modules().await?.iter().any(|m| m.name == name))
+    }
+
+    /// Fail unless a module with this name is loaded.
+    ///
+    /// The error lists what is loaded instead, since the usual cause is a name
+    /// that differs from the filename.
+    pub async fn require_module(&self, name: &str) -> Result<()> {
+        let loaded = self.modules().await?;
+        if loaded.iter().any(|m| m.name == name) {
+            return Ok(());
+        }
+        Err(Error::ModuleNotLoaded {
+            name: name.to_string(),
+            port: self.config.port,
+            loaded: loaded.into_iter().map(|m| m.name).collect(),
+        })
+    }
+
     /// The server's bind address.
     pub fn host(&self) -> &str {
         &self.config.bind
@@ -3465,6 +3522,26 @@ mod tests {
         assert_eq!(s.config.tls_session_cache_timeout, Some(300));
         assert_eq!(s.config.tls_replication, Some(true));
         assert_eq!(s.config.tls_cluster, Some(true));
+    }
+
+    #[test]
+    fn empty_loadmodule_path_is_rejected() {
+        let err = RedisServer::new()
+            .loadmodule("")
+            .validate_modules()
+            .expect_err("an empty module path must be rejected");
+        assert!(matches!(err, Error::InvalidTopology { .. }), "{err}");
+    }
+
+    #[test]
+    fn valid_loadmodule_paths_are_accepted() {
+        assert!(
+            RedisServer::new()
+                .loadmodule("/x/mod.so")
+                .loadmodule_with_args("/y/mod.so", ["a"])
+                .validate_modules()
+                .is_ok()
+        );
     }
 
     #[test]

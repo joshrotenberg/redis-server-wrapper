@@ -897,6 +897,23 @@ impl RedisSentinelHandle {
         &self.replicas
     }
 
+    /// Fail unless every data node has this module loaded.
+    ///
+    /// Covers the master and every replica, since the builder propagates
+    /// `loadmodule` to all of them. Sentinel processes are not data nodes and
+    /// do not load modules, so they are not checked.
+    ///
+    /// A replica missing a module the master has will fail to apply
+    /// replicated commands from it, and would serve reads without it after a
+    /// promotion.
+    pub async fn require_module_on_data_nodes(&self, name: &str) -> Result<()> {
+        self.master.require_module(name).await?;
+        for replica in &self.replicas {
+            replica.require_module(name).await?;
+        }
+        Ok(())
+    }
+
     /// All monitored master names.
     pub fn monitored_master_names(&self) -> Vec<&str> {
         self.monitored_masters

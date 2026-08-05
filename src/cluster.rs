@@ -1375,6 +1375,21 @@ impl RedisClusterHandle {
         .await
     }
 
+    /// Fail unless every node in the cluster has this module loaded.
+    ///
+    /// A cluster-wide check rather than a per-node one because the builder
+    /// propagates `loadmodule` to every node, so a module present on some
+    /// nodes and absent on others is the interesting failure: commands then
+    /// succeed or fail depending on which node a key hashes to.
+    ///
+    /// The error names the first node missing it.
+    pub async fn require_module_on_all_nodes(&self, name: &str) -> Result<()> {
+        for node in &self.nodes {
+            node.require_module(name).await?;
+        }
+        Ok(())
+    }
+
     /// Access a specific node by index.
     ///
     /// Nodes are ordered by port: masters first (indices `0..masters`),
