@@ -64,7 +64,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/redis-dist
-          key: redis-${{ matrix.redis }}-${{ runner.os }}
+          key: redis-${{ matrix.redis }}-${{ runner.os }}-v2
 
       - name: Build Redis ${{ matrix.redis }}
         if: steps.redis-cache.outputs.cache-hit != 'true'
@@ -81,6 +81,10 @@ jobs:
           make -C /tmp/redis-src -j"$(nproc)" BUILD_TLS=yes
           mkdir -p ~/redis-dist
           cp /tmp/redis-src/src/redis-server /tmp/redis-src/src/redis-cli ~/redis-dist/
+          # Keep the module API header too. On a cache hit the source tree
+          # is gone, and this is the only copy of redismodule.h that is
+          # guaranteed to match the Redis actually under test.
+          cp /tmp/redis-src/src/redismodule.h ~/redis-dist/
 
       - name: Put Redis ${{ matrix.redis }} on PATH
         run: |
@@ -98,6 +102,19 @@ jobs:
           # matrix report a pass it never earned.
           redis-server --version | grep -q "v=${{ matrix.redis }}"
 
+      # Unlike the main workflow, which fetches a header over the network and
+      # tolerates failure, this builds against the header from the very source
+      # tree that produced the redis-server under test. Module coverage is
+      # authoritative here, so a failure to build the fixture is a hard error
+      # rather than a silent skip.
+      - name: Build Redis test module for ${{ matrix.redis }}
+        run: |
+          set -euo pipefail
+          cc -fPIC -shared -I "$HOME/redis-dist" \
+            tests/support/rsw_test_module.c \
+            -o "${RUNNER_TEMP}/rsw_test_module.so"
+          echo "REDIS_TEST_MODULE=${RUNNER_TEMP}/rsw_test_module.so" >> "$GITHUB_ENV"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -107,4 +124,10 @@ jobs:
           shared-key: "redis-compat"
 
       - name: Run test suite against Redis ${{ matrix.redis }}
-        run: cargo test --all-features --verbose
+        run: |
+          set -euo pipefail
+          # A test that skips by returning early reports "ok", so an unset
+          # fixture would look like a pass. Fail instead.
+          test -n "${REDIS_TEST_MODULE:-}"
+          test -f "${REDIS_TEST_MODULE}"
+          cargo test --all-features --verbose
