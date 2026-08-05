@@ -10,9 +10,17 @@
 //! belongs to something else. These helpers check first and fail with the port
 //! named, leaving whatever holds it alone.
 
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::time::Duration;
 
 use crate::error::{Error, Result};
+
+/// How long to wait for a connect probe before treating the port as free.
+///
+/// Probes are against loopback in the common case, where a live listener
+/// answers in well under a millisecond and a free port is refused just as
+/// fast. The bound only matters for an address that silently drops packets.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// What a port was needed for, used to make [`Error::PortInUse`] specific
 /// enough to act on.
@@ -46,25 +54,40 @@ impl std::fmt::Display for PortRole {
     }
 }
 
-/// Whether a port can be bound on `host`.
+/// Whether a port is free of a live listener on `host`.
 ///
-/// Rust sets `SO_REUSEADDR` on Unix, so a socket left in `TIME_WAIT` by a
-/// process that has already exited does not read as occupied, while a live
-/// listener does. That is the distinction we want: a port is "in use" only if
-/// something is actually accepting on it.
+/// Probes by connecting, not by binding. The question this needs to answer is
+/// "would starting here disturb a server that is already running", and only a
+/// process actually accepting connections can be disturbed.
 ///
-/// A host that does not resolve reads as available. Binding is not this
-/// function's job to diagnose, and the subsequent start will report the real
-/// failure.
+/// Binding is the obvious implementation and is wrong for this. A port whose
+/// previous listener has just exited can still refuse a bind with
+/// `AddrInUse` while the kernel tears the socket down, and sockets left in
+/// `TIME_WAIT` have no owning process at all. A bind probe reads both as
+/// occupied, which turns the normal case of reusing a port moments after
+/// stopping a server into a spurious failure. `SO_REUSEADDR` does not close
+/// this gap portably: Linux lets a listener bind over `TIME_WAIT`, BSD and
+/// macOS do not.
+///
+/// A refused connection means nothing is serving, so the port is available
+/// even if the kernel is still holding remnants: `redis-server` sets
+/// `SO_REUSEADDR` itself and binds it fine.
+///
+/// Anything other than a successful connection reads as available. If the
+/// address cannot be reached, this cannot disturb a server there either, and
+/// a genuine bind failure is reported by the start that follows.
 pub fn port_available(host: &str, port: u16) -> bool {
-    match TcpListener::bind((host, port)) {
-        Ok(listener) => {
-            drop(listener);
-            true
+    let Ok(addrs) = (host, port).to_socket_addrs() else {
+        return true;
+    };
+    let addrs: Vec<SocketAddr> = addrs.collect();
+
+    for addr in addrs {
+        if TcpStream::connect_timeout(&addr, PROBE_TIMEOUT).is_ok() {
+            return false;
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => false,
-        Err(_) => true,
     }
+    true
 }
 
 /// Return an error naming the first occupied port, if any.
@@ -100,6 +123,9 @@ pub fn bus_port(client_port: u16) -> Option<u16> {
 mod tests {
     use super::*;
 
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
     #[test]
     fn unbound_port_is_available() {
         // Bind and release to get a port nothing is listening on.
@@ -110,11 +136,39 @@ mod tests {
     }
 
     #[test]
-    fn bound_port_is_not_available() {
+    fn listening_port_is_not_available() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         assert!(!port_available("127.0.0.1", port));
         drop(listener);
+    }
+
+    #[test]
+    fn port_with_lingering_time_wait_is_available() {
+        // The regression this probe design exists for. A listener that has
+        // handled a connection and then exited can leave the port refusing a
+        // bind while nothing is serving on it. Starting there is fine, so it
+        // must not read as occupied.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        // Drive a real connection through so the socket has something to
+        // linger over, rather than closing an untouched listener.
+        let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        client.write_all(b"ping").unwrap();
+        let mut buf = [0u8; 4];
+        server.read_exact(&mut buf).unwrap();
+
+        drop(client);
+        drop(server);
+        drop(listener);
+
+        assert!(
+            port_available("127.0.0.1", port),
+            "a port with no live listener must be available even while the \
+             kernel still holds socket remnants"
+        );
     }
 
     #[test]
@@ -123,7 +177,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
 
         let err = ensure_ports_available("127.0.0.1", [(port, PortRole::ClusterNode)])
-            .expect_err("an occupied port must be reported");
+            .expect_err("a port with a live listener must be reported");
 
         match err {
             Error::PortInUse {
