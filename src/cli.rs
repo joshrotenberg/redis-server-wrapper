@@ -170,7 +170,7 @@ impl RedisCli {
             stdin_tag_arg: false,
             multi_bulk_delimiter: None,
             output_delimiter: None,
-            exit_error_code: false,
+            exit_error_code: true,
             no_raw: false,
             quoted_input: false,
             show_pushes: None,
@@ -392,7 +392,17 @@ impl RedisCli {
         self
     }
 
-    /// Return exit error code on server errors (`-e`).
+    /// Return a non-zero exit code on Redis error replies (`-e`, default: on).
+    ///
+    /// Without this, redis-cli exits 0 whenever it successfully round-trips
+    /// with the server, whether the reply was a value or an error, so
+    /// [`run`](Self::run) cannot tell the two apart and returns the error text
+    /// as if it were data.
+    ///
+    /// A nil reply for a missing key is not an error and still exits 0, so
+    /// this does not turn an absent key into a failure.
+    ///
+    /// Disable it only when you specifically want the error text as a value.
     pub fn exit_error_code(mut self, enable: bool) -> Self {
         self.exit_error_code = enable;
         self
@@ -628,17 +638,36 @@ impl RedisCli {
     }
 
     /// Run a command and return stdout on success.
+    ///
+    /// A Redis error reply is a failure: with `-e` in force (the default, see
+    /// [`exit_error_code`](Self::exit_error_code)) redis-cli exits non-zero
+    /// for `NOAUTH`, `ERR`, `WRONGTYPE`, `MOVED`, and the rest, and this
+    /// returns [`Error::Cli`] carrying the error text.
     pub async fn run(&self, args: &[&str]) -> Result<String> {
         let output = self.raw_output(args).await?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).to_string())
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(Error::Cli {
-                host: self.host.clone(),
-                port: self.port,
-                detail: stderr.into_owned(),
-            })
+            Err(self.cli_error(&output))
+        }
+    }
+
+    /// Build a [`Error::Cli`] from a failed invocation.
+    ///
+    /// redis-cli writes a Redis error reply to stdout, not stderr, and only
+    /// uses stderr for its own failures (a refused connection, a bad flag).
+    /// Prefer whichever carries the message.
+    fn cli_error(&self, output: &Output) -> Error {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = if stderr.trim().is_empty() {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        } else {
+            stderr.trim().to_string()
+        };
+        Error::Cli {
+            host: self.host.clone(),
+            port: self.port,
+            detail,
         }
     }
 
@@ -1010,12 +1039,7 @@ impl RedisCli {
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).to_string())
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(Error::Cli {
-                host: self.host.clone(),
-                port: self.port,
-                detail: stderr.into_owned(),
-            })
+            Err(self.cli_error(&output))
         }
     }
 
