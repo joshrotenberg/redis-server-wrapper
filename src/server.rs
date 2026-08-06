@@ -2094,6 +2094,10 @@ impl RedisServer {
     /// configuration rather than of the port, and retrying it would just fail
     /// again on a different number.
     async fn start_on_an_automatic_port(self) -> Result<RedisServerHandle> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        /// Distinguishes concurrent automatic-port attempts within a process.
+        static ATTEMPT: AtomicU64 = AtomicU64::new(0);
+
         let mut last: Option<Error> = None;
 
         for _ in 0..MAX_PORT_ATTEMPTS {
@@ -2102,6 +2106,24 @@ impl RedisServer {
             };
             let candidate = crate::preflight::reserve_ephemeral_port()?;
             attempt.config.port = candidate;
+
+            // Give every attempt its own directory.
+            //
+            // The node directory is derived from the port, so two attempts
+            // that draw the same candidate would otherwise share one, and with
+            // it the pidfile. Both would then see the pidfile the winner wrote
+            // and both would report success, leaving two handles believing
+            // they own a port with one server behind it. The loser's teardown
+            // would stop the winner's server.
+            //
+            // With separate directories the loser's `redis-server` fails to
+            // bind, writes no pidfile of its own, and the start fails and
+            // retries on a different port, which is the intended behavior.
+            attempt.config.dir = attempt.config.dir.join(format!(
+                "auto-{}-{}",
+                std::process::id(),
+                ATTEMPT.fetch_add(1, Ordering::Relaxed)
+            ));
 
             match attempt.start_on_the_configured_port().await {
                 Ok(handle) => return Ok(handle),
