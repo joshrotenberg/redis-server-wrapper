@@ -371,9 +371,9 @@ async fn test_error_handling() {
 }
 ```
 
-Prefer a `..` rest pattern inside a variant and a catch-all `Err(e)` arm. `Error`
-gains variants and fields between releases, and an exhaustive match without them
-will not compile against the next one.
+`Error` is `#[non_exhaustive]`, so a catch-all `Err(e)` arm is required. Use a
+`..` rest pattern inside a variant as well, since variants gain fields between
+releases the same way the enum gains variants.
 
 ## Blocking API
 
