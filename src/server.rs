@@ -2124,9 +2124,35 @@ impl RedisServer {
                 std::process::id(),
                 ATTEMPT.fetch_add(1, Ordering::Relaxed)
             ));
+            let expected_dir = attempt
+                .config
+                .dir
+                .join(format!("node-{candidate}"))
+                .display()
+                .to_string();
+            let attempt_bind = attempt.config.bind.clone();
 
             match attempt.start_on_the_configured_port().await {
-                Ok(handle) => return Ok(handle),
+                // A successful start is not proof the server on that port is
+                // ours. Every check along the way can be satisfied by someone
+                // else's server: the daemonizing parent exits 0 whether or not
+                // the child binds, and the readiness probe connects to
+                // whatever is listening. Ask the server which directory it is
+                // running from, which is unique to this attempt.
+                Ok(handle) => match handle.run(&["CONFIG", "GET", "dir"]).await {
+                    Ok(reply) if reply.contains(&expected_dir) => return Ok(handle),
+                    _ => {
+                        tracing::debug!(port = candidate, "auto_port_lost_race");
+                        // Dropping the handle here would stop the server that
+                        // won the port, which is not ours to stop.
+                        handle.detach();
+                        last = Some(Error::PortInUse {
+                            host: attempt_bind.clone(),
+                            port: candidate,
+                            role: crate::preflight::PortRole::Server.to_string(),
+                        });
+                    }
+                },
                 // Someone took the candidate between reserving it and binding
                 // it. Their process is left alone; take a different number.
                 Err(e @ (Error::PortInUse { .. } | Error::ServerStart { .. })) => {

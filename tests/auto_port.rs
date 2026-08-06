@@ -175,3 +175,29 @@ async fn auto_port_overrides_a_configured_port() {
     );
     assert!(server.is_alive().await);
 }
+
+#[tokio::test]
+async fn config_get_dir_identifies_the_server_behind_a_port() {
+    // The invariant the automatic-port ownership check rests on. Neither the
+    // spawn's exit status nor the readiness probe can tell our server from
+    // someone else's on the same port, so the retry loop asks the server which
+    // directory it is running from. If Redis ever stopped reporting that, the
+    // check would reject every attempt and allocation would fail rather than
+    // silently hand back a foreign server, but pin it either way.
+    let server = RedisServer::new()
+        .auto_port()
+        .start()
+        .await
+        .expect("failed to start");
+
+    let reply = server
+        .run(&["CONFIG", "GET", "dir"])
+        .await
+        .expect("CONFIG GET dir should succeed");
+
+    let node_dir = server.node_dir().display().to_string();
+    assert!(
+        reply.contains(&node_dir),
+        "CONFIG GET dir returned {reply:?}, which does not contain {node_dir}"
+    );
+}
