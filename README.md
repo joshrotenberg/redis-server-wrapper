@@ -27,6 +27,25 @@ just `redis-server` and `redis-cli` on PATH.
 
 Minimum supported Rust version (MSRV): 1.88, enforced in CI.
 
+## Redis compatibility
+
+These release lines are tested in CI against pinned builds, on every pull request that touches
+the crate's Redis-facing surface and weekly:
+
+| Line | Pinned build under test |
+|------|-------------------------|
+| 7.2  | 7.2.14                  |
+| 7.4  | 7.4.9                   |
+| 8.2  | 8.2.6                   |
+| 8.x  | 8.8.0                   |
+
+Each is built from source with `BUILD_TLS=yes` and runs the full suite, so the TLS paths are
+exercised rather than skipped. Other versions may work; these are the ones a regression would
+be caught on.
+
+The main CI workflow separately runs against whatever `redis-server` the platform package
+manager provides on Ubuntu and macOS, which covers the case most users actually install.
+
 ## Platform support
 
 Unix-like platforms only (Linux, macOS, BSD). Process lifecycle management relies on POSIX

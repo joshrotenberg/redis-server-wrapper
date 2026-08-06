@@ -1047,15 +1047,7 @@ impl RedisClusterBuilder {
             "cluster_create_complete"
         );
 
-        // Wait for convergence. Fixed sleep rather than a poll-until-healthy
-        // loop -- see issue #147 for replacing this with a convergence wait.
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        tracing::debug!(
-            elapsed_ms = start_time.elapsed().as_millis() as u64,
-            "convergence_wait_complete"
-        );
-
-        Ok(RedisClusterHandle {
+        let handle = RedisClusterHandle {
             nodes,
             num_masters: self.masters,
             bind: self.bind,
@@ -1068,9 +1060,31 @@ impl RedisClusterBuilder {
                 ca_cert_file: self.tls_ca_cert_file,
             },
             cluster_base,
-        })
+        };
+
+        // `CLUSTER CREATE` returns once the nodes have been told about each
+        // other, not once they agree. Wait for the formed cluster rather than
+        // guessing at how long that takes: returning early hands back a
+        // cluster whose first command can fail, and a fixed sleep is wasted
+        // time on the common path where convergence is immediate.
+        //
+        // On timeout the handle drops, which stops the nodes it started.
+        handle.wait_for_formation(FORMATION_TIMEOUT).await?;
+        tracing::debug!(
+            elapsed_ms = start_time.elapsed().as_millis() as u64,
+            "convergence_wait_complete"
+        );
+
+        Ok(handle)
     }
 }
+
+/// How long [`RedisClusterBuilder::start`] waits for a freshly created cluster
+/// to agree on its slot assignment.
+///
+/// Generous because it only bounds the failure case: a converged cluster
+/// returns on the first poll.
+const FORMATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// TLS configuration snapshot stored in the handle for building CLI instances.
 #[derive(Clone, Debug, Default)]
@@ -1321,6 +1335,87 @@ impl RedisClusterHandle {
             "cluster did not converge to all-nodes-healthy in time",
         )
         .await
+    }
+
+    /// Wait until the cluster has finished forming and is actually usable.
+    ///
+    /// Three conditions, all of which have to hold on every node:
+    ///
+    /// - `cluster_state:ok` with the full 16384-slot space assigned and healthy.
+    ///   Stricter than [`Self::wait_for_all_healthy`], which accepts any
+    ///   consistent slot count: immediately after `CLUSTER CREATE` a node can
+    ///   report `cluster_state:ok` while it still holds no slots.
+    /// - every node knowing about every other, so gossip has settled rather
+    ///   than each node having only seen part of the topology.
+    /// - every replica reporting `master_link_status:up`. A replica that has
+    ///   not finished its initial sync cannot be failed over to, so returning
+    ///   before then hands back a cluster whose replicas are not yet usable.
+    ///   Role is read from `INFO replication` rather than assumed from node
+    ///   ordering, since `redis-cli --cluster create` decides the pairing.
+    async fn wait_for_formation(&self, timeout: Duration) -> Result<()> {
+        const TOTAL_SLOTS: u32 = 16384;
+        let total_nodes = self.nodes.len() as u32;
+
+        crate::wait::wait_for(
+            || async {
+                for node in &self.nodes {
+                    let Ok(Ok(raw)) = tokio::time::timeout(
+                        crate::cli::HEALTH_CHECK_TIMEOUT,
+                        node.run(&["CLUSTER", "INFO"]),
+                    )
+                    .await
+                    else {
+                        return false;
+                    };
+                    let info = crate::server::parse_info(&raw);
+                    let field = |key: &str| -> u32 {
+                        info.get(key).and_then(|v| v.parse().ok()).unwrap_or(0)
+                    };
+                    if info.get("cluster_state").map(String::as_str) != Some("ok")
+                        || field("cluster_slots_assigned") != TOTAL_SLOTS
+                        || field("cluster_slots_ok") != TOTAL_SLOTS
+                        || field("cluster_known_nodes") != total_nodes
+                    {
+                        return false;
+                    }
+
+                    let Ok(Ok(repl)) = tokio::time::timeout(
+                        crate::cli::HEALTH_CHECK_TIMEOUT,
+                        node.info(Some("replication")),
+                    )
+                    .await
+                    else {
+                        return false;
+                    };
+                    if repl.get("role").map(String::as_str) == Some("slave")
+                        && repl.get("master_link_status").map(String::as_str) != Some("up")
+                    {
+                        return false;
+                    }
+                }
+                true
+            },
+            timeout,
+            Duration::from_millis(100),
+            "cluster did not finish forming: nodes never agreed on a full slot assignment \
+             with every replica synced",
+        )
+        .await
+    }
+
+    /// Fail unless every node in the cluster has this module loaded.
+    ///
+    /// A cluster-wide check rather than a per-node one because the builder
+    /// propagates `loadmodule` to every node, so a module present on some
+    /// nodes and absent on others is the interesting failure: commands then
+    /// succeed or fail depending on which node a key hashes to.
+    ///
+    /// The error names the first node missing it.
+    pub async fn require_module_on_all_nodes(&self, name: &str) -> Result<()> {
+        for node in &self.nodes {
+            node.require_module(name).await?;
+        }
+        Ok(())
     }
 
     /// Access a specific node by index.

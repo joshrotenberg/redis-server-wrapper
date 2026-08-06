@@ -1,0 +1,133 @@
+name: Redis Compatibility
+
+# The supported Redis release lines, exercised against pinned builds.
+#
+# The main CI workflow installs whatever redis-server the platform package
+# manager provides, which drifts without notice and tests exactly one version.
+# This workflow pins the lines the crate claims to support and builds each from
+# source, so a behavior change between Redis versions surfaces here as a named
+# failure rather than as an unexplained break on some future runner image.
+#
+# Building Redis takes a few minutes uncached, so this does not run on every
+# push. It runs on pull requests that touch the wrapper's Redis-facing surface,
+# on main, weekly to catch upstream changes, and on demand.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/redis-compat.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/redis-compat.yml"
+  schedule:
+    # Mondays at 06:00 UTC. Catches a new 8.x patch release without a push.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  compat:
+    name: Redis ${{ matrix.redis }}
+    runs-on: ubuntu-latest
+    strategy:
+      # Report every line's result. A break on 7.2 should not hide the state
+      # of 8.2, which is the whole point of testing a matrix of versions.
+      fail-fast: false
+      matrix:
+        include:
+          - redis: "7.2.14"
+            line: "7.2"
+          - redis: "7.4.9"
+            line: "7.4"
+          - redis: "8.2.6"
+            line: "8.2"
+          - redis: "8.8.0"
+            line: "8.x"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Redis ${{ matrix.redis }} build
+        id: redis-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/redis-dist
+          key: redis-${{ matrix.redis }}-${{ runner.os }}-v2
+
+      - name: Build Redis ${{ matrix.redis }}
+        if: steps.redis-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev
+          curl -fsSL -o /tmp/redis.tar.gz \
+            "https://download.redis.io/releases/redis-${{ matrix.redis }}.tar.gz"
+          mkdir -p /tmp/redis-src
+          tar xzf /tmp/redis.tar.gz -C /tmp/redis-src --strip-components=1
+          # BUILD_TLS=yes so the TLS-gated tests exercise a real TLS build
+          # rather than being silently skipped on a non-TLS binary.
+          make -C /tmp/redis-src -j"$(nproc)" BUILD_TLS=yes
+          mkdir -p ~/redis-dist
+          cp /tmp/redis-src/src/redis-server /tmp/redis-src/src/redis-cli ~/redis-dist/
+          # Keep the module API header too. On a cache hit the source tree
+          # is gone, and this is the only copy of redismodule.h that is
+          # guaranteed to match the Redis actually under test.
+          cp /tmp/redis-src/src/redismodule.h ~/redis-dist/
+
+      - name: Put Redis ${{ matrix.redis }} on PATH
+        run: |
+          set -euo pipefail
+          chmod +x ~/redis-dist/redis-server ~/redis-dist/redis-cli
+          echo "$HOME/redis-dist" >> "$GITHUB_PATH"
+
+      - name: Verify the version under test
+        run: |
+          set -euo pipefail
+          redis-server --version
+          redis-cli --version
+          # Fail loudly rather than testing a different version than claimed:
+          # a silent fallback to the runner's own redis-server would make this
+          # matrix report a pass it never earned.
+          redis-server --version | grep -q "v=${{ matrix.redis }}"
+
+      # Unlike the main workflow, which fetches a header over the network and
+      # tolerates failure, this builds against the header from the very source
+      # tree that produced the redis-server under test. Module coverage is
+      # authoritative here, so a failure to build the fixture is a hard error
+      # rather than a silent skip.
+      - name: Build Redis test module for ${{ matrix.redis }}
+        run: |
+          set -euo pipefail
+          cc -fPIC -shared -I "$HOME/redis-dist" \
+            tests/support/rsw_test_module.c \
+            -o "${RUNNER_TEMP}/rsw_test_module.so"
+          echo "REDIS_TEST_MODULE=${RUNNER_TEMP}/rsw_test_module.so" >> "$GITHUB_ENV"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "redis-compat"
+
+      - name: Run test suite against Redis ${{ matrix.redis }}
+        run: |
+          set -euo pipefail
+          # A test that skips by returning early reports "ok", so an unset
+          # fixture would look like a pass. Fail instead.
+          test -n "${REDIS_TEST_MODULE:-}"
+          test -f "${REDIS_TEST_MODULE}"
+          cargo test --all-features --verbose

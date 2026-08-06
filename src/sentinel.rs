@@ -577,9 +577,26 @@ impl RedisSentinelBuilder {
             "replicas_started"
         );
 
-        // Let replication link up. Fixed sleep rather than a poll-until-linked
-        // loop -- see issue #147 for replacing this with a convergence wait.
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // Sentinels discover replicas through the master, so the master has to
+        // have acknowledged them before the sentinels come up. Wait for the
+        // link rather than guessing at how long it takes.
+        if self.num_replicas > 0 {
+            let expected = self.num_replicas;
+            crate::wait::wait_for(
+                || async {
+                    let Ok(info) = master.info(Some("replication")).await else {
+                        return false;
+                    };
+                    info.get("connected_slaves")
+                        .and_then(|v| v.parse::<u16>().ok())
+                        .is_some_and(|n| n >= expected)
+                },
+                REPLICATION_LINK_TIMEOUT,
+                Duration::from_millis(100),
+                format!("master did not report {expected} connected replica(s) in time"),
+            )
+            .await?;
+        }
         tracing::debug!(
             elapsed_ms = start_time.elapsed().as_millis() as u64,
             "replication_wait_complete"
@@ -712,16 +729,7 @@ impl RedisSentinelBuilder {
             "sentinels_started"
         );
 
-        // Wait for sentinels to discover each other. Fixed sleep rather than
-        // a poll-until-discovered loop -- see issue #147 for replacing this
-        // with a convergence wait.
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        tracing::debug!(
-            elapsed_ms = start_time.elapsed().as_millis() as u64,
-            "discovery_wait_complete"
-        );
-
-        Ok(RedisSentinelHandle {
+        let handle = RedisSentinelHandle {
             master,
             replicas,
             sentinel_ports: sentinel_handles.iter().map(|(p, _, _)| *p).collect(),
@@ -736,9 +744,35 @@ impl RedisSentinelBuilder {
                 key_file: self.tls_key_file,
                 ca_cert_file: self.tls_ca_cert_file,
             },
-        })
+        };
+
+        // Sentinels learn about each other through the master they share, so a
+        // freshly started topology is not usable until that gossip has landed.
+        // `is_healthy` already encodes what "converged" means here: the master
+        // reachable and flagged `master`, its replicas counted, and every
+        // sentinel accounted for.
+        //
+        // On timeout the handle drops, which tears down what it started.
+        handle.wait_for_healthy(DISCOVERY_TIMEOUT).await?;
+        tracing::debug!(
+            elapsed_ms = start_time.elapsed().as_millis() as u64,
+            "discovery_wait_complete"
+        );
+
+        Ok(handle)
     }
 }
+
+/// How long [`RedisSentinelBuilder::start`] waits for the master to report its
+/// replicas before bringing sentinels up.
+const REPLICATION_LINK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long [`RedisSentinelBuilder::start`] waits for sentinels to discover
+/// the master, its replicas, and each other.
+///
+/// Generous because it only bounds the failure case: a converged topology
+/// returns on the first poll.
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// TLS configuration snapshot stored in the handle for building CLI instances.
 #[derive(Clone, Debug, Default)]
@@ -898,6 +932,23 @@ impl RedisSentinelHandle {
     /// going down independently of the master.
     pub fn replicas(&self) -> &[RedisServerHandle] {
         &self.replicas
+    }
+
+    /// Fail unless every data node has this module loaded.
+    ///
+    /// Covers the master and every replica, since the builder propagates
+    /// `loadmodule` to all of them. Sentinel processes are not data nodes and
+    /// do not load modules, so they are not checked.
+    ///
+    /// A replica missing a module the master has will fail to apply
+    /// replicated commands from it, and would serve reads without it after a
+    /// promotion.
+    pub async fn require_module_on_data_nodes(&self, name: &str) -> Result<()> {
+        self.master.require_module(name).await?;
+        for replica in &self.replicas {
+            replica.require_module(name).await?;
+        }
+        Ok(())
     }
 
     /// All monitored master names.
