@@ -241,6 +241,7 @@ pub mod sentinel;
 #[cfg(feature = "tokio")]
 pub mod server;
 pub mod stack;
+mod topology_dir;
 #[cfg(feature = "tokio")]
 pub mod wait;
 

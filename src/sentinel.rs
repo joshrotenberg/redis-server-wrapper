@@ -2,9 +2,8 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::process::Command;
 use tracing::Instrument;
@@ -60,6 +59,7 @@ pub struct RedisSentinelBuilder {
     extra: HashMap<String, String>,
     redis_server_bin: String,
     redis_cli_bin: String,
+    dir: Option<PathBuf>,
     monitored_masters: Vec<MonitoredMaster>,
 }
 
@@ -75,6 +75,17 @@ impl RedisSentinelBuilder {
     /// Set the name of the monitored master (default: `"mymaster"`).
     pub fn master_name(mut self, name: impl Into<String>) -> Self {
         self.master_name = name.into();
+        self
+    }
+
+    /// Place the topology's working directory somewhere specific.
+    ///
+    /// Defaults to a path under the system temp directory derived from the
+    /// bind address and ports. That default is deliberately stable across
+    /// runs: it is where the pidfiles live, and it is what lets a crashed run
+    /// be reclaimed rather than leaving processes that block the next start.
+    pub fn dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.dir = Some(dir.into());
         self
     }
 
@@ -440,6 +451,69 @@ impl RedisSentinelBuilder {
         Ok(())
     }
 
+    /// Where this topology keeps its processes.
+    fn base_dir(&self) -> PathBuf {
+        self.dir.clone().unwrap_or_else(|| {
+            crate::topology_dir::topology_dir(
+                "sentinel",
+                &self.bind,
+                &[
+                    self.master_port,
+                    self.replica_base_port,
+                    self.num_replicas,
+                    self.sentinel_base_port,
+                    self.num_sentinels,
+                ],
+            )
+        })
+    }
+
+    /// Stop leftover processes from a previous run of this same topology.
+    ///
+    /// Covers the data nodes, whose pidfiles `RedisServer` writes, and the
+    /// sentinel control processes, whose configs name a pidfile of their own.
+    /// Nothing outside those paths is touched.
+    fn reclaim_owned_processes(&self, base: &Path) {
+        // RedisServer nests a node-<port> directory under the dir it is given.
+        let data_node =
+            |dir: PathBuf, port: u16| dir.join(format!("node-{port}")).join("redis.pid");
+
+        let mut pidfiles = vec![data_node(base.join("master"), self.master_port)];
+        for port in self.replica_ports() {
+            pidfiles.push(data_node(base.join(format!("replica-{port}")), port));
+        }
+        for port in self.sentinel_ports() {
+            pidfiles.push(base.join(format!("sentinel-{port}")).join("sentinel.pid"));
+        }
+
+        for pidfile in pidfiles {
+            if let Some(pid) = crate::process::reclaim_from_pidfile(&pidfile) {
+                tracing::debug!(pid, path = %pidfile.display(), "reclaimed_stale_sentinel_process");
+            }
+        }
+
+        // Clear the per-process directories now that nothing is using them. A
+        // stable base keeps the previous run's RDB, AOF, and the sentinel
+        // configs Redis rewrites in place with discovered state, none of which
+        // should carry into a topology being built fresh.
+        //
+        // Only directories the wrapper creates and names are removed, never
+        // the base itself, so a caller-supplied `dir` keeps anything else in
+        // it.
+        let mut owned = vec![base.join("master")];
+        for port in self.replica_ports() {
+            owned.push(base.join(format!("replica-{port}")));
+        }
+        for port in self.sentinel_ports() {
+            owned.push(base.join(format!("sentinel-{port}")));
+        }
+        for dir in owned {
+            if dir.exists() {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+    }
+
     /// Fail with the first occupied port rather than clearing it.
     fn ensure_ports_free(&self) -> Result<()> {
         let mut wanted = vec![(self.master_port, crate::preflight::PortRole::SentinelMaster)];
@@ -475,17 +549,16 @@ impl RedisSentinelBuilder {
         monitored_masters.extend(self.monitored_masters.iter().cloned());
 
         self.validate_topology()?;
+
+        let base_dir = self.base_dir();
+
+        // Reclaim before the preflight: a leftover process of our own still
+        // holds its port, and the preflight cannot tell it apart from an
+        // unrelated server, so it would reject a topology we are entitled to
+        // restart.
+        self.reclaim_owned_processes(&base_dir);
         self.ensure_ports_free()?;
 
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or(0);
-        let base_dir = std::env::temp_dir().join(format!(
-            "redis-sentinel-wrapper-{}-{}",
-            std::process::id(),
-            unique
-        ));
         crate::secure_file::create_dir_all(&base_dir)?;
 
         // 1. Start master.
@@ -856,6 +929,7 @@ impl RedisSentinel {
             extra: HashMap::new(),
             redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),
+            dir: None,
             monitored_masters: Vec::new(),
         }
     }
