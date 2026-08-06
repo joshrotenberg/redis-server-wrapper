@@ -165,26 +165,35 @@ mod tests {
         // handled a connection and then exited can leave the port refusing a
         // bind while nothing is serving on it. Starting there is fine, so it
         // must not read as occupied.
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
+        //
+        // Retried because the port is released before it is checked, and any
+        // other test in this process asking for an ephemeral port can take it
+        // in between. A genuine failure fails every attempt.
+        for attempt in 0..8 {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
 
-        // Drive a real connection through so the socket has something to
-        // linger over, rather than closing an untouched listener.
-        let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        let (mut server, _) = listener.accept().unwrap();
-        client.write_all(b"ping").unwrap();
-        let mut buf = [0u8; 4];
-        server.read_exact(&mut buf).unwrap();
+            // Drive a real connection through so the socket has something to
+            // linger over, rather than closing an untouched listener.
+            let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            let (mut server, _) = listener.accept().unwrap();
+            client.write_all(b"ping").unwrap();
+            let mut buf = [0u8; 4];
+            server.read_exact(&mut buf).unwrap();
 
-        drop(client);
-        drop(server);
-        drop(listener);
+            drop(client);
+            drop(server);
+            drop(listener);
 
-        assert!(
-            port_available("127.0.0.1", port),
-            "a port with no live listener must be available even while the \
-             kernel still holds socket remnants"
-        );
+            if port_available("127.0.0.1", port) {
+                return;
+            }
+            assert!(
+                attempt < 7,
+                "a port with no live listener must be available even while \
+                 the kernel still holds socket remnants"
+            );
+        }
     }
 
     #[test]
@@ -250,13 +259,21 @@ mod tests {
     }
 
     #[test]
-    fn successive_reservations_differ() {
-        // Not a hard guarantee from the OS, but a reservation scheme that
-        // returned the same port twice in a row would defeat the purpose.
-        let a = reserve_ephemeral_port().unwrap();
-        let _hold = TcpListener::bind(("127.0.0.1", a)).unwrap();
-        let b = reserve_ephemeral_port().unwrap();
-        assert_ne!(a, b, "a held port must not be handed out again");
+    fn a_held_port_is_not_handed_out_again() {
+        // Hold the listener rather than reserving and re-binding. Reserving a
+        // port, releasing it, and binding it again races every other test in
+        // this process that is also asking the OS for ephemeral ports, which
+        // is exactly the race `reserve_ephemeral_port` documents.
+        let held = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let held_port = held.local_addr().unwrap().port();
+
+        for _ in 0..16 {
+            assert_ne!(
+                reserve_ephemeral_port().unwrap(),
+                held_port,
+                "a port with a live listener must not be offered as free"
+            );
+        }
     }
 
     #[test]

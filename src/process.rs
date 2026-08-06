@@ -82,6 +82,82 @@ pub fn read_pidfile(path: &Path) -> Option<u32> {
         .and_then(|s| s.trim().parse::<u32>().ok())
 }
 
+/// Stop a process this crate started, identified by a pidfile it wrote.
+///
+/// The pidfile is the wrapper's only claim of ownership. Reading a pid back
+/// out of a directory the wrapper created and named is what separates
+/// reclaiming a leftover of our own from stopping an unrelated server, which
+/// is a distinction the topology builders got wrong before they stopped
+/// clearing ports outright.
+///
+/// Returns the pid that was stopped, or `None` if the file is missing,
+/// unreadable, names a process that is already gone, or names one that is no
+/// longer Redis.
+///
+/// # Why the command is checked
+///
+/// A pidfile only records a number, and the OS reuses numbers. A stale
+/// pidfile left by a crashed run can name a pid that now belongs to something
+/// else entirely, and [`force_kill`] escalates to killing the whole process
+/// group, so acting on a reused pid can take down far more than one process.
+/// On a machine running a test suite, the process that inherited the number is
+/// quite likely to be part of that suite.
+///
+/// Confirming the pid still looks like Redis before signalling it turns
+/// ownership from "we wrote this number down once" into something checked
+/// against the live process.
+pub fn reclaim_from_pidfile(path: &Path) -> Option<u32> {
+    let pid = read_pidfile(path)?;
+    if !pid_alive(pid) {
+        return None;
+    }
+    if !is_redis_process(pid) {
+        return None;
+    }
+    force_kill(pid);
+    Some(pid)
+}
+
+/// Executable names this crate is willing to signal as its own.
+const REDIS_BINARIES: &[&str] = &["redis-server", "redis-sentinel", "redis-stack-server"];
+
+/// Whether a pid belongs to a Redis server or sentinel process.
+///
+/// Reads the process's command via `ps` and compares the **executable's file
+/// name** against a small set of known Redis binaries. A pid that cannot be
+/// inspected reads as
+/// not-Redis, so an uncertain answer never authorises a kill.
+///
+/// The file name is compared, not the whole command line. Substring matching
+/// is unsafe here in a way that is easy to miss: this crate's own build
+/// artifacts live under a directory called `redis-server-wrapper`, so every
+/// process in its test suite has `redis-server` somewhere in its command line.
+/// A substring check would call the test harness a Redis process and, via
+/// [`force_kill`]'s process-group escalation, let a stale pidfile terminate
+/// the run. That is not hypothetical: it is what the first version of this
+/// function did.
+pub fn is_redis_process(pid: u32) -> bool {
+    let Ok(output) = Command::new("ps")
+        .args(["-o", "command=", "-p", &pid.to_string()])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let command = String::from_utf8_lossy(&output.stdout);
+
+    // The executable is the first field; the rest is the config path and any
+    // module arguments, none of which say anything about what is running.
+    let Some(argv0) = command.split_whitespace().next() else {
+        return false;
+    };
+    let name = argv0.rsplit('/').next().unwrap_or(argv0);
+
+    REDIS_BINARIES.contains(&name)
+}
+
 /// Kill any process **listening** on a TCP port via `lsof`.
 ///
 /// Uses `-sTCP:LISTEN` to restrict matches to server processes, avoiding
@@ -117,5 +193,74 @@ pub fn kill_by_port(port: u16) {
         if !line.is_empty() && line != my_pid {
             let _ = Command::new("kill").args(["-9", line]).output();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn our_own_pid_is_not_a_redis_process() {
+        // The guard that matters: a reused pid belonging to the test harness
+        // must never authorise a kill, because force_kill takes the process
+        // group with it.
+        assert!(!is_redis_process(std::process::id()));
+    }
+
+    #[test]
+    fn a_real_redis_process_is_recognised() {
+        // The positive case, so the guard cannot be trivially satisfied by
+        // always returning false.
+        let child = Command::new("redis-server")
+            .args(["--port", "16995", "--save", ""])
+            .spawn();
+        let Ok(mut child) = child else {
+            eprintln!("skipping: redis-server not on PATH");
+            return;
+        };
+        thread::sleep(Duration::from_millis(300));
+        let pid = child.id();
+        assert!(
+            is_redis_process(pid),
+            "a running redis-server must be recognised"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn an_unused_pid_is_not_a_redis_process() {
+        // Very unlikely to be live, and must read as not-Redis either way.
+        assert!(!is_redis_process(u32::MAX - 1));
+    }
+
+    #[test]
+    fn reclaim_ignores_a_missing_pidfile() {
+        let path = std::env::temp_dir().join("rsw-nonexistent-pidfile-xyz");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(reclaim_from_pidfile(&path), None);
+    }
+
+    #[test]
+    fn reclaim_ignores_a_pidfile_naming_a_non_redis_process() {
+        // Points at this test process. Without the command check this would
+        // signal our own process group.
+        let path = std::env::temp_dir().join("rsw-self-pidfile-test");
+        std::fs::write(&path, std::process::id().to_string()).unwrap();
+        assert_eq!(
+            reclaim_from_pidfile(&path),
+            None,
+            "a live but non-Redis pid must not be killed"
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn reclaim_ignores_unparseable_contents() {
+        let path = std::env::temp_dir().join("rsw-garbage-pidfile-test");
+        std::fs::write(&path, "not a pid").unwrap();
+        assert_eq!(reclaim_from_pidfile(&path), None);
+        std::fs::remove_file(&path).unwrap();
     }
 }

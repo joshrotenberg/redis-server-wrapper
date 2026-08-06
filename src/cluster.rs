@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::Instrument;
 
@@ -138,6 +137,7 @@ pub struct RedisClusterBuilder {
     extra: HashMap<String, String>,
     redis_server_bin: String,
     redis_cli_bin: String,
+    dir: Option<PathBuf>,
     node_config_fn: Option<Box<dyn FnMut(NodeContext) -> RedisServer + Send>>,
 }
 
@@ -151,6 +151,18 @@ impl RedisClusterBuilder {
     /// Set the number of replicas per master (default: `0`).
     pub fn replicas_per_master(mut self, n: u16) -> Self {
         self.replicas_per_master = n;
+        self
+    }
+
+    /// Place the topology's working directory somewhere specific.
+    ///
+    /// Defaults to a path under the system temp directory derived from the
+    /// bind address and port range. That default is deliberately stable
+    /// across runs: it is where the pidfiles live, and it is what lets a
+    /// crashed run be reclaimed rather than leaving nodes that block the next
+    /// start. Setting a per-run path here gives that up.
+    pub fn dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.dir = Some(dir.into());
         self
     }
 
@@ -730,6 +742,50 @@ impl RedisClusterBuilder {
         Ok(())
     }
 
+    /// Where this topology keeps its nodes.
+    fn base_dir(&self) -> PathBuf {
+        self.dir.clone().unwrap_or_else(|| {
+            crate::topology_dir::topology_dir(
+                "cluster",
+                &self.bind,
+                &[self.base_port, self.total_nodes()],
+            )
+        })
+    }
+
+    /// Stop leftover nodes from a previous run of this same topology.
+    ///
+    /// Only processes recorded in a pidfile the wrapper wrote, under a
+    /// directory the wrapper named, are touched. Anything else holding one of
+    /// these ports is left alone and rejected by the preflight that follows.
+    ///
+    /// Failures are not fatal. A pidfile that cannot be read means there is
+    /// nothing to reclaim, and if the port really is still held the preflight
+    /// reports it with a better error than this could.
+    fn reclaim_owned_nodes(&self, base: &Path) {
+        for port in self.ports() {
+            // RedisServer nests its own node-<port> directory under the dir it
+            // is given, so the pidfile sits two levels down.
+            let node_dir = base.join(format!("node-{port}"));
+            let pidfile = node_dir.join(format!("node-{port}")).join("redis.pid");
+            if let Some(pid) = crate::process::reclaim_from_pidfile(&pidfile) {
+                tracing::debug!(port, pid, "reclaimed_stale_cluster_node");
+            }
+
+            // Clear the node's state now that nothing is using it. A stable
+            // directory keeps `nodes.conf` and any RDB or AOF from the last
+            // run, and `redis-cli --cluster create` refuses to form a cluster
+            // from a node that already knows a topology or holds keys.
+            //
+            // Only the node directory the wrapper creates and names is
+            // removed, never the base it sits in, so a caller-supplied `dir`
+            // keeps everything the wrapper did not put there.
+            if node_dir.exists() {
+                let _ = std::fs::remove_dir_all(&node_dir);
+            }
+        }
+    }
+
     /// Fail with the first occupied port rather than clearing it.
     ///
     /// Client ports are checked before bus ports so the error names the port
@@ -802,19 +858,18 @@ impl RedisClusterBuilder {
     async fn start_inner(mut self, total_nodes: u16) -> Result<RedisClusterHandle> {
         let start_time = std::time::Instant::now();
         self.validate_topology()?;
+
+        let cluster_base = self.base_dir();
+
+        // Reclaim before the preflight, not after: a leftover node of our own
+        // still holds its port, so the preflight would reject the topology on
+        // the strength of a process we are entitled to stop.
+        self.reclaim_owned_nodes(&cluster_base);
+
         self.ensure_ports_free()?;
 
         // Start each node.
         let ports: Vec<u16> = self.ports().collect();
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or(0);
-        let cluster_base = std::env::temp_dir().join(format!(
-            "redis-cluster-wrapper-{}-{}",
-            std::process::id(),
-            unique
-        ));
         let mut nodes = Vec::new();
         for (index, port) in ports.into_iter().enumerate() {
             let node_dir = cluster_base.join(format!("node-{port}"));
@@ -1207,6 +1262,7 @@ impl RedisCluster {
             extra: HashMap::new(),
             redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),
+            dir: None,
             node_config_fn: None,
         }
     }
