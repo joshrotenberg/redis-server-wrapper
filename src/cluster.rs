@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tracing::Instrument;
+
 use crate::cli::RedisCli;
 use crate::error::{Error, Result};
 use crate::server::{
@@ -784,12 +786,25 @@ impl RedisClusterBuilder {
     /// rather than being cleared: the wrapper cannot tell a leftover node of
     /// its own from an unrelated Redis, and stopping the latter would lose
     /// data it never owned.
-    pub async fn start(mut self) -> Result<RedisClusterHandle> {
+    pub async fn start(self) -> Result<RedisClusterHandle> {
+        let total_nodes = self.total_nodes();
+        let span = tracing::debug_span!(
+            "cluster_start",
+            masters = self.masters,
+            replicas_per_master = self.replicas_per_master,
+            total_nodes
+        );
+        async move { self.start_inner(total_nodes).await }
+            .instrument(span)
+            .await
+    }
+
+    async fn start_inner(mut self, total_nodes: u16) -> Result<RedisClusterHandle> {
+        let start_time = std::time::Instant::now();
         self.validate_topology()?;
         self.ensure_ports_free()?;
 
         // Start each node.
-        let total_nodes = self.total_nodes();
         let ports: Vec<u16> = self.ports().collect();
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1009,6 +1024,11 @@ impl RedisClusterBuilder {
             let handle = server.start().await?;
             nodes.push(handle);
         }
+        tracing::debug!(
+            elapsed_ms = start_time.elapsed().as_millis() as u64,
+            nodes = nodes.len(),
+            "nodes_started"
+        );
 
         // Form the cluster.
         let node_addrs: Vec<String> = nodes.iter().map(|n| n.addr()).collect();
@@ -1022,6 +1042,10 @@ impl RedisClusterBuilder {
         cli = self.apply_tls_to_cli(cli);
         cli.cluster_create(&node_addrs, self.replicas_per_master)
             .await?;
+        tracing::debug!(
+            elapsed_ms = start_time.elapsed().as_millis() as u64,
+            "cluster_create_complete"
+        );
 
         let handle = RedisClusterHandle {
             nodes,
@@ -1046,6 +1070,10 @@ impl RedisClusterBuilder {
         //
         // On timeout the handle drops, which stops the nodes it started.
         handle.wait_for_formation(FORMATION_TIMEOUT).await?;
+        tracing::debug!(
+            elapsed_ms = start_time.elapsed().as_millis() as u64,
+            "convergence_wait_complete"
+        );
 
         Ok(handle)
     }
