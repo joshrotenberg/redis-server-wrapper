@@ -43,8 +43,9 @@ Each is built from source with `BUILD_TLS=yes` and runs the full suite, so the T
 exercised rather than skipped. Other versions may work; these are the ones a regression would
 be caught on.
 
-The main CI workflow separately runs against whatever `redis-server` the platform package
-manager provides on Ubuntu and macOS, which covers the case most users actually install.
+Every pull request additionally sees both ends of that range: the Ubuntu job pins 7.2.14, the
+oldest supported line, and the macOS job uses whatever Homebrew currently provides, which
+tracks the newest. The lines in between are covered by the matrix above.
 
 ## Platform support
 

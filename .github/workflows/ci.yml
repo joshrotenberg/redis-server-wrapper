@@ -24,6 +24,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # The oldest line the README declares support for. Kept in step with
+  # the floor of the matrix in redis-compat.yml.
+  UBUNTU_REDIS_VERSION: "7.2.14"
 
 jobs:
   test:
@@ -43,15 +46,58 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Redis (Ubuntu)
+      # Ubuntu pins the oldest supported line so the fast signal matches the
+      # floor the README declares. The runner image ships 7.0.15, which is
+      # below that floor, so `apt-get install redis-server` was gating every
+      # pull request on a version the crate does not claim to support.
+      #
+      # macOS is left on brew, which tracks the newest line. Between them
+      # every pull request sees both ends of the supported range; the lines in
+      # between are covered by the compatibility workflow.
+      - name: Cache Redis ${{ env.UBUNTU_REDIS_VERSION }} build
+        if: runner.os == 'Linux'
+        id: redis-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/redis-dist
+          key: ci-redis-${{ env.UBUNTU_REDIS_VERSION }}-${{ runner.os }}
+
+      - name: Build Redis ${{ env.UBUNTU_REDIS_VERSION }} (Ubuntu)
+        if: runner.os == 'Linux' && steps.redis-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev
+          curl -fsSL -o /tmp/redis.tar.gz \
+            "https://download.redis.io/releases/redis-${UBUNTU_REDIS_VERSION}.tar.gz"
+          mkdir -p /tmp/redis-src
+          tar xzf /tmp/redis.tar.gz -C /tmp/redis-src --strip-components=1
+          make -C /tmp/redis-src -j"$(nproc)" BUILD_TLS=yes
+          mkdir -p ~/redis-dist
+          cp /tmp/redis-src/src/redis-server /tmp/redis-src/src/redis-cli ~/redis-dist/
+          # The module fixture needs a header matching this exact build.
+          cp /tmp/redis-src/src/redismodule.h ~/redis-dist/
+
+      - name: Put Redis on PATH (Ubuntu)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y redis-server
+          set -euo pipefail
+          chmod +x ~/redis-dist/redis-server ~/redis-dist/redis-cli
+          echo "$HOME/redis-dist" >> "$GITHUB_PATH"
 
       - name: Install Redis (macOS)
         if: runner.os == 'macOS'
         run: brew install redis
+
+      - name: Verify the version under test
+        run: |
+          set -euo pipefail
+          redis-server --version
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            # Fail loudly rather than silently falling back to the runner's
+            # own redis-server, which would put the pin back where it started.
+            redis-server --version | grep -q "v=${UBUNTU_REDIS_VERSION}"
+          fi
 
       # tests/module_loading.rs skips itself unless REDIS_TEST_MODULE points at
       # a compiled module. Building the fixture needs redismodule.h, which the
@@ -68,9 +114,15 @@ jobs:
           set -euo pipefail
           version="$(redis-server --version | sed -n 's/.*v=\([0-9][0-9.]*\).*/\1/p')"
           echo "detected Redis $version"
-          curl -fsSL -o "${RUNNER_TEMP}/redismodule.h" \
-            "https://raw.githubusercontent.com/redis/redis/${version}/src/redismodule.h"
-          cc -fPIC -shared -I "${RUNNER_TEMP}" \
+          if [ -f "$HOME/redis-dist/redismodule.h" ]; then
+            # Linux builds Redis from source, so the matching header is local.
+            include="$HOME/redis-dist"
+          else
+            include="${RUNNER_TEMP}"
+            curl -fsSL -o "${include}/redismodule.h" \
+              "https://raw.githubusercontent.com/redis/redis/${version}/src/redismodule.h"
+          fi
+          cc -fPIC -shared -I "${include}" \
             tests/support/rsw_test_module.c \
             -o "${RUNNER_TEMP}/rsw_test_module.so"
           echo "REDIS_TEST_MODULE=${RUNNER_TEMP}/rsw_test_module.so" >> "$GITHUB_ENV"
