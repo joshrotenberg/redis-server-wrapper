@@ -909,9 +909,34 @@ pub async fn crash_sentinel_during_failover(
         SentinelCrashPoint::AfterPromotion => "crash-after-promotion",
     };
     cli.run(&["SENTINEL", "SIMULATE-FAILURE", mode]).await?;
-    cli.run(&["SENTINEL", "FAILOVER", handle.master_name()])
-        .await?;
-    Ok(())
+
+    match cli
+        .run(&["SENTINEL", "FAILOVER", handle.master_name()])
+        .await
+    {
+        Ok(_) => Ok(()),
+        // The crash armed a moment ago can land before the reply is flushed,
+        // which redis-cli reports as a closed connection. That is the outcome
+        // this function exists to produce, arriving a little early, so it is
+        // success rather than failure. Anything else, including a Redis error
+        // reply such as an unknown master name, still propagates.
+        Err(Error::Cli { ref detail, .. }) if connection_closed(detail) => {
+            tracing::debug!(sentinel_idx, "sentinel crashed before replying");
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether a redis-cli failure means the peer went away mid-command.
+///
+/// Distinguishes a process that died, which several chaos primitives cause
+/// deliberately, from a Redis error reply, which is a real failure.
+fn connection_closed(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    detail.contains("server closed the connection")
+        || detail.contains("connection reset")
+        || detail.contains("broken pipe")
 }
 
 // ---------------------------------------------------------------------------
@@ -1330,6 +1355,24 @@ fn parse_cluster_node_port(addr: &str) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_closed_recognises_a_dead_peer() {
+        // Exactly what redis-cli reported when an armed sentinel crashed
+        // before flushing its reply.
+        assert!(connection_closed("Error: Server closed the connection"));
+        assert!(connection_closed("Connection reset by peer"));
+        assert!(connection_closed("Broken pipe"));
+    }
+
+    #[test]
+    fn connection_closed_does_not_swallow_redis_errors() {
+        // A Redis error reply is a real failure and must still propagate.
+        assert!(!connection_closed("ERR No such master with that name"));
+        assert!(!connection_closed("NOAUTH Authentication required."));
+        assert!(!connection_closed("WRONGTYPE Operation against a key"));
+        assert!(!connection_closed(""));
+    }
 
     #[test]
     fn slot_in_range_single() {
