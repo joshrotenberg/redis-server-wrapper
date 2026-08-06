@@ -3,7 +3,15 @@
 use std::io;
 
 /// Errors returned by redis-server-wrapper operations.
+///
+/// Marked `#[non_exhaustive]`: this enum gains variants as the wrapper learns
+/// to report more failures precisely, and every such addition would otherwise
+/// break an exhaustive `match` downstream. The 0.5.0 cycle alone added five.
+/// Match the variants you handle and end with a catch-all `Err(e)` arm, and
+/// use a `..` rest pattern inside a variant so a new field does not break
+/// either.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// A `redis-server` process failed to start.
     ///
