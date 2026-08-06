@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.0](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.4.3...v0.5.0) - 2026-08-06
 
+### Breaking
+
+Changes requiring action when upgrading from 0.4.x. Only the first is marked
+below by the generated sections, because the others landed as `fix:` commits
+without the conventional-commit `!`.
+
+- `Error` is now `#[non_exhaustive]` and gained the `PortInUse`,
+  `InvalidTopology`, `ReservedDirective`, `ModuleNotLoaded`, and
+  `PortAllocation` variants. `Error::ServerStart` gained a `detail` field
+  carrying the tail of the failed node's log. Matches need a catch-all
+  `Err(e)` arm, and a `..` rest pattern inside a variant
+  ([#159](https://github.com/joshrotenberg/redis-server-wrapper/pull/159),
+  [#155](https://github.com/joshrotenberg/redis-server-wrapper/pull/155))
+- `RedisCli::run` returns `Err(Error::Cli)` for Redis error replies. `NOAUTH`,
+  `WRONGTYPE`, `MOVED`, and the rest previously came back as `Ok` carrying the
+  error text where a value was expected. Callers matching on reply text should
+  match on the error instead
+  ([#144](https://github.com/joshrotenberg/redis-server-wrapper/pull/144))
+- Cluster and Sentinel startup fails with `Error::PortInUse` when a port it
+  needs is already serving, rather than sending `SHUTDOWN` to whatever holds
+  it. A crashed run of the same topology is still reclaimed; an unrelated
+  server is never stopped. Clusters with fewer than 3 masters are rejected up
+  front, since `redis-cli --cluster create` refuses them anyway
+  ([#145](https://github.com/joshrotenberg/redis-server-wrapper/pull/145),
+  [#157](https://github.com/joshrotenberg/redis-server-wrapper/pull/157))
+- `extra()` rejects directives the wrapper generates itself, such as `port`,
+  `dir`, `requirepass`, and `loadmodule`. `start()` returns
+  `Error::ReservedDirective`. The wrapper reuses those values for readiness
+  probing and teardown, so overriding one left the handle describing a server
+  that did not exist. Use the dedicated builder method
+  ([#142](https://github.com/joshrotenberg/redis-server-wrapper/pull/142))
+
 ### Added
 
 - [**breaking**] mark Error as non_exhaustive ([#159](https://github.com/joshrotenberg/redis-server-wrapper/pull/159))
