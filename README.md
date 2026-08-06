@@ -19,6 +19,10 @@ just `redis-server` and `redis-cli` on PATH.
 - **Arbitrary config** -- pass any Redis directive via `.extra(key, value)`
 - **Fault injection** -- process-level chaos (freeze, kill, partition) via the `chaos` module,
   and byte-level TCP fault injection (delay, drop, chunking) via `FaultProxy`
+- **Parallel fixtures** -- `.auto_port()` picks a free port and retries a lost race
+- **Module verification** -- assert a module actually loaded, not just that it was configured
+- **Safe by default** -- never stops a Redis process it did not start; reclaims only its own
+- **Tracing** -- spans and events across every lifecycle path, visible via `RUST_LOG`
 
 ## Prerequisites
 
@@ -59,7 +63,7 @@ Add to `Cargo.toml` for async use (the default):
 
 ```toml
 [dev-dependencies]
-redis-server-wrapper = "0.4"
+redis-server-wrapper = "0.5"
 ```
 
 The `tokio` feature is enabled by default. To use the synchronous blocking API instead,
@@ -67,14 +71,14 @@ disable default features and enable `blocking`:
 
 ```toml
 [dev-dependencies]
-redis-server-wrapper = { version = "0.4", default-features = false, features = ["blocking"] }
+redis-server-wrapper = { version = "0.5", default-features = false, features = ["blocking"] }
 ```
 
 To use both async and blocking APIs together:
 
 ```toml
 [dev-dependencies]
-redis-server-wrapper = { version = "0.4", features = ["blocking"] }
+redis-server-wrapper = { version = "0.5", features = ["blocking"] }
 ```
 
 ## Usage
@@ -107,7 +111,11 @@ Call `server.detach()` to consume the handle without stopping the process.
 ### Configuration
 
 Common options have dedicated builder methods. Anything else can be passed as
-a raw Redis directive with `.extra(key, value)`:
+a raw Redis directive with `.extra(key, value)`. Directives the wrapper
+generates itself (`port`, `dir`, `requirepass`, `loadmodule`, and similar) are
+rejected: the wrapper reuses those values for readiness probing and teardown, so
+overriding one would leave the handle describing a server that does not exist.
+Use the dedicated method instead.
 
 ```rust
 use redis_server_wrapper::{LogLevel, RedisServer};
@@ -145,6 +153,86 @@ async fn test_loadmodule() {
         .unwrap();
 }
 ```
+
+### Parallel Fixtures
+
+Tests that each own a Redis lifecycle can let the wrapper pick a free port
+instead of coordinating a fixed range between them:
+
+```rust
+use redis_server_wrapper::RedisServer;
+
+#[tokio::test]
+async fn test_auto_port() {
+    let server = RedisServer::new().auto_port().start().await.unwrap();
+
+    // The chosen port is on the handle.
+    println!("started on {}", server.addr());
+}
+```
+
+Asking the OS for a free port and having Redis bind it are two steps, so another
+process can take the port in between. The builder retries with a new candidate
+rather than failing, and never stops whatever won the race.
+
+`port(0)` is unrelated: it keeps its Redis meaning of disabling the plaintext
+listener for a TLS-only server.
+
+### Verifying Loaded Modules
+
+A `loadmodule` directive only asks Redis to load a module. A wrong path, an ABI
+mismatch, or a module whose `RedisModule_OnLoad` fails all leave the server
+running without it. Check against the live server:
+
+```rust
+use redis_server_wrapper::RedisServer;
+
+#[tokio::test]
+async fn test_module_is_loaded() {
+    let server = RedisServer::new()
+        .port(6400)
+        .loadmodule("/path/to/module.so")
+        .start()
+        .await
+        .unwrap();
+
+    // Errors listing what is loaded instead, since the module's registered
+    // name often differs from its filename.
+    server.require_module("my_module").await.unwrap();
+
+    for module in server.modules().await.unwrap() {
+        println!("{} v{:?}", module.name, module.version);
+    }
+}
+```
+
+Clusters and Sentinel topologies propagate modules to every node, so they have
+`require_module_on_all_nodes` and `require_module_on_data_nodes` respectively.
+
+### Ports and Cleanup
+
+Startup never stops a Redis process it did not start. If a port a topology needs
+is already serving, startup fails with `Error::PortInUse` naming the port and
+leaves that process alone.
+
+A crashed run is reclaimed rather than blocking the next one. Cluster and
+Sentinel topologies keep a working directory derived from their shape, and on
+startup they stop only processes recorded in pidfiles they wrote, after
+confirming the pid still belongs to a Redis binary. Point that directory
+somewhere specific with `.dir()` on either builder.
+
+### Logging
+
+The crate emits [`tracing`](https://docs.rs/tracing) spans and events across the
+lifecycle paths: server, cluster, and Sentinel startup and shutdown, every chaos
+operation, and the fault proxy. With no subscriber installed these surface as
+`log` records, so `env_logger` or `test-log` users get output with no setup:
+
+```console
+RUST_LOG=redis_server_wrapper=debug cargo test
+```
+
+`tracing-subscriber` users get the same targets as structured spans.
 
 ### Running Commands
 
@@ -266,7 +354,8 @@ async fn test_fault_proxy() {
 ## Error Handling
 
 All fallible operations return `Result<T, Error>`. The `Error` enum covers server
-start failures, timeouts, CLI errors, and underlying I/O errors:
+start failures, timeouts, CLI errors, port and topology problems, and underlying
+I/O errors:
 
 ```rust
 use redis_server_wrapper::{Error, RedisServer};
@@ -275,12 +364,23 @@ use redis_server_wrapper::{Error, RedisServer};
 async fn test_error_handling() {
     match RedisServer::new().port(6400).start().await {
         Ok(server) => println!("running on {}", server.addr()),
-        Err(Error::ServerStart { port }) => eprintln!("could not start on port {port}"),
+        // `detail` carries the tail of the node's log when one was written,
+        // which usually says why Redis refused to start.
+        Err(Error::ServerStart { port, detail }) => {
+            eprintln!("could not start on port {port}: {}", detail.unwrap_or_default())
+        }
+        Err(Error::PortInUse { port, role, .. }) => {
+            eprintln!("{role} {port} is already serving; startup will not clear it")
+        }
         Err(Error::BinaryNotFound { binary }) => eprintln!("{binary} not found on PATH"),
         Err(e) => eprintln!("unexpected: {e}"),
     }
 }
 ```
+
+Prefer a `..` rest pattern inside a variant and a catch-all `Err(e)` arm. `Error`
+gains variants and fields between releases, and an exhaustive match without them
+will not compile against the next one.
 
 ## Blocking API
 
@@ -288,7 +388,7 @@ Enable the `blocking` feature for synchronous wrappers that require no async run
 
 ```toml
 [dev-dependencies]
-redis-server-wrapper = { version = "0.4", features = ["blocking"] }
+redis-server-wrapper = { version = "0.5", features = ["blocking"] }
 ```
 
 The `blocking` module mirrors the async API. Every operation blocks the calling thread

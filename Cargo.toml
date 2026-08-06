@@ -20,6 +20,13 @@ tokio = ["dep:tokio"]
 blocking = ["tokio"]
 test-tls = ["dep:rcgen"]
 
+# docs.rs builds with default features only unless told otherwise, which would
+# publish the crate without the `blocking` and `test-tls` modules the README
+# tells people to enable.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dependencies]
 glob = "0.3"
 thiserror = "2"
