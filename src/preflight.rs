@@ -10,7 +10,7 @@
 //! belongs to something else. These helpers check first and fail with the port
 //! named, leaving whatever holds it alone.
 
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use crate::error::{Error, Result};
@@ -110,6 +110,23 @@ pub fn ensure_ports_available(
     Ok(())
 }
 
+/// Ask the OS for a port that is free right now.
+///
+/// Binds `127.0.0.1:0`, reads back what the kernel assigned, and releases it.
+/// The port is free at the moment it is returned and nothing holds it
+/// afterwards, so another process can claim it before the caller does.
+///
+/// That window is unavoidable: reserving a port and handing it to a separate
+/// process that must bind it itself cannot be atomic. Callers are expected to
+/// treat the result as a candidate and retry on a lost race, which is what
+/// [`crate::server::RedisServer::auto_port`] does.
+pub fn reserve_ephemeral_port() -> Result<u16> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(Error::Io)?;
+    let port = listener.local_addr().map_err(Error::Io)?.port();
+    drop(listener);
+    Ok(port)
+}
+
 /// The cluster bus port Redis derives from a client port.
 ///
 /// Redis uses client port + 10000 unless `cluster-port` overrides it. Returns
@@ -124,7 +141,6 @@ mod tests {
     use super::*;
 
     use std::io::{Read, Write};
-    use std::net::TcpListener;
 
     #[test]
     fn unbound_port_is_available() {
@@ -219,6 +235,28 @@ mod tests {
 
         drop(a);
         drop(b);
+    }
+
+    #[test]
+    fn reserved_port_is_free_when_returned() {
+        let port = reserve_ephemeral_port().expect("the OS should hand out a port");
+        assert_ne!(port, 0, "a reserved port must be concrete");
+        assert!(
+            port_available("127.0.0.1", port),
+            "the reservation must be released, not held"
+        );
+        // Released means bindable, which is what the caller's process needs.
+        TcpListener::bind(("127.0.0.1", port)).expect("reserved port should be bindable");
+    }
+
+    #[test]
+    fn successive_reservations_differ() {
+        // Not a hard guarantee from the OS, but a reservation scheme that
+        // returned the same port twice in a row would defeat the purpose.
+        let a = reserve_ephemeral_port().unwrap();
+        let _hold = TcpListener::bind(("127.0.0.1", a)).unwrap();
+        let b = reserve_ephemeral_port().unwrap();
+        assert_ne!(a, b, "a held port must not be handed out again");
     }
 
     #[test]
