@@ -57,9 +57,40 @@ async fn concurrent_fixtures_get_distinct_ports() {
     ports.dedup();
     assert_eq!(ports.len(), before, "every fixture must get its own port");
 
+    // Distinct directories, not just distinct ports. Two attempts that drew the
+    // same candidate would otherwise share a node directory and its pidfile,
+    // and the loser would read the winner's and report success: two handles,
+    // one server, and a teardown that stops someone else's.
+    let mut dirs: Vec<_> = servers.iter().map(|s| s.node_dir()).collect();
+    let dir_count = dirs.len();
+    dirs.sort();
+    dirs.dedup();
+    assert_eq!(
+        dirs.len(),
+        dir_count,
+        "every fixture must own its own directory"
+    );
+
     // All of them are still up: allocation did not stop an earlier fixture.
     for server in &servers {
         assert!(server.is_alive().await, "fixture on {} died", server.port());
+    }
+
+    // And each is genuinely its own server, not several handles onto one.
+    for (i, server) in servers.iter().enumerate() {
+        server
+            .run(&["SET", "owner", &i.to_string()])
+            .await
+            .expect("write should succeed");
+    }
+    for (i, server) in servers.iter().enumerate() {
+        let owner = server.run(&["GET", "owner"]).await.expect("read failed");
+        assert_eq!(
+            owner.trim(),
+            i.to_string(),
+            "fixture {i} on port {} is not a distinct server",
+            server.port()
+        );
     }
 }
 
