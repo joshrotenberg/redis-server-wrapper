@@ -295,6 +295,8 @@ impl FaultProxy {
             shutdown_rx,
         );
 
+        tracing::debug!(%addr, upstream = %upstream_addr, "fault_proxy_spawned");
+
         Ok(FaultProxy {
             addr,
             upstream_addr,
@@ -321,6 +323,7 @@ impl FaultProxy {
 
     /// Set (or replace) the delay applied before forwarding data in `direction`.
     pub fn set_delay(&self, direction: Direction, delay: Delay) {
+        tracing::info!(addr = %self.addr, ?direction, ?delay, "set_delay");
         self.state.write().unwrap().delay[direction.idx()] = Some(delay);
     }
 
@@ -335,12 +338,14 @@ impl FaultProxy {
     /// this setting is active. Closes with a clean FIN; use
     /// [`FaultProxy::close_after_with`] for a TCP reset instead.
     pub fn close_after(&self, direction: Direction, bytes: u64) {
+        tracing::info!(addr = %self.addr, ?direction, bytes, kind = ?CloseKind::Fin, "close_after");
         self.state.write().unwrap().close_after[direction.idx()] = Some((bytes, CloseKind::Fin));
     }
 
     /// Like [`FaultProxy::close_after`], but the connection is closed with
     /// `kind` once the threshold trips.
     pub fn close_after_with(&self, direction: Direction, bytes: u64, kind: CloseKind) {
+        tracing::info!(addr = %self.addr, ?direction, bytes, ?kind, "close_after_with");
         self.state.write().unwrap().close_after[direction.idx()] = Some((bytes, kind));
     }
 
@@ -354,6 +359,7 @@ impl FaultProxy {
     /// with [`FaultProxy::set_chunk_delay`] so the pieces genuinely arrive as
     /// separate reads instead of being coalesced by the kernel on loopback.
     pub fn set_chunk_size(&self, size: usize) {
+        tracing::info!(addr = %self.addr, size, "set_chunk_size");
         self.state.write().unwrap().chunk_size = Some(size.max(1));
     }
 
@@ -366,6 +372,7 @@ impl FaultProxy {
     /// piece as a separate read. No effect unless [`FaultProxy::set_chunk_size`]
     /// splits a read into more than one piece.
     pub fn set_chunk_delay(&self, delay: Duration) {
+        tracing::info!(addr = %self.addr, delay_ms = delay.as_millis() as u64, "set_chunk_delay");
         self.state.write().unwrap().chunk_delay = Some(delay);
     }
 
@@ -380,6 +387,7 @@ impl FaultProxy {
     /// proxy is dropped. Existing connections are unaffected; use
     /// [`FaultProxy::set_stall`] to affect connections already established.
     pub fn set_drop_all(&self, drop_all: bool) {
+        tracing::info!(addr = %self.addr, drop_all, "set_drop_all");
         self.state.write().unwrap().drop_all = drop_all;
     }
 
@@ -388,6 +396,7 @@ impl FaultProxy {
     /// complete until [`FaultProxy::clear_stall`] is called or the connection
     /// is severed by a pending [`FaultProxy::stall_then_close`] deadline.
     pub fn set_stall(&self, direction: Direction) {
+        tracing::info!(addr = %self.addr, ?direction, "set_stall");
         self.state.write().unwrap().stall[direction.idx()] = true;
     }
 
@@ -403,6 +412,7 @@ impl FaultProxy {
     /// new) `after` later. Use [`FaultProxy::set_stall`] alone for an
     /// indefinite hold. Replaces any previously pending deadline.
     pub fn stall_then_close(&self, after: Duration) {
+        tracing::info!(addr = %self.addr, after_ms = after.as_millis() as u64, "stall_then_close");
         {
             let mut state = self.state.write().unwrap();
             state.stall[Direction::ClientToUpstream.idx()] = true;
@@ -443,6 +453,7 @@ impl FaultProxy {
     /// crashed server. New connections are unaffected; combine with
     /// [`FaultProxy::disable`] to also stop accepting.
     pub fn reset_peer(&self) {
+        tracing::info!(addr = %self.addr, "reset_peer");
         self.sever_all(CloseKind::Rst);
     }
 
@@ -457,6 +468,7 @@ impl FaultProxy {
     /// (with `kind`) before any upstream connect; passthrough resumes after.
     /// Deterministic replacement for toxiproxy's probabilistic `toxicity`.
     pub fn reject_next(&self, n: u32, kind: CloseKind) {
+        tracing::info!(addr = %self.addr, n, ?kind, "reject_next");
         let mut state = self.state.write().unwrap();
         state.reject_remaining = n;
         state.reject_kind = kind;
@@ -474,6 +486,7 @@ impl FaultProxy {
     /// Note: another process can claim the port while disabled (rare for
     /// localhost tests, but a real race).
     pub async fn disable(&self) -> Result<()> {
+        tracing::info!(addr = %self.addr, "disable");
         let handle = self.accept_task.lock().unwrap().take();
         if let Some(handle) = handle {
             handle.abort();
@@ -493,6 +506,7 @@ impl FaultProxy {
         if self.accept_task.lock().unwrap().is_some() {
             return Ok(());
         }
+        tracing::info!(addr = %self.addr, "enable");
 
         let listener = TcpListener::bind(self.addr).await?;
         let handle = spawn_accept_task(
@@ -512,6 +526,7 @@ impl FaultProxy {
     /// [`FaultProxy::stall_then_close`] deadline and wakes any connections
     /// currently blocked on a stall.
     pub fn reset(&self) {
+        tracing::info!(addr = %self.addr, "reset");
         self.cancel_pending_stall_close();
         *self.state.write().unwrap() = FaultState::default();
         self.notify.notify_waiters();

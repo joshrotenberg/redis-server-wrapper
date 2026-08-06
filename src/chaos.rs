@@ -64,6 +64,7 @@ use tokio::io::AsyncReadExt;
 /// swallows a failed kill.
 #[cfg(feature = "tokio")]
 fn send_signal(pid: u32, signal_flag: &str) -> Result<()> {
+    tracing::debug!(pid, signal = signal_flag, "send_signal");
     let output = Command::new("kill")
         .args([signal_flag, &pid.to_string()])
         .output()?;
@@ -88,6 +89,7 @@ fn send_signal(pid: u32, signal_flag: &str) -> Result<()> {
 /// a hard crash (e.g., OOM kill, hardware failure).
 #[cfg(feature = "tokio")]
 pub fn kill_node(handle: &RedisServerHandle) -> Result<()> {
+    tracing::info!(port = handle.port(), pid = handle.pid(), "kill_node");
     send_signal(handle.pid(), "-9")
 }
 
@@ -101,6 +103,7 @@ pub fn kill_node(handle: &RedisServerHandle) -> Result<()> {
 /// partition scenarios because the node can be resumed without losing state.
 #[cfg(feature = "tokio")]
 pub fn freeze_node(handle: &RedisServerHandle) -> Result<()> {
+    tracing::info!(port = handle.port(), pid = handle.pid(), "freeze_node");
     send_signal(handle.pid(), "-STOP")
 }
 
@@ -110,6 +113,7 @@ pub fn freeze_node(handle: &RedisServerHandle) -> Result<()> {
 /// replication will catch up automatically.
 #[cfg(feature = "tokio")]
 pub fn resume_node(handle: &RedisServerHandle) -> Result<()> {
+    tracing::info!(port = handle.port(), pid = handle.pid(), "resume_node");
     send_signal(handle.pid(), "-CONT")
 }
 
@@ -128,6 +132,12 @@ pub fn resume_node(handle: &RedisServerHandle) -> Result<()> {
 #[cfg(feature = "tokio")]
 pub fn pause_node(handle: &RedisServerHandle, duration: Duration) -> Result<()> {
     let pid = handle.pid();
+    tracing::info!(
+        port = handle.port(),
+        pid,
+        duration_ms = duration.as_millis() as u64,
+        "pause_node"
+    );
     send_signal(pid, "-STOP")?;
     tokio::spawn(async move {
         tokio::time::sleep(duration).await;
@@ -146,6 +156,7 @@ pub fn pause_node(handle: &RedisServerHandle, duration: Duration) -> Result<()> 
 /// See [`slow_down_writes`] to pause only write commands instead.
 #[cfg(feature = "tokio")]
 pub async fn slow_down(handle: &RedisServerHandle, millis: u64) -> Result<String> {
+    tracing::info!(port = handle.port(), millis, "slow_down");
     handle.run(&["CLIENT", "PAUSE", &millis.to_string()]).await
 }
 
@@ -157,6 +168,7 @@ pub async fn slow_down(handle: &RedisServerHandle, millis: u64) -> Result<String
 /// (e.g. during a failover) without blocking reads too.
 #[cfg(feature = "tokio")]
 pub async fn slow_down_writes(handle: &RedisServerHandle, millis: u64) -> Result<String> {
+    tracing::info!(port = handle.port(), millis, "slow_down_writes");
     handle
         .run(&["CLIENT", "PAUSE", &millis.to_string(), "WRITE"])
         .await
@@ -165,12 +177,14 @@ pub async fn slow_down_writes(handle: &RedisServerHandle, millis: u64) -> Result
 /// Trigger a background RDB save.
 #[cfg(feature = "tokio")]
 pub async fn trigger_save(handle: &RedisServerHandle) -> Result<String> {
+    tracing::info!(port = handle.port(), "trigger_save");
     handle.run(&["BGSAVE"]).await
 }
 
 /// Flush all data from a node.
 #[cfg(feature = "tokio")]
 pub async fn flushall(handle: &RedisServerHandle) -> Result<String> {
+    tracing::info!(port = handle.port(), "flushall");
     handle.run(&["FLUSHALL"]).await
 }
 
@@ -193,6 +207,7 @@ pub async fn flushall(handle: &RedisServerHandle) -> Result<String> {
 /// one.
 #[cfg(feature = "tokio")]
 pub async fn fill_memory(handle: &RedisServerHandle, prefix: &str, count: usize) -> Result<()> {
+    tracing::info!(port = handle.port(), prefix, count, "fill_memory");
     let value = "x".repeat(1024);
     handle
         .run(&[
@@ -225,6 +240,7 @@ pub async fn fill_memory(handle: &RedisServerHandle, prefix: &str, count: usize)
 /// configuration the node was started with, not on this call.
 #[cfg(feature = "tokio")]
 pub async fn restart_node(handle: &mut RedisServerHandle, timeout: Duration) -> Result<()> {
+    tracing::info!(port = handle.port(), "restart_node");
     handle.restart(timeout).await
 }
 
@@ -306,6 +322,12 @@ pub async fn kill_client_connections(
     handle: &RedisServerHandle,
     filter: ClientKillFilter,
 ) -> Result<u64> {
+    tracing::info!(
+        port = handle.port(),
+        ty = ?filter.ty,
+        addr = filter.addr.as_deref(),
+        "kill_client_connections"
+    );
     let mut args: Vec<String> = vec!["CLIENT".into(), "KILL".into()];
     if let Some(ty) = filter.ty {
         args.push("TYPE".into());
@@ -347,6 +369,11 @@ pub async fn kill_client_connections(
 /// script or a large O(N) command produces in a real incident.
 #[cfg(feature = "tokio")]
 pub fn block_event_loop(handle: &RedisServerHandle, duration: Duration) -> Result<()> {
+    tracing::info!(
+        port = handle.port(),
+        duration_ms = duration.as_millis() as u64,
+        "block_event_loop"
+    );
     let cli = handle.cli().clone();
     tokio::spawn(async move {
         let secs = duration.as_secs_f64().to_string();
@@ -371,6 +398,7 @@ pub fn block_event_loop(handle: &RedisServerHandle, duration: Duration) -> Resul
 /// replica while that happens.
 #[cfg(feature = "tokio")]
 pub async fn force_full_resync(master: &RedisServerHandle) -> Result<()> {
+    tracing::info!(port = master.port(), "force_full_resync");
     master.run(&["DEBUG", "CHANGE-REPL-ID"]).await?;
     master.run(&["CLIENT", "KILL", "TYPE", "replica"]).await?;
     Ok(())
@@ -450,6 +478,7 @@ pub async fn break_persistence(
                 .to_string(),
         });
     }
+    tracing::info!(port = handle.port(), "break_persistence");
 
     let dir = PathBuf::from(config_get_single(handle, "dir").await?);
     let metadata = std::fs::metadata(&dir)?;
@@ -492,6 +521,7 @@ impl<'a> PersistenceGuard<'a> {
     /// so restoring permissions alone is not enough to undo
     /// [`break_persistence`].
     pub async fn restore(mut self, timeout: Duration) -> Result<()> {
+        tracing::info!(port = self.handle.port(), "persistence_restore");
         let mut perms = std::fs::metadata(&self.dir)?.permissions();
         perms.set_mode(self.original_mode);
         std::fs::set_permissions(&self.dir, perms)?;
@@ -522,6 +552,7 @@ impl Drop for PersistenceGuard<'_> {
         if self.resolved {
             return;
         }
+        tracing::warn!(port = self.handle.port(), "persistence_guard_drop_reset");
         // Best-effort: at least restore write access synchronously so the
         // node's data directory isn't left unwritable if the test never
         // calls `restore`. Can't await here, so this doesn't confirm BGSAVE
@@ -578,6 +609,7 @@ pub async fn exhaust_maxclients(
     handle: &RedisServerHandle,
     maxclients: Option<u32>,
 ) -> Result<ClientFloodGuard<'_>> {
+    tracing::info!(port = handle.port(), ?maxclients, "exhaust_maxclients");
     let previous_maxclients = if let Some(n) = maxclients {
         let previous = config_get_single(handle, "maxclients").await?;
         handle
@@ -645,6 +677,7 @@ impl<'a> ClientFloodGuard<'a> {
     /// is no free slot to run `CONFIG SET` on until connections are freed
     /// first.
     pub async fn release(mut self) -> Result<()> {
+        tracing::info!(port = self.handle.port(), "client_flood_release");
         self.sockets.clear();
         if let Some(previous) = self.previous_maxclients.take() {
             self.handle
@@ -683,6 +716,13 @@ pub struct FlapGuard {
 #[cfg(feature = "tokio")]
 pub fn flap_node(handle: &RedisServerHandle, down: Duration, up: Duration) -> Result<FlapGuard> {
     let pid = handle.pid();
+    tracing::info!(
+        port = handle.port(),
+        pid,
+        down_ms = down.as_millis() as u64,
+        up_ms = up.as_millis() as u64,
+        "flap_node"
+    );
     send_signal(pid, "-STOP")?;
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -710,6 +750,7 @@ pub fn flap_node(handle: &RedisServerHandle, down: Duration, up: Duration) -> Re
 #[cfg(feature = "tokio")]
 impl Drop for FlapGuard {
     fn drop(&mut self) {
+        tracing::debug!(pid = self.pid, "flap_guard_drop");
         self.stop.store(true, Ordering::Relaxed);
         self.task.abort();
         let _ = send_signal(self.pid, "-CONT");
@@ -730,6 +771,7 @@ impl Drop for FlapGuard {
 #[cfg(feature = "tokio")]
 pub async fn kill_master_by_slot(cluster: &RedisClusterHandle, slot: u16) -> Result<u16> {
     let owner = find_slot_owner(cluster, slot).await?;
+    tracing::info!(slot, port = owner.port(), "kill_master_by_slot");
     send_signal(owner.pid(), "-9")?;
     Ok(owner.port())
 }
@@ -751,6 +793,7 @@ pub async fn kill_master_by_key(cluster: &RedisClusterHandle, key: &str) -> Resu
 #[cfg(feature = "tokio")]
 pub async fn freeze_master_by_slot(cluster: &RedisClusterHandle, slot: u16) -> Result<u16> {
     let owner = find_slot_owner(cluster, slot).await?;
+    tracing::info!(slot, port = owner.port(), "freeze_master_by_slot");
     send_signal(owner.pid(), "-STOP")?;
     Ok(owner.port())
 }
@@ -763,6 +806,7 @@ pub async fn freeze_master_by_slot(cluster: &RedisClusterHandle, slot: u16) -> R
 /// `CLUSTER FAILOVER FORCE`.
 #[cfg(feature = "tokio")]
 pub async fn trigger_failover(replica: &RedisServerHandle) -> Result<String> {
+    tracing::info!(port = replica.port(), "trigger_failover");
     match replica.run(&["CLUSTER", "FAILOVER"]).await {
         Ok(result) if !result.contains("ERR") => Ok(result),
         _ => replica.run(&["CLUSTER", "FAILOVER", "FORCE"]).await,
@@ -778,6 +822,7 @@ pub async fn trigger_failover(replica: &RedisServerHandle) -> Result<String> {
 /// stay frozen; call [`recover`] to heal the partition either way.
 #[cfg(feature = "tokio")]
 pub fn partition(cluster: &RedisClusterHandle, reachable: &[usize]) -> Result<Vec<u16>> {
+    tracing::info!(?reachable, "partition");
     let mut frozen = Vec::new();
     for (i, node) in cluster.nodes().iter().enumerate() {
         if !reachable.contains(&i) {
@@ -799,6 +844,7 @@ pub fn partition(cluster: &RedisClusterHandle, reachable: &[usize]) -> Result<Ve
 /// from resuming. Returns the first failure, if any, after the full pass.
 #[cfg(feature = "tokio")]
 pub fn recover(cluster: &RedisClusterHandle) -> Result<()> {
+    tracing::info!(nodes = cluster.nodes().len(), "recover");
     let mut first_err = None;
     for node in cluster.nodes() {
         if let Err(e) = send_signal(node.pid(), "-CONT")
@@ -856,6 +902,7 @@ pub async fn crash_sentinel_during_failover(
     sentinel_idx: usize,
     point: SentinelCrashPoint,
 ) -> Result<()> {
+    tracing::info!(sentinel_idx, ?point, "crash_sentinel_during_failover");
     let cli = handle.sentinel_cli(sentinel_idx)?;
     let mode = match point {
         SentinelCrashPoint::AfterElection => "crash-after-election",
@@ -981,6 +1028,7 @@ impl<'a> ReshardGuard<'a> {
         from: &'a RedisServerHandle,
         to: &'a RedisServerHandle,
     ) -> Result<ReshardGuard<'a>> {
+        tracing::info!(slot, from = from.port(), to = to.port(), "reshard_start");
         let from_id = node_id(from).await?;
         let to_id = node_id(to).await?;
         let slot_str = slot.to_string();
@@ -1004,6 +1052,7 @@ impl<'a> ReshardGuard<'a> {
     /// Safe to call more than once (e.g. to sweep up keys written after a
     /// previous call). Returns the number of keys moved by this call.
     pub async fn migrate_keys(&self) -> Result<usize> {
+        tracing::info!(slot = self.slot, "reshard_migrate_keys");
         let password = self.cluster.password();
         let to_host = self.to.host().to_string();
         let to_port = self.to.port().to_string();
@@ -1037,6 +1086,7 @@ impl<'a> ReshardGuard<'a> {
     /// Finish the migration: sweep up any remaining keys, then reassign
     /// `slot` to the target node on every master.
     pub async fn complete(mut self) -> Result<usize> {
+        tracing::info!(slot = self.slot, "reshard_complete");
         let moved = self.migrate_keys().await?;
         let slot_str = self.slot.to_string();
         for node in self.cluster.master_nodes() {
@@ -1055,6 +1105,7 @@ impl<'a> ReshardGuard<'a> {
     /// leave a few keys reachable only via the target until the next
     /// reshard picks them up.
     pub async fn abort(mut self) -> Result<()> {
+        tracing::info!(slot = self.slot, "reshard_abort");
         let slot_str = self.slot.to_string();
         self.from
             .run(&["CLUSTER", "SETSLOT", &slot_str, "STABLE"])
@@ -1073,6 +1124,7 @@ impl Drop for ReshardGuard<'_> {
         if self.resolved {
             return;
         }
+        tracing::warn!(slot = self.slot, "reshard_guard_drop_reset");
         let slot_str = self.slot.to_string();
         self.from
             .cli()

@@ -3,9 +3,11 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Output;
 use std::time::Duration;
 
 use tokio::process::Command;
+use tracing::Instrument;
 
 use crate::cli::RedisCli;
 use crate::config_token::directive;
@@ -2023,49 +2025,60 @@ impl RedisServer {
     /// and that no [`extra`](Self::extra) directive collides with one the
     /// wrapper generates, before attempting to launch anything.
     pub async fn start(self) -> Result<RedisServerHandle> {
-        self.validate_extras()?;
-        if which::which(&self.config.redis_server_bin).is_err() {
-            return Err(Error::BinaryNotFound {
-                binary: self.config.redis_server_bin.clone(),
-            });
+        let span = tracing::debug_span!(
+            "server_start",
+            port = self.config.port,
+            bind = %self.config.bind
+        );
+        async move {
+            self.validate_extras()?;
+            if which::which(&self.config.redis_server_bin).is_err() {
+                return Err(Error::BinaryNotFound {
+                    binary: self.config.redis_server_bin.clone(),
+                });
+            }
+            if which::which(&self.config.redis_cli_bin).is_err() {
+                return Err(Error::BinaryNotFound {
+                    binary: self.config.redis_cli_bin.clone(),
+                });
+            }
+
+            let node_dir = self.config.dir.join(format!("node-{}", self.config.port));
+
+            // Clean up any stale process from a previous run before (re)creating
+            // the node directory. This handles test crashes that leave orphaned
+            // redis-server processes behind.
+            let stale_pidfile = node_dir.join("redis.pid");
+            if let Some(stale_pid) = crate::process::read_pidfile(&stale_pidfile)
+                && crate::process::pid_alive(stale_pid)
+            {
+                tracing::debug!(pid = stale_pid, "stale_pid_kill");
+                crate::process::force_kill(stale_pid);
+            }
+
+            // Anything still holding the port after that is not ours: the pidfile
+            // above is the only claim of ownership the wrapper has. Fail with the
+            // port named rather than letting redis-server fail to bind, which a
+            // daemonizing start would not even report.
+            crate::preflight::ensure_ports_available(
+                &self.config.bind,
+                [(self.config.port, crate::preflight::PortRole::Server)],
+            )?;
+
+            crate::secure_file::create_dir_all(&node_dir)?;
+
+            let (cli, pid) =
+                launch_server(&self.config, &node_dir, Duration::from_secs(10)).await?;
+
+            Ok(RedisServerHandle {
+                config: self.config,
+                cli,
+                pid,
+                detached: false,
+            })
         }
-        if which::which(&self.config.redis_cli_bin).is_err() {
-            return Err(Error::BinaryNotFound {
-                binary: self.config.redis_cli_bin.clone(),
-            });
-        }
-
-        let node_dir = self.config.dir.join(format!("node-{}", self.config.port));
-
-        // Clean up any stale process from a previous run before (re)creating
-        // the node directory. This handles test crashes that leave orphaned
-        // redis-server processes behind.
-        let stale_pidfile = node_dir.join("redis.pid");
-        if let Some(stale_pid) = crate::process::read_pidfile(&stale_pidfile)
-            && crate::process::pid_alive(stale_pid)
-        {
-            crate::process::force_kill(stale_pid);
-        }
-
-        // Anything still holding the port after that is not ours: the pidfile
-        // above is the only claim of ownership the wrapper has. Fail with the
-        // port named rather than letting redis-server fail to bind, which a
-        // daemonizing start would not even report.
-        crate::preflight::ensure_ports_available(
-            &self.config.bind,
-            [(self.config.port, crate::preflight::PortRole::Server)],
-        )?;
-
-        crate::secure_file::create_dir_all(&node_dir)?;
-
-        let (cli, pid) = launch_server(&self.config, &node_dir, Duration::from_secs(10)).await?;
-
-        Ok(RedisServerHandle {
-            config: self.config,
-            cli,
-            pid,
-            detached: false,
-        })
+        .instrument(span)
+        .await
     }
 
     fn generate_config(&self, node_dir: &std::path::Path) -> String {
@@ -2715,6 +2728,90 @@ impl Default for RedisServer {
     }
 }
 
+/// Resolve the on-disk path of a node's log file from its config.
+///
+/// Mirrors [`RedisServer::generate_config`]'s `logfile` directive: a
+/// user-configured `logfile` is used as-is if absolute, else resolved
+/// against `node_dir` (Redis `chdir`s to `dir` before opening a relative
+/// `logfile`); with no configured `logfile` the default is
+/// `{node_dir}/redis.log`. Shared by [`launch_server`]'s failure paths (the
+/// log doesn't exist as a [`RedisServerHandle`] yet at that point) and
+/// [`RedisServerHandle::log_path`].
+fn resolve_log_path(config: &RedisServerConfig, node_dir: &std::path::Path) -> PathBuf {
+    match config.logfile.as_deref() {
+        Some(logfile) => {
+            let path = PathBuf::from(logfile);
+            if path.is_absolute() {
+                path
+            } else {
+                node_dir.join(path)
+            }
+        }
+        None => node_dir.join("redis.log"),
+    }
+}
+
+/// Read the last `max_lines` lines of `path`, if it exists and is readable.
+///
+/// Best-effort: returns `None` rather than an error, since this is called
+/// on an already-failing path and shouldn't itself become the reason the
+/// caller loses the original failure.
+fn log_tail(path: &std::path::Path, max_lines: usize) -> Option<String> {
+    let contents = fs::read_to_string(path).ok()?;
+    let lines: Vec<&str> = contents.lines().collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let start = lines.len().saturating_sub(max_lines);
+    Some(lines[start..].join("\n"))
+}
+
+/// Build the `detail` for [`Error::ServerStart`] out of whatever evidence is
+/// available: the node's log tail, plus (when the daemonizing process itself
+/// exited non-zero, e.g. a config-parse error printed before the logfile
+/// opens) its captured stdout/stderr.
+fn spawn_failure_detail(log_path: &std::path::Path, output: Option<&Output>) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(tail) = log_tail(log_path, 20) {
+        parts.push(format!("log tail ({}):\n{tail}", log_path.display()));
+    }
+    if let Some(output) = output {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stdout.trim().is_empty() {
+            parts.push(format!("stdout:\n{}", stdout.trim()));
+        }
+        if !stderr.trim().is_empty() {
+            parts.push(format!("stderr:\n{}", stderr.trim()));
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
+}
+
+/// Attach a node's log tail to an error that doesn't already carry one --
+/// used on the [`RedisCli::wait_for_ready`] failure path, which returns
+/// [`Error::Timeout`] rather than [`Error::ServerStart`].
+fn attach_log_tail(err: Error, log_path: &std::path::Path) -> Error {
+    let Some(tail) = log_tail(log_path, 20) else {
+        return err;
+    };
+    let suffix = format!("\nlog tail ({}):\n{tail}", log_path.display());
+    match err {
+        Error::Timeout { message } => Error::Timeout {
+            message: message + &suffix,
+        },
+        Error::ServerStart { port, detail: None } => Error::ServerStart {
+            port,
+            detail: Some(format!("log tail ({}):\n{tail}", log_path.display())),
+        },
+        other => other,
+    }
+}
+
 /// Write `config`'s conf file into `node_dir`, launch `redis-server` against
 /// it, wait for it to answer `PING`, and return a [`RedisCli`] wired up for
 /// it plus the pid it wrote to `redis.pid`.
@@ -2727,28 +2824,50 @@ async fn launch_server(
     node_dir: &std::path::Path,
     ready_timeout: Duration,
 ) -> Result<(RedisCli, u32)> {
+    let log_path = resolve_log_path(config, node_dir);
+    let start = std::time::Instant::now();
+
     let conf_path = node_dir.join("redis.conf");
     let conf_content = RedisServer {
         config: config.clone(),
     }
     .generate_config(node_dir);
     crate::secure_file::write(&conf_path, conf_content)?;
+    tracing::debug!(
+        elapsed_ms = start.elapsed().as_millis() as u64,
+        "config_written"
+    );
 
     let module_args = if config.no_stack_modules {
         Vec::new()
     } else {
         crate::stack::detect_stack_modules(&config.redis_server_bin)
     };
-    let status = Command::new(&config.redis_server_bin)
+    // `.output()` (not `.status()` with the streams nulled) so that a
+    // config-parse error -- which redis-server prints to its own
+    // stdout/stderr and exits on *before* it daemonizes and opens the
+    // logfile -- is captured here rather than lost. Once redis-server
+    // successfully daemonizes, this call still returns promptly: the parent
+    // process exits as soon as the child detaches.
+    let output = Command::new(&config.redis_server_bin)
         .arg(&conf_path)
         .args(&module_args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
+        .output()
         .await?;
+    tracing::debug!(elapsed_ms = start.elapsed().as_millis() as u64, "spawned");
 
-    if !status.success() {
-        return Err(Error::ServerStart { port: config.port });
+    if !output.status.success() {
+        let detail = spawn_failure_detail(&log_path, Some(&output));
+        tracing::error!(
+            port = config.port,
+            log_path = %log_path.display(),
+            log_tail = detail.as_deref().unwrap_or(""),
+            "server_start_failed"
+        );
+        return Err(Error::ServerStart {
+            port: config.port,
+            detail,
+        });
     }
 
     // The plain `port` always speaks unencrypted Redis protocol; `tls-port`
@@ -2783,7 +2902,11 @@ async fn launch_server(
         }
     }
 
-    cli.wait_for_ready(ready_timeout).await?;
+    cli.wait_for_ready(ready_timeout).await.map_err(|e| {
+        tracing::error!(port = config.port, log_path = %log_path.display(), "server_ready_wait_failed");
+        attach_log_tail(e, &log_path)
+    })?;
+    tracing::debug!(elapsed_ms = start.elapsed().as_millis() as u64, "ready");
 
     let pid_path = node_dir.join("redis.pid");
     let pid: u32 = {
@@ -2795,11 +2918,25 @@ async fn launch_server(
                 break p;
             }
             if std::time::Instant::now() >= deadline {
-                return Err(Error::ServerStart { port: config.port });
+                let detail = spawn_failure_detail(&log_path, None);
+                tracing::error!(
+                    port = config.port,
+                    log_path = %log_path.display(),
+                    log_tail = detail.as_deref().unwrap_or(""),
+                    "server_pidfile_wait_failed"
+                );
+                return Err(Error::ServerStart {
+                    port: config.port,
+                    detail,
+                });
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     };
+    tracing::debug!(
+        elapsed_ms = start.elapsed().as_millis() as u64,
+        "pidfile_read"
+    );
 
     Ok((cli, pid))
 }
@@ -2922,17 +3059,7 @@ impl RedisServerHandle {
     /// `logfile` is configured.
     pub fn log_path(&self) -> PathBuf {
         let node_dir = self.config.dir.join(format!("node-{}", self.config.port));
-        match self.config.logfile.as_deref() {
-            Some(logfile) => {
-                let path = PathBuf::from(logfile);
-                if path.is_absolute() {
-                    path
-                } else {
-                    node_dir.join(path)
-                }
-            }
-            None => node_dir.join("redis.log"),
-        }
+        resolve_log_path(&self.config, &node_dir)
     }
 
     /// Current byte length of [`Self::log_path`].
@@ -3000,16 +3127,29 @@ impl RedisServerHandle {
     /// 2. Waits 500ms for the process to exit.
     /// 3. If still alive, calls [`crate::process::force_kill`] (SIGTERM then SIGKILL).
     /// 4. Attempts to release the port via [`crate::process::kill_by_port`] as a final safety net.
+    ///
+    /// Synchronous and called from [`Drop`], so this enters its span with a
+    /// guard rather than `.instrument()` -- there is no `.await` in this
+    /// function for a guard to be held across.
     pub fn stop(&self) {
+        let span = tracing::debug_span!("server_stop", port = self.config.port);
+        let _guard = span.entered();
+
         // Step 1: graceful shutdown.
         self.cli.shutdown();
         // Step 2: grace period.
         std::thread::sleep(std::time::Duration::from_millis(500));
         // Step 3: force kill if still alive.
         if crate::process::pid_alive(self.pid) {
+            tracing::warn!(pid = self.pid, "force_kill_escalation");
             crate::process::force_kill(self.pid);
         }
-        // Step 4: port cleanup as safety net.
+        // Step 4: port cleanup as safety net. Demoted to DEBUG rather than
+        // WARN: kill_by_port runs unconditionally on every clean stop() as a
+        // safety net and its return type doesn't distinguish "found and
+        // killed a leftover listener" from "port was already free", so a
+        // WARN here would fire on the common case too.
+        tracing::debug!(port = self.config.port, "port_cleanup");
         crate::process::kill_by_port(self.config.port);
     }
 
@@ -3035,13 +3175,18 @@ impl RedisServerHandle {
     /// modules are passed on the command line rather than baked into the
     /// config file.
     pub(crate) async fn restart(&mut self, timeout: Duration) -> Result<()> {
-        let node_dir = self.config.dir.join(format!("node-{}", self.config.port));
-        let _ = fs::remove_file(node_dir.join("redis.pid"));
+        let span = tracing::debug_span!("server_restart", port = self.config.port);
+        async move {
+            let node_dir = self.config.dir.join(format!("node-{}", self.config.port));
+            let _ = fs::remove_file(node_dir.join("redis.pid"));
 
-        let (cli, pid) = launch_server(&self.config, &node_dir, timeout).await?;
-        self.cli = cli;
-        self.pid = pid;
-        Ok(())
+            let (cli, pid) = launch_server(&self.config, &node_dir, timeout).await?;
+            self.cli = cli;
+            self.pid = pid;
+            Ok(())
+        }
+        .instrument(span)
+        .await
     }
 }
 

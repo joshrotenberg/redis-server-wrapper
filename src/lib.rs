@@ -158,7 +158,7 @@
 //! # async fn example() {
 //! match RedisServer::new().port(6400).start().await {
 //!     Ok(server) => println!("running on {}", server.addr()),
-//!     Err(Error::ServerStart { port }) => eprintln!("could not start on {port}"),
+//!     Err(Error::ServerStart { port, .. }) => eprintln!("could not start on {port}"),
 //!     Err(e) => eprintln!("unexpected: {e}"),
 //! }
 //! # }
@@ -187,6 +187,25 @@
 //! [dev-dependencies]
 //! redis-server-wrapper = { version = "*", default-features = false, features = ["blocking"] }
 //! ```
+//!
+//! # Logging
+//!
+//! The crate emits [`tracing`] spans and events across the lifecycle
+//! (server/cluster/sentinel start and stop, chaos operations, proxy setup)
+//! at levels from `TRACE` (individual `redis-cli` invocations, with
+//! passwords redacted) through `DEBUG` (step timing) to `WARN`/`ERROR`
+//! (escalating shutdowns, server-start failures). No `tracing` subscriber
+//! is required: `tracing`'s `log` feature is enabled unconditionally, so
+//! output shows up under `env_logger` or `test-log` with zero setup too.
+//!
+//! ```text
+//! RUST_LOG=redis_server_wrapper=debug cargo test
+//! ```
+//!
+//! Install a `tracing-subscriber` instead for structured spans with the
+//! same targets. Either way, a server-start failure's `Display` also
+//! carries the tail of the node's log file directly in the returned
+//! [`Error`], so the reason is visible even with no subscriber at all.
 //!
 //! # Platform Support
 //!

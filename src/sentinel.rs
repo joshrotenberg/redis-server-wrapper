@@ -7,6 +7,7 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::process::Command;
+use tracing::Instrument;
 
 use crate::cli::RedisCli;
 use crate::error::{Error, Result};
@@ -453,6 +454,17 @@ impl RedisSentinelBuilder {
 
     /// Start the full topology: master, replicas, sentinels.
     pub async fn start(self) -> Result<RedisSentinelHandle> {
+        let span = tracing::debug_span!(
+            "sentinel_start",
+            master_port = self.master_port,
+            num_replicas = self.num_replicas,
+            num_sentinels = self.num_sentinels
+        );
+        self.start_inner().instrument(span).await
+    }
+
+    async fn start_inner(self) -> Result<RedisSentinelHandle> {
+        let start_time = std::time::Instant::now();
         let mut monitored_masters = Vec::with_capacity(1 + self.monitored_masters.len());
         monitored_masters.push(MonitoredMaster {
             name: self.master_name.clone(),
@@ -511,6 +523,11 @@ impl RedisSentinelBuilder {
             master = master.extra(key.clone(), value.clone());
         }
         let master = master.start().await?;
+        tracing::debug!(
+            elapsed_ms = start_time.elapsed().as_millis() as u64,
+            port = master.port(),
+            "master_started"
+        );
 
         // 2. Start replicas.
         let mut replicas = Vec::new();
@@ -554,9 +571,19 @@ impl RedisSentinelBuilder {
             let replica = replica.start().await?;
             replicas.push(replica);
         }
+        tracing::debug!(
+            elapsed_ms = start_time.elapsed().as_millis() as u64,
+            replicas = replicas.len(),
+            "replicas_started"
+        );
 
-        // Let replication link up.
+        // Let replication link up. Fixed sleep rather than a poll-until-linked
+        // loop -- see issue #147 for replacing this with a convergence wait.
         tokio::time::sleep(Duration::from_secs(1)).await;
+        tracing::debug!(
+            elapsed_ms = start_time.elapsed().as_millis() as u64,
+            "replication_wait_complete"
+        );
 
         // 3. Start sentinels.
         let mut sentinel_handles = Vec::new();
@@ -648,6 +675,7 @@ impl RedisSentinelBuilder {
                 .await?;
 
             if !status.success() {
+                tracing::error!(port, "sentinel_start_failed");
                 return Err(Error::SentinelStart { port });
             }
 
@@ -669,6 +697,7 @@ impl RedisSentinelBuilder {
                         break p;
                     }
                     if std::time::Instant::now() >= deadline {
+                        tracing::error!(port, "sentinel_pidfile_wait_failed");
                         return Err(Error::SentinelStart { port });
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -677,9 +706,20 @@ impl RedisSentinelBuilder {
 
             sentinel_handles.push((port, pid, cli));
         }
+        tracing::debug!(
+            elapsed_ms = start_time.elapsed().as_millis() as u64,
+            sentinels = sentinel_handles.len(),
+            "sentinels_started"
+        );
 
-        // Wait for sentinels to discover each other.
+        // Wait for sentinels to discover each other. Fixed sleep rather than
+        // a poll-until-discovered loop -- see issue #147 for replacing this
+        // with a convergence wait.
         tokio::time::sleep(Duration::from_secs(2)).await;
+        tracing::debug!(
+            elapsed_ms = start_time.elapsed().as_millis() as u64,
+            "discovery_wait_complete"
+        );
 
         Ok(RedisSentinelHandle {
             master,
@@ -1052,6 +1092,9 @@ impl RedisSentinelHandle {
     /// Replicas and the master are stopped by their own handles' [`Drop`] impls,
     /// which also use the escalating strategy.
     pub fn stop(&self) {
+        let span = tracing::debug_span!("sentinel_stop", master_name = %self.master_name);
+        let _guard = span.entered();
+
         // Step 1: graceful shutdown for each sentinel.
         for port in &self.sentinel_ports {
             self.tls
@@ -1068,11 +1111,16 @@ impl RedisSentinelHandle {
         // Step 3: force kill any sentinels still alive.
         for pid in &self.sentinel_pids {
             if crate::process::pid_alive(*pid) {
+                tracing::warn!(pid, "force_kill_escalation");
                 crate::process::force_kill(*pid);
             }
         }
-        // Step 4: port cleanup as safety net.
+        // Step 4: port cleanup as safety net (see server.rs's stop() for why
+        // this is DEBUG rather than WARN: it runs unconditionally as a
+        // last-resort net, not only when it actually finds something to
+        // clean up).
         for port in &self.sentinel_ports {
+            tracing::debug!(port, "port_cleanup");
             crate::process::kill_by_port(*port);
         }
         // Replicas and master stopped by their handles' Drop.

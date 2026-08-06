@@ -6,10 +6,22 @@ use std::io;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// A `redis-server` process failed to start.
-    #[error("redis-server failed to start on port {port}")]
+    ///
+    /// `detail`, when present, carries the last lines of the node's log file
+    /// (and, for a spawn-time failure, the daemonizing process's captured
+    /// stdout/stderr) so the reason survives even when no tracing subscriber
+    /// is installed -- the common case for most test runs, where an event
+    /// emitted alongside this error would otherwise be invisible.
+    #[error(
+        "redis-server failed to start on port {port}{}",
+        detail.as_deref().map(|d| format!("\n{d}")).unwrap_or_default()
+    )]
     ServerStart {
         /// The port on which the server failed to start.
         port: u16,
+        /// Tail of the node's log file plus any captured process output,
+        /// when available.
+        detail: Option<String>,
     },
 
     /// A sentinel process failed to start.

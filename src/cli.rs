@@ -643,7 +643,13 @@ impl RedisCli {
     /// [`exit_error_code`](Self::exit_error_code)) redis-cli exits non-zero
     /// for `NOAUTH`, `ERR`, `WRONGTYPE`, `MOVED`, and the rest, and this
     /// returns [`Error::Cli`] carrying the error text.
+    ///
+    /// Traces `args` at `TRACE` with secrets redacted -- the connection's
+    /// own password never appears here (it goes through the `REDISCLI_AUTH`
+    /// environment variable instead), but caller-supplied args can carry one, e.g.
+    /// `chaos::ReshardGuard::migrate_keys`'s `MIGRATE ... AUTH <password>`.
     pub async fn run(&self, args: &[&str]) -> Result<String> {
+        tracing::trace!(host = %self.host, port = self.port, cmd = %redact(args), "run");
         let output = self.raw_output(args).await?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -1073,6 +1079,58 @@ impl Default for RedisCli {
     }
 }
 
+/// Redact secrets out of a command's argument list before it's logged.
+///
+/// [`RedisCli::run`] never sees the connection's own password (that goes
+/// through `REDISCLI_AUTH`, see [`RedisCli::auth_env`]), but callers can
+/// still pass one directly as a command argument -- `MIGRATE ... AUTH
+/// <password>` (and `AUTH2 <username> <password>`) built by
+/// `chaos::ReshardGuard::migrate_keys`, or a `CONFIG SET requirepass
+/// <value>` / `CONFIG SET masterauth <value>` issued through a generic
+/// `CONFIG SET` helper. This masks:
+///
+/// - the token immediately following a (case-insensitive) `AUTH`
+/// - both tokens immediately following `AUTH2` (username and password --
+///   the second one is the actual secret, but redacting the username too
+///   costs nothing and errs toward the safer reading of "token following
+///   AUTH2")
+/// - the value in `CONFIG SET requirepass <value>` / `CONFIG SET masterauth
+///   <value>`
+///
+/// Returns a single space-joined string, since that's how the redacted
+/// output is meant to be logged.
+fn redact(args: &[&str]) -> String {
+    let mut out: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let mut i = 0;
+    while i < out.len() {
+        let upper = out[i].to_ascii_uppercase();
+        if upper == "AUTH" && i + 1 < out.len() {
+            out[i + 1] = "<redacted>".to_string();
+            i += 2;
+            continue;
+        }
+        if upper == "AUTH2" {
+            for slot in out.iter_mut().skip(i + 1).take(2) {
+                *slot = "<redacted>".to_string();
+            }
+            i += 3;
+            continue;
+        }
+        if upper == "CONFIG"
+            && i + 3 < out.len()
+            && out[i + 1].eq_ignore_ascii_case("SET")
+            && (out[i + 2].eq_ignore_ascii_case("requirepass")
+                || out[i + 2].eq_ignore_ascii_case("masterauth"))
+        {
+            out[i + 3] = "<redacted>".to_string();
+            i += 4;
+            continue;
+        }
+        i += 1;
+    }
+    out.join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1095,5 +1153,53 @@ mod tests {
         assert_eq!(cli.port, 6380);
         assert_eq!(cli.password.as_deref(), Some("secret"));
         assert_eq!(cli.bin, "/usr/local/bin/redis-cli");
+    }
+
+    #[test]
+    fn redact_masks_migrate_auth_password() {
+        let args = [
+            "MIGRATE", "10.0.0.1", "7001", "key", "0", "5000", "AUTH", "hunter2",
+        ];
+        let redacted = redact(&args);
+        assert!(!redacted.contains("hunter2"));
+        assert_eq!(redacted, "MIGRATE 10.0.0.1 7001 key 0 5000 AUTH <redacted>");
+    }
+
+    #[test]
+    fn redact_masks_migrate_auth2_username_and_password() {
+        let args = [
+            "MIGRATE", "10.0.0.1", "7001", "key", "0", "5000", "AUTH2", "myuser", "hunter2",
+        ];
+        let redacted = redact(&args);
+        assert!(!redacted.contains("hunter2"));
+        assert!(!redacted.contains("myuser"));
+        assert_eq!(
+            redacted,
+            "MIGRATE 10.0.0.1 7001 key 0 5000 AUTH2 <redacted> <redacted>"
+        );
+    }
+
+    #[test]
+    fn redact_masks_config_set_requirepass() {
+        let args = ["CONFIG", "SET", "requirepass", "hunter2"];
+        let redacted = redact(&args);
+        assert_eq!(redacted, "CONFIG SET requirepass <redacted>");
+    }
+
+    #[test]
+    fn redact_masks_config_set_masterauth() {
+        let args = ["CONFIG", "SET", "masterauth", "hunter2"];
+        let redacted = redact(&args);
+        assert_eq!(redacted, "CONFIG SET masterauth <redacted>");
+    }
+
+    #[test]
+    fn redact_leaves_unrelated_commands_untouched() {
+        let args = ["CONFIG", "SET", "maxclients", "100"];
+        let redacted = redact(&args);
+        assert_eq!(redacted, "CONFIG SET maxclients 100");
+
+        let args = ["GET", "key"];
+        assert_eq!(redact(&args), "GET key");
     }
 }

@@ -283,3 +283,26 @@ async fn wait_for_log_after_bgsave() {
         .expect("wait_for_log did not find the bgsave completion line");
     assert!(line.contains("Background saving terminated with success"));
 }
+
+/// An unrecognized directive makes `redis-server` reject the config file and
+/// exit non-zero before it daemonizes or opens the logfile -- exactly the
+/// case the switch from `.status()` to `.output()` exists for: the failure
+/// reason lives only in the daemonizing process's own stderr, not in the
+/// (nonexistent) log file, and it must still reach the returned error.
+#[tokio::test]
+async fn start_failure_surfaces_log_tail_in_error() {
+    let result = RedisServer::new()
+        .port(17906)
+        .extra("thisisnotarealdirective", "yes")
+        .start()
+        .await;
+
+    let err = result
+        .err()
+        .expect("redis-server should have aborted on the bad directive");
+    let message = err.to_string();
+    assert!(
+        message.contains("thisisnotarealdirective") || message.contains("Unresolved"),
+        "expected the log tail in the error message, got: {message}"
+    );
+}
