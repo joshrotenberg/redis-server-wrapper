@@ -502,6 +502,15 @@ impl RedisServer {
         self
     }
 
+    /// Let the wrapper pick a free port at start.
+    ///
+    /// See [`crate::server::RedisServer::auto_port`] for the race handling and
+    /// why this is not spelled `port(0)`.
+    pub fn auto_port(mut self) -> Self {
+        self.inner = self.inner.auto_port();
+        self
+    }
+
     /// Set the bind address (default: `127.0.0.1`).
     pub fn bind(mut self, bind: impl Into<String>) -> Self {
         self.inner = self.inner.bind(bind);

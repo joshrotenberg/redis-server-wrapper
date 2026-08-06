@@ -138,6 +138,23 @@ pub enum Error {
         loaded: Vec<String>,
     },
 
+    /// Automatic port allocation ran out of attempts.
+    ///
+    /// Every candidate the OS handed out was claimed by another process
+    /// before `redis-server` could bind it. On a normal machine this does not
+    /// happen: it points at something aggressively grabbing ephemeral ports,
+    /// or at an exhausted ephemeral range.
+    #[error(
+        "could not acquire a free port after {attempts} attempts{}",
+        last.as_deref().map(|e| format!(" (last failure: {e})")).unwrap_or_default()
+    )]
+    PortAllocation {
+        /// How many candidates were tried.
+        attempts: usize,
+        /// The failure from the final attempt, if there was one.
+        last: Option<String>,
+    },
+
     /// A topology was described in a way that cannot be started.
     ///
     /// Returned before anything starts, so a rejected topology leaves no

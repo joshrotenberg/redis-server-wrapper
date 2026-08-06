@@ -310,6 +310,9 @@ pub struct RedisServerConfig {
     /// List of Redis module paths to load at startup, each with its load-time arguments.
     pub loadmodule: Vec<(PathBuf, Vec<String>)>,
 
+    /// Ask the OS for a free port at start instead of using [`Self::port`].
+    pub auto_port: bool,
+
     // -- advanced --
     /// Server tick frequency in Hz, if set (Redis default: `10`).
     pub hz: Option<u32>,
@@ -680,6 +683,7 @@ impl Default for RedisServerConfig {
             stream_idmp_duration: None,
             stream_idmp_maxsize: None,
             loadmodule: Vec::new(),
+            auto_port: false,
             hz: None,
             io_threads: None,
             io_threads_do_reads: None,
@@ -750,6 +754,15 @@ impl Default for RedisServerConfig {
     }
 }
 
+/// How many OS-assigned ports [`RedisServer::auto_port`] will try before
+/// giving up.
+///
+/// Each attempt loses only if another process claims the port in the window
+/// between the OS handing it out and `redis-server` binding it, so needing
+/// even a second attempt is already unusual. The budget exists to bound a
+/// pathological machine, not to be reached.
+pub const MAX_PORT_ATTEMPTS: usize = 8;
+
 /// Builder for a Redis server.
 pub struct RedisServer {
     config: RedisServerConfig,
@@ -768,6 +781,33 @@ impl RedisServer {
     /// Set the listening port (default: 6379).
     pub fn port(mut self, port: u16) -> Self {
         self.config.port = port;
+        self
+    }
+
+    /// Let the wrapper pick a free port at start, for fixtures that run in
+    /// parallel and cannot coordinate a fixed range between them.
+    ///
+    /// Read the chosen port back from [`RedisServerHandle::port`] or
+    /// [`RedisServerHandle::addr`] once started.
+    ///
+    /// This is a separate mode rather than a meaning for `port(0)`, which
+    /// keeps its Redis sense of disabling the plaintext listener for a
+    /// TLS-only server. Setting both takes the automatic port.
+    ///
+    /// # Races
+    ///
+    /// Asking the OS for a free port and having `redis-server` bind it are
+    /// necessarily two steps, so another process can take the port in
+    /// between. That is the flaw in the usual bind-to-zero-and-release
+    /// workaround this replaces. The gap cannot be closed, only handled: a
+    /// candidate lost to another process is abandoned and a new one tried,
+    /// up to [`MAX_PORT_ATTEMPTS`] times, after which
+    /// [`Error::PortAllocation`] is returned.
+    ///
+    /// A lost race never disturbs the winner. Nothing here stops a process
+    /// holding a port the wrapper wanted.
+    pub fn auto_port(mut self) -> Self {
+        self.config.auto_port = true;
         self
     }
 
@@ -2042,6 +2082,50 @@ impl RedisServer {
     /// and that no [`extra`](Self::extra) directive collides with one the
     /// wrapper generates, before attempting to launch anything.
     pub async fn start(self) -> Result<RedisServerHandle> {
+        if self.config.auto_port {
+            return self.start_on_an_automatic_port().await;
+        }
+        self.start_on_the_configured_port().await
+    }
+
+    /// Try successive OS-assigned ports until one sticks.
+    ///
+    /// Only a lost race retries. Any other failure is a property of the
+    /// configuration rather than of the port, and retrying it would just fail
+    /// again on a different number.
+    async fn start_on_an_automatic_port(self) -> Result<RedisServerHandle> {
+        let mut last: Option<Error> = None;
+
+        for _ in 0..MAX_PORT_ATTEMPTS {
+            let mut attempt = RedisServer {
+                config: self.config.clone(),
+            };
+            let candidate = crate::preflight::reserve_ephemeral_port()?;
+            attempt.config.port = candidate;
+
+            match attempt.start_on_the_configured_port().await {
+                Ok(handle) => return Ok(handle),
+                // Someone took the candidate between reserving it and binding
+                // it. Their process is left alone; take a different number.
+                Err(e @ (Error::PortInUse { .. } | Error::ServerStart { .. })) => {
+                    tracing::debug!(port = candidate, "auto_port_retry");
+                    last = Some(e);
+                }
+                Err(other) => return Err(other),
+            }
+        }
+
+        Err(Error::PortAllocation {
+            attempts: MAX_PORT_ATTEMPTS,
+            last: last.map(|e| e.to_string()),
+        })
+    }
+
+    /// Start on whatever port the config already names.
+    ///
+    /// The span lives here rather than on `start` so each automatic-port
+    /// attempt is its own span, carrying the port it actually tried.
+    async fn start_on_the_configured_port(self) -> Result<RedisServerHandle> {
         let span = tracing::debug_span!(
             "server_start",
             port = self.config.port,
