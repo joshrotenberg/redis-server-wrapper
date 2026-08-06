@@ -142,13 +142,34 @@ mod tests {
 
     use std::io::{Read, Write};
 
+    /// Run `check` against a port that was free the instant it was handed
+    /// over, retrying if a concurrent test claimed it first.
+    ///
+    /// Every assertion about an unoccupied port races the rest of this
+    /// process: tests here, in `auto_port`, and anything else asking the OS
+    /// for an ephemeral port draw from the same pool, and a port released to
+    /// make an assertion about it can be taken before the assertion runs. A
+    /// genuine failure fails every attempt; a lost race does not.
+    fn with_free_port(mut check: impl FnMut(u16) -> bool, what: &str) {
+        const ATTEMPTS: usize = 8;
+        for attempt in 0..ATTEMPTS {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+
+            if check(port) {
+                return;
+            }
+            assert!(attempt < ATTEMPTS - 1, "{what}");
+        }
+    }
+
     #[test]
     fn unbound_port_is_available() {
-        // Bind and release to get a port nothing is listening on.
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        assert!(port_available("127.0.0.1", port));
+        with_free_port(
+            |port| port_available("127.0.0.1", port),
+            "a port with nothing listening must read as available",
+        );
     }
 
     #[test]
@@ -220,10 +241,10 @@ mod tests {
 
     #[test]
     fn ensure_passes_when_every_port_is_free() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        assert!(ensure_ports_available("127.0.0.1", [(port, PortRole::Server)]).is_ok());
+        with_free_port(
+            |port| ensure_ports_available("127.0.0.1", [(port, PortRole::Server)]).is_ok(),
+            "a free port must not be reported as in use",
+        );
     }
 
     #[test]
@@ -248,14 +269,17 @@ mod tests {
 
     #[test]
     fn reserved_port_is_free_when_returned() {
-        let port = reserve_ephemeral_port().expect("the OS should hand out a port");
-        assert_ne!(port, 0, "a reserved port must be concrete");
-        assert!(
-            port_available("127.0.0.1", port),
-            "the reservation must be released, not held"
-        );
-        // Released means bindable, which is what the caller's process needs.
-        TcpListener::bind(("127.0.0.1", port)).expect("reserved port should be bindable");
+        // The reservation must be released rather than held, and the released
+        // port must be bindable, which is what the caller's process needs.
+        for attempt in 0..8 {
+            let port = reserve_ephemeral_port().expect("the OS should hand out a port");
+            assert_ne!(port, 0, "a reserved port must be concrete");
+
+            if port_available("127.0.0.1", port) && TcpListener::bind(("127.0.0.1", port)).is_ok() {
+                return;
+            }
+            assert!(attempt < 7, "the reservation must be released, not held");
+        }
     }
 
     #[test]
