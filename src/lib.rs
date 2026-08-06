@@ -265,3 +265,9 @@ pub use server::{
     AppendFsync, LogLevel, RedisServer, RedisServerConfig, RedisServerHandle, ReplDisklessLoad,
     SavePolicy,
 };
+
+/// Compile the README's examples as doc tests, so they cannot drift from the
+/// API the way the error-handling example did before 0.5.0.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeExamples;

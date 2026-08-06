@@ -86,12 +86,16 @@ redis-server-wrapper = { version = "0.5", features = ["blocking"] }
 The async API requires [tokio](https://tokio.rs). See the [Blocking API](#blocking-api) section
 for synchronous use.
 
+Examples below are written as plain functions rather than annotated tests. Every one is
+compiled as a doc test on each build, which keeps them from drifting from the API; a
+`#[tokio::test]` attribute would make the compiler skip the body and defeat that. Add the
+attribute when you copy one into your own suite.
+
 ### Single Server
 
 ```rust
 use redis_server_wrapper::RedisServer;
 
-#[tokio::test]
 async fn test_server() {
     let server = RedisServer::new()
         .port(6400)
@@ -120,7 +124,6 @@ Use the dedicated method instead.
 ```rust
 use redis_server_wrapper::{LogLevel, RedisServer};
 
-#[tokio::test]
 async fn test_server_config() {
     let server = RedisServer::new()
         .port(6400)
@@ -142,7 +145,6 @@ arguments with `.loadmodule_with_args()`:
 ```rust
 use redis_server_wrapper::RedisServer;
 
-#[tokio::test]
 async fn test_loadmodule() {
     let server = RedisServer::new()
         .port(6400)
@@ -162,7 +164,6 @@ instead of coordinating a fixed range between them:
 ```rust
 use redis_server_wrapper::RedisServer;
 
-#[tokio::test]
 async fn test_auto_port() {
     let server = RedisServer::new().auto_port().start().await.unwrap();
 
@@ -187,7 +188,6 @@ running without it. Check against the live server:
 ```rust
 use redis_server_wrapper::RedisServer;
 
-#[tokio::test]
 async fn test_module_is_loaded() {
     let server = RedisServer::new()
         .port(6400)
@@ -241,7 +241,6 @@ The handle exposes a `RedisCli` you can use to run arbitrary commands against th
 ```rust
 use redis_server_wrapper::RedisServer;
 
-#[tokio::test]
 async fn test_run_commands() {
     let server = RedisServer::new().port(6400).start().await.unwrap();
 
@@ -256,7 +255,6 @@ You can also get a `RedisCli` instance directly from the handle:
 ```rust
 use redis_server_wrapper::RedisServer;
 
-#[tokio::test]
 async fn test_cli() {
     let server = RedisServer::new().port(6400).start().await.unwrap();
     let cli = server.cli();
@@ -270,7 +268,6 @@ async fn test_cli() {
 ```rust
 use redis_server_wrapper::RedisCluster;
 
-#[tokio::test]
 async fn test_cluster() {
     let cluster = RedisCluster::builder()
         .masters(3)
@@ -289,7 +286,6 @@ async fn test_cluster() {
 ```rust
 use redis_server_wrapper::RedisSentinel;
 
-#[tokio::test]
 async fn test_sentinel() {
     let sentinel = RedisSentinel::builder()
         .master_port(6390)
@@ -312,7 +308,6 @@ nodes with POSIX signals -- for testing how clients handle timeouts and failover
 use redis_server_wrapper::{RedisServer, chaos};
 use std::time::Duration;
 
-#[tokio::test]
 async fn test_chaos_pause() {
     let server = RedisServer::new().port(6400).start().await.unwrap();
 
@@ -339,7 +334,6 @@ server process:
 ```rust
 use redis_server_wrapper::{Direction, FaultProxy, RedisServer};
 
-#[tokio::test]
 async fn test_fault_proxy() {
     let server = RedisServer::new().port(6400).start().await.unwrap();
     let proxy = FaultProxy::spawn(server.addr()).await.unwrap();
@@ -360,7 +354,6 @@ I/O errors:
 ```rust
 use redis_server_wrapper::{Error, RedisServer};
 
-#[tokio::test]
 async fn test_error_handling() {
     match RedisServer::new().port(6400).start().await {
         Ok(server) => println!("running on {}", server.addr()),
@@ -398,14 +391,16 @@ underlying async `Drop` implementation keeps working correctly.
 ```rust
 use redis_server_wrapper::blocking::RedisServer;
 
-let server = RedisServer::new()
-    .port(6400)
-    .bind("127.0.0.1")
-    .start()
-    .unwrap();
+fn test_blocking_server() {
+    let server = RedisServer::new()
+        .port(6400)
+        .bind("127.0.0.1")
+        .start()
+        .unwrap();
 
-assert!(server.is_alive());
-// Stopped automatically on drop.
+    assert!(server.is_alive());
+    // Stopped automatically on drop.
+}
 ```
 
 Use `server.detach()` in the blocking API for the same keep-running behavior.
@@ -415,22 +410,24 @@ Cluster and Sentinel work the same way:
 ```rust
 use redis_server_wrapper::blocking::{RedisCluster, RedisSentinel};
 
-let cluster = RedisCluster::builder()
-    .masters(3)
-    .base_port(7000)
-    .start()
-    .unwrap();
+fn test_blocking_topologies() {
+    let cluster = RedisCluster::builder()
+        .masters(3)
+        .base_port(7000)
+        .start()
+        .unwrap();
 
-assert!(cluster.is_healthy());
+    assert!(cluster.is_healthy());
 
-let sentinel = RedisSentinel::builder()
-    .master_port(6390)
-    .replicas(2)
-    .sentinels(3)
-    .start()
-    .unwrap();
+    let sentinel = RedisSentinel::builder()
+        .master_port(6390)
+        .replicas(2)
+        .sentinels(3)
+        .start()
+        .unwrap();
 
-assert!(sentinel.is_healthy());
+    assert!(sentinel.is_healthy());
+}
 ```
 
 ## Examples
