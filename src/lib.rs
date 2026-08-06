@@ -268,6 +268,12 @@ pub use server::{
 
 /// Compile the README's examples as doc tests, so they cannot drift from the
 /// API the way the error-handling example did before 0.5.0.
-#[cfg(doctest)]
+///
+/// Gated on `blocking` because the README documents that API too, and those
+/// examples cannot compile without the feature that provides it. Every job
+/// that runs with `--all-features` covers them; the MSRV job, which builds
+/// default features only, skips this rather than failing on a module it was
+/// never asked to build.
+#[cfg(all(doctest, feature = "blocking"))]
 #[doc = include_str!("../README.md")]
 struct ReadmeExamples;
