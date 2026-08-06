@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.4.3...v0.5.0) - 2026-08-06
+
+### Added
+
+- give cluster and sentinel reclaimable directories ([#157](https://github.com/joshrotenberg/redis-server-wrapper/pull/157))
+- add collision-aware automatic port allocation ([#154](https://github.com/joshrotenberg/redis-server-wrapper/pull/154))
+- tracing instrumentation across lifecycle modules (closes #121) ([#155](https://github.com/joshrotenberg/redis-server-wrapper/pull/155))
+- verify module loading against a real module ([#149](https://github.com/joshrotenberg/redis-server-wrapper/pull/149))
+- sentinel chaos support with node access and failover observation ([#136](https://github.com/joshrotenberg/redis-server-wrapper/pull/136))
+- additional chaos primitives for process, connection, and persistence faults ([#135](https://github.com/joshrotenberg/redis-server-wrapper/pull/135))
+- observability and assertion primitives for fault testing ([#132](https://github.com/joshrotenberg/redis-server-wrapper/pull/132))
+- sentinel builder password and module support with tier-aware config ([#134](https://github.com/joshrotenberg/redis-server-wrapper/pull/134))
+- add core and extended config directives to the cluster builder ([#133](https://github.com/joshrotenberg/redis-server-wrapper/pull/133))
+- FaultProxy parity upgrades for stats and connection-level faults ([#131](https://github.com/joshrotenberg/redis-server-wrapper/pull/131))
+- mirror the 46 missing async builder methods on the blocking server builder ([#130](https://github.com/joshrotenberg/redis-server-wrapper/pull/130))
+- add loadmodule and enable_module_command to the cluster builder ([#124](https://github.com/joshrotenberg/redis-server-wrapper/pull/124))
+
+### Fixed
+
+- replace fixed startup sleeps with bounded convergence polling ([#147](https://github.com/joshrotenberg/redis-server-wrapper/pull/147))
+- fail closed on occupied ports instead of shutting down unowned Redis ([#145](https://github.com/joshrotenberg/redis-server-wrapper/pull/145))
+- surface Redis error replies as errors ([#144](https://github.com/joshrotenberg/redis-server-wrapper/pull/144))
+- encode config values safely and keep credentials out of argv ([#142](https://github.com/joshrotenberg/redis-server-wrapper/pull/142))
+- chaos and cli consistency pass ([#129](https://github.com/joshrotenberg/redis-server-wrapper/pull/129))
+
+### Other
+
+- pin the Ubuntu job to the oldest supported Redis line ([#156](https://github.com/joshrotenberg/redis-server-wrapper/pull/156))
+- build the module fixture in the Redis compatibility matrix ([#153](https://github.com/joshrotenberg/redis-server-wrapper/pull/153))
+- define and test a supported Redis version matrix ([#148](https://github.com/joshrotenberg/redis-server-wrapper/pull/148))
+
 ## [0.4.3](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.4.2...v0.4.3) - 2026-07-10
 
 ### Added
