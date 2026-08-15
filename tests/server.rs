@@ -306,3 +306,78 @@ async fn start_failure_surfaces_log_tail_in_error() {
         "expected the log tail in the error message, got: {message}"
     );
 }
+
+// -- stop idempotence (#165) --
+
+#[tokio::test]
+async fn a_stopped_handle_does_not_kill_the_ports_next_occupant() {
+    // The reported bug. A handle stopped explicitly used to stop again on
+    // drop, and by then the port could belong to an unrelated server.
+    let first = RedisServer::new()
+        .auto_port()
+        .start()
+        .await
+        .expect("first server should start");
+    let port = first.port();
+    first.stop();
+    assert!(first.is_stopped());
+
+    let second = RedisServer::new()
+        .port(port)
+        .dir(std::env::temp_dir().join("rsw-stop-idempotence"))
+        .start()
+        .await
+        .expect("a second server should be able to take the freed port");
+    second
+        .run(&["SET", "survivor", "yes"])
+        .await
+        .expect("seed failed");
+
+    // The dangerous moment: this used to run the whole stop sequence again,
+    // addressed at a port the first handle no longer owned.
+    drop(first);
+
+    assert!(
+        second.is_alive().await,
+        "dropping a stopped handle killed the port's new occupant"
+    );
+    let value = second
+        .run(&["GET", "survivor"])
+        .await
+        .expect("the second server should still answer");
+    assert_eq!(value.trim(), "yes");
+}
+
+#[tokio::test]
+async fn stopping_twice_is_harmless() {
+    let server = RedisServer::new()
+        .auto_port()
+        .start()
+        .await
+        .expect("failed to start");
+    assert!(!server.is_stopped());
+
+    server.stop();
+    server.stop();
+    server.stop();
+
+    assert!(server.is_stopped());
+    assert!(!server.is_alive().await);
+}
+
+#[tokio::test]
+async fn a_detached_handle_reports_that_it_stopped_nothing() {
+    let server = RedisServer::new()
+        .auto_port()
+        .start()
+        .await
+        .expect("failed to start");
+    let port = server.port();
+    assert!(!server.is_stopped());
+    server.detach();
+
+    // Still running, because detach suppressed the teardown.
+    let cli = redis_server_wrapper::RedisCli::new().port(port);
+    assert!(cli.ping().await);
+    cli.shutdown();
+}
