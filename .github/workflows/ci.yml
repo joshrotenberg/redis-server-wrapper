@@ -203,8 +203,24 @@ jobs:
         timeout-minutes: 15
         run: |
           set -o pipefail
-          timeout --signal=TERM --kill-after=60 600 \
+          # timeout(1) is GNU coreutils and is not on the macOS image, so this
+          # has to degrade rather than assume it. The hang being bounded here
+          # has only ever happened on Linux, and the step-level cap above
+          # still applies on both platforms either way.
+          if command -v timeout >/dev/null 2>&1; then
+            bound="timeout"
+          elif command -v gtimeout >/dev/null 2>&1; then
+            bound="gtimeout"
+          else
+            bound=""
+            echo "no timeout(1) on this image, relying on the step-level cap"
+          fi
+          if [ -n "$bound" ]; then
+            "$bound" --signal=TERM --kill-after=60 600 \
+              cargo test --all-features --verbose 2>&1 | tee "$RUNNER_TEMP/test-output.log"
+          else
             cargo test --all-features --verbose 2>&1 | tee "$RUNNER_TEMP/test-output.log"
+          fi
           status=$?
           if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
             echo "::error::cargo test did not finish within 600s"
@@ -235,7 +251,7 @@ jobs:
           uptime
           df -h / "$RUNNER_TEMP" 2>/dev/null
           free -m 2>/dev/null
-          nproc
+          getconf _NPROCESSORS_ONLN 2>/dev/null
           exit 0
 
       - name: Build documentation
