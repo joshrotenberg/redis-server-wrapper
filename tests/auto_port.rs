@@ -359,3 +359,21 @@ async fn a_range_is_all_or_nothing() {
     // Untouched: the allocator abandons a contested range, it never clears it.
     drop(squatter);
 }
+
+#[tokio::test]
+async fn an_automatic_range_works_with_a_password() {
+    // The ownership check asks each node CONFIG GET dir, so it has to be able
+    // to authenticate. If it could not, every node would answer with an error,
+    // read as someone else's server, and allocation would abandon every range
+    // it tried and fail with the attempt budget exhausted.
+    let cluster = RedisCluster::builder()
+        .masters(3)
+        .password("clusterpass")
+        .auto_port()
+        .start()
+        .await
+        .expect("an authenticated cluster should still get a range");
+
+    assert!(cluster.base_port() >= AUTO_BASE_MIN);
+    assert!(cluster.is_healthy().await);
+}
