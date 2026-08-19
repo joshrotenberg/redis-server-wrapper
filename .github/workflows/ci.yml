@@ -31,6 +31,11 @@ env:
 jobs:
   test:
     name: Test Suite
+    # A backstop under the per-step timeouts below. Without one, a hung step
+    # runs to the six-hour default, and a job the runner kills that way
+    # uploads no log at all, which is what made three separate hangs in this
+    # workflow undiagnosable.
+    timeout-minutes: 30
     runs-on: ${{ matrix.os }}
     strategy:
       # Report every cell. Cancelling the rest on the first failure hides
@@ -64,11 +69,16 @@ jobs:
 
       - name: Build Redis ${{ env.UBUNTU_REDIS_VERSION }} (Ubuntu)
         if: runner.os == 'Linux' && steps.redis-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 15
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libssl-dev
-          curl -fsSL -o /tmp/redis.tar.gz \
+          # --max-time and --retry because a bare curl waits forever on a
+          # stalled connection, and this step has been observed hanging.
+          curl -fsSL --retry 3 --retry-delay 5 --retry-connrefused \
+            --connect-timeout 30 --max-time 300 \
+            -o /tmp/redis.tar.gz \
             "https://download.redis.io/releases/redis-${UBUNTU_REDIS_VERSION}.tar.gz"
           mkdir -p /tmp/redis-src
           tar xzf /tmp/redis.tar.gz -C /tmp/redis-src --strip-components=1
@@ -110,6 +120,7 @@ jobs:
       # where module coverage is authoritative.
       - name: Build Redis test module
         continue-on-error: true
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           version="$(redis-server --version | sed -n 's/.*v=\([0-9][0-9.]*\).*/\1/p')"
@@ -119,7 +130,9 @@ jobs:
             include="$HOME/redis-dist"
           else
             include="${RUNNER_TEMP}"
-            curl -fsSL -o "${include}/redismodule.h" \
+            curl -fsSL --retry 3 --retry-delay 5 --retry-connrefused \
+              --connect-timeout 30 --max-time 120 \
+              -o "${include}/redismodule.h" \
               "https://raw.githubusercontent.com/redis/redis/${version}/src/redismodule.h"
           fi
           cc -fPIC -shared -I "${include}" \
@@ -158,8 +171,27 @@ jobs:
       - name: Build
         run: cargo build --verbose --all-targets
 
+      # A green run finishes this in a little over two minutes. The cap is
+      # deliberately many times that: it exists to convert a hang into a
+      # failure with a log, not to police how long the suite takes.
       - name: Run tests
+        timeout-minutes: 12
         run: cargo test --all-features --verbose
+
+      # Runs after a timed-out test step, which is the only way this workflow
+      # has produced any evidence about a hang. Orphaned redis-server
+      # processes here mean the suite hung in teardown rather than in a test.
+      - name: Diagnose a failed test run
+        if: failure()
+        run: |
+          set +e +o pipefail
+          echo "--- redis processes still running ---"
+          ps -eo pid,ppid,etime,stat,args | grep -E '[r]edis-(server|cli)' || echo "none"
+          echo "--- listening sockets ---"
+          { ss -lntp || netstat -an; } 2>/dev/null | head -40
+          echo "--- load average ---"
+          uptime
+          exit 0
 
       - name: Build documentation
         run: cargo doc --no-deps --all-features
@@ -167,6 +199,7 @@ jobs:
 
   security:
     name: Security Audit
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -187,6 +220,7 @@ jobs:
 
   msrv:
     name: Minimum Supported Rust Version
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -207,4 +241,5 @@ jobs:
           shared-key: "msrv"
 
       - name: Test MSRV compatibility
+        timeout-minutes: 12
         run: cargo test --verbose
