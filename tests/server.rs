@@ -306,3 +306,5 @@ async fn start_failure_surfaces_log_tail_in_error() {
         "expected the log tail in the error message, got: {message}"
     );
 }
+
+// CI baseline probe: does unmodified main hang today?
