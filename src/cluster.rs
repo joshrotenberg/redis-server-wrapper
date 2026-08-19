@@ -50,6 +50,16 @@ impl NodeContext {
     }
 }
 
+/// How many port ranges [`RedisClusterBuilder::auto_port`] will try before
+/// giving up.
+///
+/// A range is only lost when another process claims one of its ports in the
+/// window between the probe and the bind, and candidates are drawn at random
+/// from a window the OS does not allocate from, so needing a second attempt
+/// is already unusual. The budget bounds a pathological machine rather than
+/// being reached in normal use.
+pub const MAX_RANGE_ATTEMPTS: usize = 8;
+
 /// Builder for a Redis Cluster.
 ///
 /// # Example
@@ -74,6 +84,7 @@ pub struct RedisClusterBuilder {
     masters: u16,
     replicas_per_master: u16,
     base_port: u16,
+    auto_port: bool,
     bind: String,
     password: Option<String>,
     logfile: Option<String>,
@@ -171,6 +182,39 @@ impl RedisClusterBuilder {
     /// Nodes are assigned consecutive ports starting at this value.
     pub fn base_port(mut self, port: u16) -> Self {
         self.base_port = port;
+        self
+    }
+
+    /// Let the wrapper pick the whole port range, for cluster fixtures that
+    /// run in parallel and cannot coordinate a fixed range between them.
+    ///
+    /// Read the chosen ports back from [`RedisClusterHandle::base_port`] or
+    /// from the node handles once started.
+    ///
+    /// A cluster cannot use the bind-to-port-zero trick that works for a
+    /// standalone server. It needs a run of consecutive client ports plus the
+    /// bus port each one derives, and the OS will not hand out a contiguous
+    /// range. So the range is chosen and probed rather than requested, and the
+    /// whole range is one decision: a cluster that can only get some of its
+    /// ports is not started at all.
+    ///
+    /// Ranges are drawn at random from a window that keeps both the client
+    /// ports and the bus ports clear of the pool the OS uses for outbound
+    /// connections, so the allocator is not competing with every connection
+    /// the machine makes.
+    ///
+    /// # Races
+    ///
+    /// Probing a range and having `redis-server` bind it are separate steps,
+    /// so another process can take a port in between. A lost range is
+    /// abandoned and a different one tried, up to [`MAX_RANGE_ATTEMPTS`]
+    /// times, after which [`Error::PortAllocation`] is returned.
+    ///
+    /// A lost race never disturbs the winner. Nothing here stops a process
+    /// holding a port the wrapper wanted, and the nodes of an abandoned
+    /// attempt stop themselves.
+    pub fn auto_port(mut self) -> Self {
+        self.auto_port = true;
         self
     }
 
@@ -710,6 +754,24 @@ impl RedisClusterBuilder {
             ));
         }
 
+        // Everything past here is about where the range sits, which in
+        // automatic mode is not decided yet. Check instead that a range this
+        // size can be placed at all, so an impossible topology is named as one
+        // rather than surfacing later as an exhausted attempt budget.
+        if self.auto_port {
+            if crate::preflight::candidate_base_ports(total as u16, 1)
+                .next()
+                .is_none()
+            {
+                return invalid(format!(
+                    "{total} nodes is more than automatic port allocation can place: \
+                     the client range and the bus range 10000 above it must both fit \
+                     below the ports the OS hands out. Use base_port to choose a range."
+                ));
+            }
+            return Ok(());
+        }
+
         // Every node needs a client port and a bus port, and neither range may
         // run off the end of the port space.
         let highest_client = (self.base_port as u32) + total - 1;
@@ -855,20 +917,151 @@ impl RedisClusterBuilder {
             .await
     }
 
-    async fn start_inner(mut self, total_nodes: u16) -> Result<RedisClusterHandle> {
-        let start_time = std::time::Instant::now();
-        self.validate_topology()?;
+    /// Pick a free client and bus range, then start the nodes on it.
+    ///
+    /// Retries on a different range when a port is lost between the probe and
+    /// the bind. Only that case retries: any other failure is a property of
+    /// the configuration rather than of the range, and would fail the same way
+    /// on different numbers.
+    async fn start_on_an_automatic_range(
+        &mut self,
+        total_nodes: u16,
+    ) -> Result<(PathBuf, Vec<RedisServerHandle>)> {
+        // An explicit `cluster-port` replaces the derived bus port, so there
+        // is no bus range to keep clear.
+        let check_bus = self.cluster_port.is_none();
+        let mut last: Option<Error> = None;
 
-        let cluster_base = self.base_dir();
+        for base in crate::preflight::candidate_base_ports(total_nodes, MAX_RANGE_ATTEMPTS) {
+            self.base_port = base;
 
-        // Reclaim before the preflight, not after: a leftover node of our own
-        // still holds its port, so the preflight would reject the topology on
-        // the strength of a process we are entitled to stop.
-        self.reclaim_owned_nodes(&cluster_base);
+            if !crate::preflight::port_range_available(&self.bind, base, total_nodes, check_bus) {
+                tracing::debug!(base_port = base, "cluster_auto_port_range_busy");
+                last = Some(Error::PortInUse {
+                    host: self.bind.clone(),
+                    port: base,
+                    role: crate::preflight::PortRole::ClusterNode.to_string(),
+                });
+                continue;
+            }
 
-        self.ensure_ports_free()?;
+            // Give every attempt its own directory.
+            //
+            // The node directories are derived from the ports, so two
+            // processes that draw the same range would otherwise share them,
+            // and with them the pidfiles. Both would then see the pidfile the
+            // winner wrote and both would report success, leaving two handles
+            // believing they own one set of servers. The loser's teardown
+            // would stop the winner's cluster.
+            let cluster_base = self.automatic_base_dir();
 
-        // Start each node.
+            match self.start_nodes(total_nodes, &cluster_base).await {
+                Ok(nodes) => {
+                    match Self::verify_nodes_are_ours(&self.bind, nodes, &cluster_base).await {
+                        Ok(nodes) => return Ok((cluster_base, nodes)),
+                        Err(e) => {
+                            tracing::debug!(base_port = base, "cluster_auto_port_lost_race");
+                            last = Some(e);
+                        }
+                    }
+                }
+                // Someone took one of the ports between the probe and the
+                // bind. Their processes are left alone; take a different
+                // range. The nodes this attempt did start stop themselves as
+                // the handles drop.
+                Err(e @ (Error::PortInUse { .. } | Error::ServerStart { .. })) => {
+                    tracing::debug!(base_port = base, "cluster_auto_port_retry");
+                    last = Some(e);
+                }
+                Err(other) => return Err(other),
+            }
+        }
+
+        Err(Error::PortAllocation {
+            attempts: MAX_RANGE_ATTEMPTS,
+            last: last.map(|e| e.to_string()),
+        })
+    }
+
+    /// A directory unique to this process and this attempt.
+    fn automatic_base_dir(&self) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        /// Distinguishes concurrent automatic-range attempts within a process.
+        static ATTEMPT: AtomicU64 = AtomicU64::new(0);
+
+        self.base_dir().join(format!(
+            "auto-{}-{}",
+            std::process::id(),
+            ATTEMPT.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    /// Confirm every node is the one this attempt started.
+    ///
+    /// A successful start is not proof the server on a port is ours. The
+    /// daemonizing parent exits 0 whether or not the child binds, and the
+    /// readiness probe connects to whatever is listening, so a node that lost
+    /// its port can still look started. Ask each server which directory it is
+    /// running from, which is unique to this attempt.
+    ///
+    /// A node that answers with someone else's directory is detached rather
+    /// than stopped: it is not ours to stop. The rest stop themselves when the
+    /// returned error drops the handles.
+    ///
+    /// Takes `bind` rather than `&self` deliberately. Holding a shared
+    /// reference to the builder across an await would make the whole start
+    /// future non-`Send`, because `&T` is only `Send` when `T` is `Sync` and
+    /// the per-node config hook is a `dyn FnMut`. Callers spawn cluster
+    /// startups onto a runtime, so that matters.
+    async fn verify_nodes_are_ours(
+        bind: &str,
+        nodes: Vec<RedisServerHandle>,
+        cluster_base: &std::path::Path,
+    ) -> Result<Vec<RedisServerHandle>> {
+        let mut ours = Vec::with_capacity(nodes.len());
+        let mut foreign: Option<u16> = None;
+
+        for node in nodes {
+            let expected = cluster_base
+                .join(format!("node-{}", node.port()))
+                .display()
+                .to_string();
+            let is_ours = matches!(
+                node.run(&["CONFIG", "GET", "dir"]).await,
+                Ok(reply) if reply.contains(&expected)
+            );
+            if is_ours {
+                ours.push(node);
+            } else {
+                // Not ours, so not ours to stop. Detaching consumes the
+                // handle, which is what keeps it out of the teardown below.
+                foreign.get_or_insert(node.port());
+                node.detach();
+            }
+        }
+
+        match foreign {
+            None => Ok(ours),
+            // Dropping `ours` here stops the nodes this attempt really did
+            // start, which is correct: the attempt is being abandoned.
+            Some(port) => Err(Error::PortInUse {
+                host: bind.to_string(),
+                port,
+                role: crate::preflight::PortRole::ClusterNode.to_string(),
+            }),
+        }
+    }
+
+    /// Start every node of the topology, leaving them unclustered.
+    ///
+    /// Failing part way through drops the handles started so far, and each
+    /// one stops its own server, so a caller may retry on a different range
+    /// without leaking the nodes of the abandoned attempt.
+    async fn start_nodes(
+        &mut self,
+        total_nodes: u16,
+        cluster_base: &std::path::Path,
+    ) -> Result<Vec<RedisServerHandle>> {
         let ports: Vec<u16> = self.ports().collect();
         let mut nodes = Vec::new();
         for (index, port) in ports.into_iter().enumerate() {
@@ -1079,6 +1272,29 @@ impl RedisClusterBuilder {
             let handle = server.start().await?;
             nodes.push(handle);
         }
+        Ok(nodes)
+    }
+
+    async fn start_inner(mut self, total_nodes: u16) -> Result<RedisClusterHandle> {
+        let start_time = std::time::Instant::now();
+        self.validate_topology()?;
+
+        let (cluster_base, nodes) = if self.auto_port {
+            self.start_on_an_automatic_range(total_nodes).await?
+        } else {
+            let cluster_base = self.base_dir();
+
+            // Reclaim before the preflight, not after: a leftover node of our
+            // own still holds its port, so the preflight would reject the
+            // topology on the strength of a process we are entitled to stop.
+            self.reclaim_owned_nodes(&cluster_base);
+
+            self.ensure_ports_free()?;
+
+            // Start each node.
+            let nodes = self.start_nodes(total_nodes, &cluster_base).await?;
+            (cluster_base, nodes)
+        };
         tracing::debug!(
             elapsed_ms = start_time.elapsed().as_millis() as u64,
             nodes = nodes.len(),
@@ -1199,6 +1415,7 @@ impl RedisCluster {
             masters: 3,
             replicas_per_master: 0,
             base_port: 7000,
+            auto_port: false,
             bind: "127.0.0.1".into(),
             password: None,
             logfile: None,
@@ -1272,6 +1489,16 @@ impl RedisClusterHandle {
     /// The seed address (first node).
     pub fn addr(&self) -> String {
         format!("{}:{}", self.bind, self.base_port)
+    }
+
+    /// The first client port of the cluster's range.
+    ///
+    /// The nodes run on `base_port .. base_port + node count`, and each
+    /// derives its bus port as its client port + 10000 unless `cluster_port`
+    /// overrode that. With [`RedisClusterBuilder::auto_port`] this is the
+    /// range the wrapper chose, which the caller has no other way to learn.
+    pub fn base_port(&self) -> u16 {
+        self.base_port
     }
 
     /// All node addresses.
@@ -1725,6 +1952,62 @@ mod tests {
                 "unexpected message: {err}"
             );
         }
+    }
+
+    #[test]
+    fn automatic_mode_ignores_a_base_port_it_will_not_use() {
+        // A base port that would be rejected outright in explicit mode says
+        // nothing about a topology whose range has not been chosen yet.
+        let b = cluster(3, 1, 65000).auto_port();
+        assert!(
+            b.validate_topology().is_ok(),
+            "automatic mode should not validate a base port it discards"
+        );
+    }
+
+    #[test]
+    fn automatic_mode_still_rejects_a_topology_it_cannot_place() {
+        // More nodes than the automatic window can hold. Better to name it as
+        // a topology error than to spend the attempt budget and report an
+        // allocation failure, which would read as a busy machine.
+        let b = RedisCluster::builder()
+            .masters(6000)
+            .replicas_per_master(1)
+            .auto_port();
+        let err = b
+            .validate_topology()
+            .expect_err("12000 nodes should not be placeable automatically");
+        match err {
+            Error::InvalidTopology { message } => {
+                assert!(
+                    message.contains("automatic port allocation"),
+                    "expected the message to name the mode, got: {message}"
+                );
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn automatic_mode_still_rejects_too_few_masters() {
+        // Automatic ports change where a cluster runs, not what a cluster is.
+        assert!(cluster(2, 0, 7000).auto_port().validate_topology().is_err());
+    }
+
+    #[test]
+    fn each_automatic_attempt_gets_its_own_directory() {
+        // Two attempts sharing a directory would share the node pidfiles, and
+        // both would then read the winner's pidfile and report success.
+        let b = cluster(3, 0, 7000).auto_port();
+        let first = b.automatic_base_dir();
+        let second = b.automatic_base_dir();
+        assert_ne!(first, second);
+        assert!(
+            first
+                .to_string_lossy()
+                .contains(&std::process::id().to_string()),
+            "the directory should be unique to this process too: {first:?}"
+        );
     }
 
     #[test]

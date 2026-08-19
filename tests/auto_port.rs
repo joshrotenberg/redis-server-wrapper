@@ -6,7 +6,7 @@
 //! it, and the caller has no way to recover. `auto_port` keeps the same
 //! reservation trick but owns the retry.
 
-use redis_server_wrapper::RedisServer;
+use redis_server_wrapper::{RedisCluster, RedisServer};
 
 #[tokio::test]
 async fn auto_port_starts_on_a_usable_port() {
@@ -200,4 +200,162 @@ async fn config_get_dir_identifies_the_server_behind_a_port() {
         reply.contains(&node_dir),
         "CONFIG GET dir returned {reply:?}, which does not contain {node_dir}"
     );
+}
+
+// -- cluster ranges (#166) --
+
+/// The window automatic cluster ranges are drawn from, mirrored from
+/// `preflight` so a change to either side has to be deliberate.
+const AUTO_BASE_MIN: u16 = 10000;
+const AUTO_CEILING: u16 = 32768;
+
+#[tokio::test]
+async fn a_cluster_can_take_a_wrapper_chosen_range() {
+    let cluster = RedisCluster::builder()
+        .masters(3)
+        .auto_port()
+        .start()
+        .await
+        .expect("a cluster with an automatic range should start");
+
+    let base = cluster.base_port();
+    assert!(
+        base >= AUTO_BASE_MIN,
+        "base {base} is below the automatic window"
+    );
+
+    // Every node sits in the chosen range, and every bus port it derives fits
+    // under the ceiling. A range that satisfied the client ports but ran the
+    // bus ports into the OS pool would look fine until the gossip failed.
+    let ports: Vec<u16> = cluster.nodes().iter().map(|n| n.port()).collect();
+    assert_eq!(ports.len(), 3);
+    for port in &ports {
+        assert!(
+            *port >= base && *port < base + 3,
+            "node port {port} is outside the range starting at {base}"
+        );
+        let bus = port + 10000;
+        assert!(
+            bus < AUTO_CEILING,
+            "bus port {bus} derived from {port} reaches the ephemeral pool"
+        );
+    }
+
+    assert!(cluster.is_healthy().await, "the cluster should have formed");
+}
+
+#[tokio::test]
+async fn an_automatic_cluster_really_owns_its_bus_ports() {
+    // The half of the allocation a client-port-only check would miss. Redis
+    // only opens a bus port when the node is cluster-enabled and it bound
+    // successfully, so a listener there is proof the derived port was free and
+    // is now ours.
+    let cluster = RedisCluster::builder()
+        .masters(3)
+        .auto_port()
+        .start()
+        .await
+        .expect("cluster should start");
+
+    for node in cluster.nodes() {
+        let bus = node.port() + 10000;
+        assert!(
+            !redis_server_wrapper::preflight::port_available("127.0.0.1", bus),
+            "nothing is listening on bus port {bus} for node {}",
+            node.port()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_clusters_get_non_overlapping_ranges() {
+    // The case #166 was filed for: parallel cluster fixtures with no agreed
+    // range between them. Overlapping ranges would not merely collide on a
+    // client port, they would cross the two clusters' gossip.
+    const FIXTURES: usize = 3;
+    const NODES: u16 = 3;
+
+    let mut tasks = Vec::with_capacity(FIXTURES);
+    for _ in 0..FIXTURES {
+        tasks.push(tokio::spawn(async {
+            RedisCluster::builder()
+                .masters(NODES)
+                .auto_port()
+                .start()
+                .await
+                .expect("cluster fixture should start")
+        }));
+    }
+
+    let mut clusters = Vec::with_capacity(FIXTURES);
+    for task in tasks {
+        clusters.push(task.await.expect("cluster fixture panicked"));
+    }
+
+    // No client port is shared, and no client range reaches into another's.
+    let mut all_ports: Vec<u16> = clusters
+        .iter()
+        .flat_map(|c| c.nodes().iter().map(|n| n.port()))
+        .collect();
+    let total = all_ports.len();
+    assert_eq!(total, FIXTURES * NODES as usize);
+    all_ports.sort_unstable();
+    all_ports.dedup();
+    assert_eq!(all_ports.len(), total, "two clusters shared a client port");
+
+    // Nor a bus port, which is the collision that would let one cluster's
+    // gossip reach another's.
+    let mut buses: Vec<u16> = all_ports.iter().map(|p| p + 10000).collect();
+    let bus_total = buses.len();
+    buses.sort_unstable();
+    buses.dedup();
+    assert_eq!(buses.len(), bus_total, "two clusters shared a bus port");
+
+    // Every one still formed and is still up: allocating a range never
+    // disturbed a cluster that already had one.
+    for cluster in &clusters {
+        assert!(
+            cluster.is_healthy().await,
+            "cluster at {} did not survive its neighbours",
+            cluster.base_port()
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_range_is_all_or_nothing() {
+    // A partial-range collision. Stand a plain listener in the middle of a
+    // range and confirm the allocator steps over the whole range rather than
+    // starting the nodes that would have fitted around it.
+    //
+    // The candidate is whatever the allocator picks, so this cannot force the
+    // collision onto a chosen range. What it does pin is that a range holding
+    // an occupied port is rejected outright, which is the property a cluster
+    // depends on: three nodes minus one is not a cluster.
+    let squatter = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind failed");
+    let held = squatter.local_addr().unwrap().port();
+
+    assert!(
+        !redis_server_wrapper::preflight::port_range_available("127.0.0.1", held - 1, 3, false),
+        "a range containing the occupied port {held} must be rejected whole"
+    );
+
+    // And the allocator still finds the cluster a home despite it.
+    let cluster = RedisCluster::builder()
+        .masters(3)
+        .auto_port()
+        .start()
+        .await
+        .expect("allocation should step over the occupied port");
+
+    for node in cluster.nodes() {
+        assert_ne!(
+            node.port(),
+            held,
+            "allocation handed out a port that was already taken"
+        );
+    }
+
+    // Untouched: the allocator abandons a contested range, it never clears it.
+    drop(squatter);
 }

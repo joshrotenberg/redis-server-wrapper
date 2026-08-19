@@ -19,7 +19,7 @@ just `redis-server` and `redis-cli` on PATH.
 - **Arbitrary config** -- pass any Redis directive via `.extra(key, value)`
 - **Fault injection** -- process-level chaos (freeze, kill, partition) via the `chaos` module,
   and byte-level TCP fault injection (delay, drop, chunking) via `FaultProxy`
-- **Parallel fixtures** -- `.auto_port()` picks a free port and retries a lost race
+- **Parallel fixtures** -- `.auto_port()` picks a free port, or a whole cluster range, and retries a lost race
 - **Module verification** -- assert a module actually loaded, not just that it was configured
 - **Safe by default** -- never stops a Redis process it did not start; reclaims only its own
 - **Tracing** -- spans and events across every lifecycle path, visible via `RUST_LOG`
@@ -178,6 +178,32 @@ rather than failing, and never stops whatever won the race.
 
 `port(0)` is unrelated: it keeps its Redis meaning of disabling the plaintext
 listener for a TLS-only server.
+
+Clusters take the same option:
+
+```rust
+use redis_server_wrapper::RedisCluster;
+
+async fn test_cluster_auto_port() {
+    let cluster = RedisCluster::builder()
+        .masters(3)
+        .auto_port()
+        .start()
+        .await
+        .unwrap();
+
+    // The chosen range starts here; nodes run on the ports above it.
+    println!("cluster range starts at {}", cluster.base_port());
+}
+```
+
+A cluster cannot use the same trick a single server does. It needs a run of
+consecutive client ports plus the bus port each one derives at client port +
+10000, and the OS will not hand out a contiguous range. So the range is chosen
+and probed instead, and the whole range is one decision: a cluster that can get
+only some of its ports is not started at all. Ranges are drawn from a window
+that keeps both the client ports and the bus ports out of the range the OS uses
+for outbound connections.
 
 ### Verifying Loaded Modules
 
