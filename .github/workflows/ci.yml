@@ -189,23 +189,53 @@ jobs:
       # A green run finishes this in a little over two minutes. The cap is
       # deliberately many times that: it exists to convert a hang into a
       # failure with a log, not to police how long the suite takes.
+      # Bounded twice, deliberately. The step-level timeout above is enforced
+      # by the runner agent, and on the job that hangs here the agent did not
+      # enforce it: the step ran 17 minutes past a 12 minute cap and the job
+      # died with no log, while a sibling job's 15 minute cap on a different
+      # step fired on schedule. timeout(1) is enforced by this shell instead,
+      # so the bound holds as long as bash is alive even if the agent is not.
+      #
+      # Output is teed so the tail survives for the post-mortem step below.
+      # libtest prints a line per test as it finishes, so whatever is missing
+      # from that list is where the suite stopped.
       - name: Run tests
-        timeout-minutes: 12
-        run: cargo test --all-features --verbose
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          timeout --signal=TERM --kill-after=60 600 \
+            cargo test --all-features --verbose 2>&1 | tee "$RUNNER_TEMP/test-output.log"
+          status=$?
+          if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+            echo "::error::cargo test did not finish within 600s"
+          fi
+          exit "$status"
 
       # Runs after a timed-out test step, which is the only way this workflow
       # has produced any evidence about a hang. Orphaned redis-server
       # processes here mean the suite hung in teardown rather than in a test.
-      - name: Diagnose a failed test run
-        if: failure()
+      # always() rather than failure() so this also runs when the job is
+      # cancelled by its own timeout, which is how the test hang has ended
+      # every time so far. It reports nothing only if the runner itself is
+      # gone, which is itself the answer.
+      - name: Diagnose the test run
+        if: always()
         run: |
           set +e +o pipefail
+          echo "--- how far the suite got ---"
+          tail -40 "$RUNNER_TEMP/test-output.log" 2>/dev/null || echo "no test output captured"
+          echo "--- tests that never reported ---"
+          grep -cE '^test .* \.\.\. ok$' "$RUNNER_TEMP/test-output.log" 2>/dev/null \
+            || echo "0 completions recorded"
           echo "--- redis processes still running ---"
-          ps -eo pid,ppid,etime,stat,args | grep -E '[r]edis-(server|cli)' || echo "none"
+          ps -eo pid,ppid,pgid,etime,stat,args | grep -E '[r]edis-(server|cli)' || echo "none"
           echo "--- listening sockets ---"
           { ss -lntp || netstat -an; } 2>/dev/null | head -40
-          echo "--- load average ---"
+          echo "--- resources ---"
           uptime
+          df -h / "$RUNNER_TEMP" 2>/dev/null
+          free -m 2>/dev/null
+          nproc
           exit 0
 
       - name: Build documentation
