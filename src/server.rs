@@ -3346,22 +3346,35 @@ impl RedisServerHandle {
         self.cli.shutdown();
         // Step 2: grace period.
         std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Whether the graceful path worked decides everything below. A server
+        // that exited on request took its listener with it; one that did not
+        // may have left children holding the port.
+        let shutdown_failed = crate::process::pid_alive(self.pid);
+
         // Step 3: force kill if still alive.
-        if crate::process::pid_alive(self.pid) {
+        if shutdown_failed {
             tracing::warn!(pid = self.pid, "force_kill_escalation");
             crate::process::force_kill(self.pid);
         }
 
-        // Step 4: port cleanup, but only while something of ours might still
-        // hold the port.
+        // Step 4: port cleanup, but only after a shutdown that did not work.
         //
         // `kill_by_port` kills whatever is listening, which cannot be shown to
-        // be ours. It used to run on every stop, so a clean shutdown followed
-        // by an unrelated server binding the freed port would have killed the
-        // newcomer. It is only justified when the escalation above failed and
-        // the recorded process is still alive, which is the case it was added
-        // for: a wrapper script whose child holds the listener.
-        if crate::process::pid_alive(self.pid) {
+        // be ours. Running it on every stop meant a clean shutdown followed by
+        // an unrelated server binding the freed port would kill the newcomer,
+        // which is the bug this change exists to fix.
+        //
+        // It is still needed when the graceful path failed: that is the case
+        // it was added for, a wrapper script whose child holds the listener
+        // and outlives the pid we recorded. Skipping it there leaves a wedged
+        // process holding both the port and any inherited stdio, which in a
+        // test binary is a run that never ends.
+        //
+        // Deciding on the pre-escalation state rather than the post keeps the
+        // window tiny: the port cannot have been handed to anyone else in the
+        // moments since, because our own process was still holding it.
+        if shutdown_failed {
             tracing::debug!(port = self.config.port, "port_cleanup");
             crate::process::kill_by_port(self.config.port);
         }

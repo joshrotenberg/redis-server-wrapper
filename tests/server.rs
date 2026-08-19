@@ -381,3 +381,44 @@ async fn a_detached_handle_reports_that_it_stopped_nothing() {
     assert!(cli.ping().await);
     cli.shutdown();
 }
+
+#[tokio::test]
+async fn stopping_a_frozen_server_cannot_hang() {
+    // The failure that wedged CI. A SIGSTOPped server still completes the TCP
+    // handshake from the kernel's accept queue, so redis-cli connects and then
+    // waits for a reply that never comes. Reached from Drop, an unbounded wait
+    // there means the test binary never exits and the run hangs until the job
+    // is killed.
+    let server = RedisServer::new()
+        .auto_port()
+        .start()
+        .await
+        .expect("failed to start");
+    let port = server.port();
+
+    chaos::freeze_node(&server).expect("freeze failed");
+
+    // Bounded generously: the point is that this returns at all, not that it
+    // is quick. Unbounded, it never returns.
+    let stopped = tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::task::spawn_blocking(move || {
+            server.stop();
+            server
+        }),
+    )
+    .await;
+
+    let server = stopped
+        .expect("stopping a frozen server hung")
+        .expect("stop panicked");
+
+    assert!(server.is_stopped());
+    assert!(
+        !redis_server_wrapper::RedisCli::new()
+            .port(port)
+            .ping()
+            .await,
+        "the frozen server should be gone after stop"
+    );
+}
