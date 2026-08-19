@@ -263,15 +263,54 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # This one genuinely needs apt, since redis-server is not on the image.
-      # Bounded because apt has no timeout of its own and has been observed
-      # hanging indefinitely on a stalled mirror.
-      - name: Install Redis
-        timeout-minutes: 10
+      # Was `apt-get install redis-server`, which failed here on the same
+      # stalled azure.archive.ubuntu.com mirror that wedged the test job: the
+      # bound fired at 300s with the identical Ign/fallback/silence signature.
+      #
+      # Use the same pinned build the test job uses instead. That drops the
+      # last apt dependency in this workflow, and it corrects an
+      # inconsistency: the runner image ships Redis 7.0.15, which is below the
+      # floor the README declares, so the MSRV job was testing against a
+      # version the crate does not claim to support.
+      - name: Cache Redis ${{ env.UBUNTU_REDIS_VERSION }} build
+        id: redis-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/redis-dist
+          key: redis-${{ env.UBUNTU_REDIS_VERSION }}-${{ runner.os }}-v2
+
+      - name: Build Redis ${{ env.UBUNTU_REDIS_VERSION }}
+        if: steps.redis-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 15
         run: |
           set -euo pipefail
-          sudo timeout 300 apt-get update
-          sudo timeout 300 apt-get install -y redis-server
+          missing=""
+          command -v cc >/dev/null 2>&1 || missing="$missing build-essential"
+          command -v pkg-config >/dev/null 2>&1 || missing="$missing pkg-config"
+          [ -f /usr/include/openssl/ssl.h ] || missing="$missing libssl-dev"
+          if [ -n "$missing" ]; then
+            echo "installing:$missing"
+            sudo timeout 300 apt-get update
+            sudo timeout 300 apt-get install -y $missing
+          else
+            echo "build prerequisites already present, skipping apt-get"
+          fi
+          curl -fsSL --retry 3 --retry-delay 5 --retry-connrefused \
+            --connect-timeout 30 --max-time 300 \
+            -o /tmp/redis.tar.gz \
+            "https://download.redis.io/releases/redis-${UBUNTU_REDIS_VERSION}.tar.gz"
+          mkdir -p /tmp/redis-src
+          tar xzf /tmp/redis.tar.gz -C /tmp/redis-src --strip-components=1
+          make -C /tmp/redis-src -j"$(nproc)" BUILD_TLS=yes
+          mkdir -p ~/redis-dist
+          cp /tmp/redis-src/src/redis-server /tmp/redis-src/src/redis-cli ~/redis-dist/
+          cp /tmp/redis-src/src/redismodule.h ~/redis-dist/
+
+      - name: Put Redis on PATH
+        run: |
+          set -euo pipefail
+          chmod +x ~/redis-dist/redis-server ~/redis-dist/redis-cli
+          echo "$HOME/redis-dist" >> "$GITHUB_PATH"
 
       - name: Install Rust MSRV
         uses: dtolnay/rust-toolchain@master
