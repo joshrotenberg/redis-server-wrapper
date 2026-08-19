@@ -72,8 +72,23 @@ jobs:
         timeout-minutes: 15
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libssl-dev
+          # The runner image already ships build-essential, pkg-config and
+          # libssl-dev. Calling apt-get unconditionally is what wedged this
+          # job for weeks: `apt-get update` hung for 14m34s against a failing
+          # azure.archive.ubuntu.com mirror, with no output and no timeout of
+          # its own. Only reach for apt when something is genuinely missing,
+          # and bound it when we do.
+          missing=""
+          command -v cc >/dev/null 2>&1 || missing="$missing build-essential"
+          command -v pkg-config >/dev/null 2>&1 || missing="$missing pkg-config"
+          [ -f /usr/include/openssl/ssl.h ] || missing="$missing libssl-dev"
+          if [ -n "$missing" ]; then
+            echo "installing:$missing"
+            sudo timeout 300 apt-get update
+            sudo timeout 300 apt-get install -y $missing
+          else
+            echo "build prerequisites already present, skipping apt-get"
+          fi
           # --max-time and --retry because a bare curl waits forever on a
           # stalled connection, and this step has been observed hanging.
           curl -fsSL --retry 3 --retry-delay 5 --retry-connrefused \
