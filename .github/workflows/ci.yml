@@ -29,8 +29,51 @@ env:
   UBUNTU_REDIS_VERSION: "7.2.14"
 
 jobs:
+  # Formatting, lints and docs. Split out of the test job so that job can be a
+  # straight mirror of the one in redis-compat.yml, which runs the same suite
+  # on the same image and does not have these steps. None of this needs a
+  # running Redis: clippy and rustdoc compile the test targets without
+  # executing them.
+  lint:
+    name: Lint
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "lint"
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build documentation
+        run: cargo doc --no-deps --all-features
+
+  # Deliberately shaped like the `compat` job in redis-compat.yml, step for
+  # step. That job runs this same suite, with these same features, against a
+  # source build of the same Redis, on the same runner image, and passes in
+  # about two and a half minutes. This one wedged its runner so completely
+  # that neither a step timeout, nor timeout(1) in the step's own shell, nor a
+  # step guarded with always() ran again once the suite started, and no log
+  # was ever uploaded. The cause was never found; see #170. Matching the shape
+  # of the job that works is the way out that does not depend on knowing why.
+  #
+  # macOS keeps its own path: brew Redis, and a module header fetched over the
+  # network because there is no source tree to take one from.
   test:
     name: Test Suite
+    timeout-minutes: 30
     runs-on: ${{ matrix.os }}
     strategy:
       # Report every cell. Cancelling the rest on the first failure hides
@@ -46,32 +89,49 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Ubuntu pins the oldest supported line so the fast signal matches the
-      # floor the README declares. The runner image ships 7.0.15, which is
-      # below that floor, so `apt-get install redis-server` was gating every
-      # pull request on a version the crate does not claim to support.
-      #
-      # macOS is left on brew, which tracks the newest line. Between them
-      # every pull request sees both ends of the supported range; the lines in
-      # between are covered by the compatibility workflow.
+      # Same cache key as the 7.2.14 cell of the compatibility matrix, on
+      # purpose. That workflow's jobs finish and therefore save the cache;
+      # this one's did not, so it rebuilt Redis on every run and re-lost it.
+      # Sharing the key means this job restores what that one saved.
       - name: Cache Redis ${{ env.UBUNTU_REDIS_VERSION }} build
         if: runner.os == 'Linux'
         id: redis-cache
         uses: actions/cache@v4
         with:
           path: ~/redis-dist
-          key: ci-redis-${{ env.UBUNTU_REDIS_VERSION }}-${{ runner.os }}
+          key: redis-${{ env.UBUNTU_REDIS_VERSION }}-${{ runner.os }}-v2
 
       - name: Build Redis ${{ env.UBUNTU_REDIS_VERSION }} (Ubuntu)
         if: runner.os == 'Linux' && steps.redis-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 15
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libssl-dev
-          curl -fsSL -o /tmp/redis.tar.gz \
+          # The runner image already ships build-essential, pkg-config and
+          # libssl-dev. Calling apt-get unconditionally hung this job for
+          # 14m34s against a failing azure.archive.ubuntu.com mirror, with no
+          # output and no timeout of its own. Only reach for apt when
+          # something is genuinely missing, and bound it when we do.
+          missing=""
+          command -v cc >/dev/null 2>&1 || missing="$missing build-essential"
+          command -v pkg-config >/dev/null 2>&1 || missing="$missing pkg-config"
+          [ -f /usr/include/openssl/ssl.h ] || missing="$missing libssl-dev"
+          if [ -n "$missing" ]; then
+            echo "installing:$missing"
+            sudo timeout 300 apt-get update
+            sudo timeout 300 apt-get install -y $missing
+          else
+            echo "build prerequisites already present, skipping apt-get"
+          fi
+          # --max-time and --retry because a bare curl waits forever on a
+          # stalled connection.
+          curl -fsSL --retry 3 --retry-delay 5 --retry-connrefused \
+            --connect-timeout 30 --max-time 300 \
+            -o /tmp/redis.tar.gz \
             "https://download.redis.io/releases/redis-${UBUNTU_REDIS_VERSION}.tar.gz"
           mkdir -p /tmp/redis-src
           tar xzf /tmp/redis.tar.gz -C /tmp/redis-src --strip-components=1
+          # BUILD_TLS=yes so the TLS-gated tests exercise a real TLS build,
+          # matching the compatibility workflow.
           make -C /tmp/redis-src -j"$(nproc)" BUILD_TLS=yes
           mkdir -p ~/redis-dist
           cp /tmp/redis-src/src/redis-server /tmp/redis-src/src/redis-cli ~/redis-dist/
@@ -99,74 +159,85 @@ jobs:
             redis-server --version | grep -q "v=${UBUNTU_REDIS_VERSION}"
           fi
 
-      # tests/module_loading.rs skips itself unless REDIS_TEST_MODULE points at
-      # a compiled module. Building the fixture needs redismodule.h, which the
-      # distro Redis packages do not ship, so fetch the one matching the
-      # version actually installed.
-      #
-      # Best effort: a fetch or compile failure leaves the variable unset and
-      # the module tests skip rather than failing the run. The compatibility
-      # workflow builds Redis from source and has the real header, which is
-      # where module coverage is authoritative.
-      - name: Build Redis test module
+      # On Linux this mirrors the compatibility workflow: build against the
+      # header from the very source tree that produced the redis-server under
+      # test, and treat a failure as fatal. A test that skips by returning
+      # early reports "ok", so a missing fixture would otherwise look like a
+      # pass.
+      - name: Build Redis test module (Ubuntu)
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          cc -fPIC -shared -I "$HOME/redis-dist" \
+            tests/support/rsw_test_module.c \
+            -o "${RUNNER_TEMP}/rsw_test_module.so"
+          echo "REDIS_TEST_MODULE=${RUNNER_TEMP}/rsw_test_module.so" >> "$GITHUB_ENV"
+
+      # macOS has no source tree to take a header from, so it fetches one
+      # matching the brew Redis. Best effort: a failure here leaves the
+      # variable unset and the module tests skip. Linux above is where module
+      # coverage is enforced.
+      - name: Build Redis test module (macOS)
+        if: runner.os == 'macOS'
         continue-on-error: true
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           version="$(redis-server --version | sed -n 's/.*v=\([0-9][0-9.]*\).*/\1/p')"
           echo "detected Redis $version"
-          if [ -f "$HOME/redis-dist/redismodule.h" ]; then
-            # Linux builds Redis from source, so the matching header is local.
-            include="$HOME/redis-dist"
-          else
-            include="${RUNNER_TEMP}"
-            curl -fsSL -o "${include}/redismodule.h" \
-              "https://raw.githubusercontent.com/redis/redis/${version}/src/redismodule.h"
-          fi
-          cc -fPIC -shared -I "${include}" \
+          curl -fsSL --retry 3 --retry-delay 5 --retry-connrefused \
+            --connect-timeout 30 --max-time 120 \
+            -o "${RUNNER_TEMP}/redismodule.h" \
+            "https://raw.githubusercontent.com/redis/redis/${version}/src/redismodule.h"
+          cc -fPIC -shared -I "${RUNNER_TEMP}" \
             tests/support/rsw_test_module.c \
             -o "${RUNNER_TEMP}/rsw_test_module.so"
           echo "REDIS_TEST_MODULE=${RUNNER_TEMP}/rsw_test_module.so" >> "$GITHUB_ENV"
           echo "module fixture built for Redis $version"
 
-      - name: Report module test coverage
-        run: |
-          if [ -n "${REDIS_TEST_MODULE:-}" ]; then
-            echo "module tests will run against ${REDIS_TEST_MODULE}"
-          else
-            echo "::warning::module fixture unavailable, module tests will skip"
-          fi
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
-          components: rustfmt, clippy
 
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.rust }}
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-        if: matrix.rust == 'stable' && matrix.os == 'ubuntu-latest'
-
-      - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-        if: matrix.rust == 'stable'
-
-      - name: Build
-        run: cargo build --verbose --all-targets
+          shared-key: "test-suite"
 
       - name: Run tests
-        run: cargo test --all-features --verbose
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            # Enforced on Linux only, where the fixture is built from the
+            # matching source tree and a failure to produce it is a real
+            # break rather than a missing header.
+            test -n "${REDIS_TEST_MODULE:-}"
+            test -f "${REDIS_TEST_MODULE}"
+          fi
+          cargo test --all-features --verbose
 
-      - name: Build documentation
-        run: cargo doc --no-deps --all-features
-        if: matrix.rust == 'stable' && matrix.os == 'ubuntu-latest'
+      # Cheap, and the one time this workflow produced any evidence about a
+      # hang it came from a step that failed rather than a job that was
+      # cancelled. Orphaned redis-server processes here would mean the suite
+      # stopped in teardown rather than in a test.
+      - name: Diagnose a failed test run
+        if: failure()
+        run: |
+          set +e +o pipefail
+          echo "--- redis processes still running ---"
+          ps -eo pid,ppid,pgid,etime,stat,args | grep -E '[r]edis-(server|cli)' || echo "none"
+          echo "--- resources ---"
+          uptime
+          df -h / "$RUNNER_TEMP" 2>/dev/null
+          free -m 2>/dev/null
+          exit 0
 
   security:
     name: Security Audit
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -187,14 +258,59 @@ jobs:
 
   msrv:
     name: Minimum Supported Rust Version
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Redis
+      # Was `apt-get install redis-server`, which failed here on the same
+      # stalled azure.archive.ubuntu.com mirror that wedged the test job: the
+      # bound fired at 300s with the identical Ign/fallback/silence signature.
+      #
+      # Use the same pinned build the test job uses instead. That drops the
+      # last apt dependency in this workflow, and it corrects an
+      # inconsistency: the runner image ships Redis 7.0.15, which is below the
+      # floor the README declares, so the MSRV job was testing against a
+      # version the crate does not claim to support.
+      - name: Cache Redis ${{ env.UBUNTU_REDIS_VERSION }} build
+        id: redis-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/redis-dist
+          key: redis-${{ env.UBUNTU_REDIS_VERSION }}-${{ runner.os }}-v2
+
+      - name: Build Redis ${{ env.UBUNTU_REDIS_VERSION }}
+        if: steps.redis-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y redis-server
+          set -euo pipefail
+          missing=""
+          command -v cc >/dev/null 2>&1 || missing="$missing build-essential"
+          command -v pkg-config >/dev/null 2>&1 || missing="$missing pkg-config"
+          [ -f /usr/include/openssl/ssl.h ] || missing="$missing libssl-dev"
+          if [ -n "$missing" ]; then
+            echo "installing:$missing"
+            sudo timeout 300 apt-get update
+            sudo timeout 300 apt-get install -y $missing
+          else
+            echo "build prerequisites already present, skipping apt-get"
+          fi
+          curl -fsSL --retry 3 --retry-delay 5 --retry-connrefused \
+            --connect-timeout 30 --max-time 300 \
+            -o /tmp/redis.tar.gz \
+            "https://download.redis.io/releases/redis-${UBUNTU_REDIS_VERSION}.tar.gz"
+          mkdir -p /tmp/redis-src
+          tar xzf /tmp/redis.tar.gz -C /tmp/redis-src --strip-components=1
+          make -C /tmp/redis-src -j"$(nproc)" BUILD_TLS=yes
+          mkdir -p ~/redis-dist
+          cp /tmp/redis-src/src/redis-server /tmp/redis-src/src/redis-cli ~/redis-dist/
+          cp /tmp/redis-src/src/redismodule.h ~/redis-dist/
+
+      - name: Put Redis on PATH
+        run: |
+          set -euo pipefail
+          chmod +x ~/redis-dist/redis-server ~/redis-dist/redis-cli
+          echo "$HOME/redis-dist" >> "$GITHUB_PATH"
 
       - name: Install Rust MSRV
         uses: dtolnay/rust-toolchain@master
@@ -207,4 +323,5 @@ jobs:
           shared-key: "msrv"
 
       - name: Test MSRV compatibility
+        timeout-minutes: 12
         run: cargo test --verbose
