@@ -183,8 +183,22 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
         if: matrix.rust == 'stable'
 
-      - name: Build
-        run: cargo build --verbose --all-targets
+      # Deliberately not `cargo build --all-targets` first. That builds the
+      # whole dependency graph with default features, and the test step then
+      # rebuilds it with --all-features, so the job carried two complete
+      # target directories. The compatibility workflow builds one feature set
+      # and passes; this job builds two and wedges its runner hard enough that
+      # neither timeout(1) nor the step cap nor an always() step runs again.
+      # A full disk would produce exactly that, since the agent cannot write
+      # its own logs either.
+      #
+      # Nothing is lost by dropping it: the test step builds what it needs,
+      # and clippy already type-checks every target on stable.
+      - name: Report disk and memory before the suite
+        run: |
+          df -h / "$RUNNER_TEMP" || true
+          free -m 2>/dev/null || true
+          du -sh target 2>/dev/null || true
 
       # A green run finishes this in a little over two minutes. The cap is
       # deliberately many times that: it exists to convert a hang into a
