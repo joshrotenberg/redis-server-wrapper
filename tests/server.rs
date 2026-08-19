@@ -40,11 +40,35 @@ async fn password_auth() {
         .await
         .expect("failed to start redis-server");
 
-    // The handle's cli is already configured without the password,
-    // but the server was started with wait_for_ready which uses the
-    // cli without auth. Since redis-server with requirepass still
-    // responds to PING, the handle should be alive.
+    // `start` applies the password to the handle's cli before it waits for
+    // readiness, so wait_for_ready, is_alive, and run all speak to the server
+    // over an authenticated connection. An unauthenticated cli would not get
+    // this far: redis-server under requirepass answers PING with NOAUTH rather
+    // than PONG, which `ping_is_false_when_unauthenticated` in tests/cli.rs
+    // asserts directly.
     assert!(server.is_alive().await);
+
+    server
+        .run(&["SET", "auth-key", "auth-value"])
+        .await
+        .expect("an authenticated SET should succeed");
+    let value = server
+        .run(&["GET", "auth-key"])
+        .await
+        .expect("an authenticated GET should succeed");
+    assert_eq!(value.trim(), "auth-value");
+
+    // The round trip above would pass just as well against a server with no
+    // password at all, so confirm requirepass is what the connection
+    // authenticated against.
+    let requirepass = server
+        .run(&["CONFIG", "GET", "requirepass"])
+        .await
+        .expect("CONFIG GET requirepass should succeed");
+    assert!(
+        requirepass.contains("testpass"),
+        "requirepass is not set on the server: {requirepass:?}"
+    );
 }
 
 #[tokio::test]
