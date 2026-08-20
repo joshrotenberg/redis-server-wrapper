@@ -22,6 +22,12 @@ use crate::error::{Error, Result};
 /// issue long-running commands (e.g. `DEBUG SLEEP`) through it.
 pub(crate) const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// How long a fire-and-forget invocation waits before killing redis-cli.
+///
+/// Generous enough that a healthy server always replies well inside it, short
+/// enough that a wedged one cannot stall a teardown.
+const FIRE_AND_FORGET_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// RESP protocol version for client connections.
 #[derive(Debug, Clone, Copy)]
 pub enum RespProtocol {
@@ -679,13 +685,49 @@ impl RedisCli {
 
     /// Run a command, ignoring output. Used for fire-and-forget (SHUTDOWN).
     pub fn fire_and_forget(&self, args: &[&str]) {
-        let _ = Command::new(&self.bin)
+        self.fire_and_forget_bounded(args, FIRE_AND_FORGET_TIMEOUT);
+    }
+
+    /// Run a command, ignoring output, and give up after `timeout`.
+    ///
+    /// The bound is not a nicety. This is reached from `Drop` by way of
+    /// `RedisServerHandle::stop`, and redis-cli waits indefinitely for a reply
+    /// that a frozen (`SIGSTOP`ped) or otherwise wedged server will never
+    /// send: the kernel completes the handshake from the accept queue, so the
+    /// connection succeeds and then nothing happens. Without a deadline that
+    /// blocks the dropping thread forever, which in a test binary means the
+    /// process never exits and the run hangs until CI kills the job.
+    ///
+    /// On expiry the child is killed and reaped, so no zombie is left behind.
+    /// Whether the command took effect is deliberately not reported: callers
+    /// of a fire-and-forget path are not waiting on the answer, and every one
+    /// of them escalates afterwards anyway.
+    pub fn fire_and_forget_bounded(&self, args: &[&str], timeout: Duration) {
+        let Ok(mut child) = Command::new(&self.bin)
             .args(self.base_args())
             .args(args)
             .envs(self.auth_env())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status();
+            .spawn()
+        else {
+            return;
+        };
+
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match child.try_wait() {
+                // Exited on its own, cleanly or not.
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) => {}
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// Send PING and return true if PONG is received.

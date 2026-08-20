@@ -39,10 +39,13 @@ pub fn pid_alive(pid: u32) -> bool {
 ///
 /// Strategy:
 /// 1. Send SIGTERM to give the process a chance to shut down cleanly.
-/// 2. Sleep 500ms.
-/// 3. If still alive, SIGKILL the process group (`kill -9 -$pid`) to catch wrapper
+/// 2. Send SIGCONT so a process suspended by `SIGSTOP` (e.g. a frozen node in
+///    a chaos test) actually receives that SIGTERM instead of leaving it
+///    queued until something else resumes the process.
+/// 3. Sleep 500ms.
+/// 4. If still alive, SIGKILL the process group (`kill -9 -$pid`) to catch wrapper
 ///    scripts and any children they spawned (e.g. `redis-stack-server`).
-/// 4. SIGKILL the individual PID as a fallback.
+/// 5. SIGKILL the individual PID as a fallback.
 ///
 /// Uses synchronous [`std::process::Command`] so this is safe to call from [`Drop`] impls.
 ///
@@ -60,10 +63,17 @@ pub fn force_kill(pid: u32) {
     // Step 1: SIGTERM -- graceful shutdown attempt.
     let _ = Command::new("kill").args([&pid_str]).output();
 
-    // Step 2: Grace period.
+    // Step 2: SIGCONT -- a stopped process (SIGSTOP, e.g. via chaos::freeze_node)
+    // does not act on SIGTERM until it resumes. Without this, a frozen process
+    // sits on the queued SIGTERM through the whole grace period below and this
+    // function relies entirely on SIGKILL's stop-independent delivery to make
+    // any progress at all. Waking it here lets the SIGTERM actually run first.
+    let _ = Command::new("kill").args(["-CONT", &pid_str]).output();
+
+    // Step 3: Grace period.
     thread::sleep(Duration::from_millis(500));
 
-    // Step 3: If still alive, escalate to SIGKILL on process group.
+    // Step 4: If still alive, escalate to SIGKILL on process group.
     if pid_alive(pid) {
         // Kill the whole process group to catch wrapper script children.
         let _ = Command::new("kill").args(["-9", &pgid_str]).output();
