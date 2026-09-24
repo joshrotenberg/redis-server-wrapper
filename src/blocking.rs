@@ -488,9 +488,22 @@ pub struct RedisServer {
 
 impl RedisServer {
     /// Create a new builder with default settings.
+    ///
+    /// The server runs `redis-server` from `PATH` with no modules loaded,
+    /// even when Redis Stack is installed. Use [`stack`](Self::stack) for a
+    /// Redis Stack server.
     pub fn new() -> Self {
         Self {
             inner: server::RedisServer::new(),
+        }
+    }
+
+    /// Create a builder for a Redis Stack server.
+    ///
+    /// See [`server::RedisServer::stack`].
+    pub fn stack() -> Self {
+        Self {
+            inner: server::RedisServer::stack(),
         }
     }
 
@@ -1705,11 +1718,24 @@ impl RedisServer {
         self
     }
 
-    /// Disable automatic Redis Stack module detection and loading.
+    /// Load the Redis Stack modules bundled with the server binary.
     ///
-    /// By default, if the server binary is part of a redis-stack installation,
-    /// modules like RedisJSON, RediSearch, etc. are loaded automatically.
-    /// Call this to suppress that behavior.
+    /// See [`server::RedisServer::with_stack_modules`].
+    pub fn with_stack_modules(mut self) -> Self {
+        self.inner = self.inner.with_stack_modules();
+        self
+    }
+
+    /// Disable Redis Stack module loading.
+    ///
+    /// Module loading is off by default, so this only undoes
+    /// [`with_stack_modules`](Self::with_stack_modules) or
+    /// [`stack`](Self::stack).
+    #[deprecated(
+        since = "0.6.0",
+        note = "Stack modules are no longer loaded by default; drop this call"
+    )]
+    #[allow(deprecated)]
     pub fn no_stack_modules(mut self) -> Self {
         self.inner = self.inner.no_stack_modules();
         self

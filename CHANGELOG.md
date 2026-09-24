@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- `RedisServer::new()` runs `redis-server` from `PATH` and loads no Redis
+  Stack modules. It previously preferred a `redis-stack-server` Homebrew cask
+  binary when one was installed and loaded the modules beside it. Use
+  `RedisServer::stack()` for the old behavior, or `.redis_server_bin(..)` with
+  `.with_stack_modules()` for a Stack install elsewhere. The
+  `RedisServerConfig::no_stack_modules` field is replaced by `stack_modules`,
+  which defaults to `false`. `no_stack_modules()` and
+  `stack::detect_server_bin()` are deprecated
+  ([#174](https://github.com/joshrotenberg/redis-server-wrapper/issues/174))
+
 ## [0.5.0](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.4.3...v0.5.0) - 2026-08-06
 
 ### Breaking
