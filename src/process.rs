@@ -40,7 +40,7 @@ pub fn pid_alive(pid: u32) -> bool {
 /// Strategy:
 /// 1. Send SIGTERM to give the process a chance to shut down cleanly.
 /// 2. Sleep 500ms.
-/// 3. If still alive, SIGKILL the process group (`kill -9 -$pid`) to catch wrapper
+/// 3. If still alive, SIGKILL the process group (`kill -9 -- -$pid`) to catch wrapper
 ///    scripts and any children they spawned (e.g. `redis-stack-server`).
 /// 4. SIGKILL the individual PID as a fallback.
 ///
@@ -54,6 +54,12 @@ pub fn pid_alive(pid: u32) -> bool {
 /// process::force_kill(12345);
 /// ```
 pub fn force_kill(pid: u32) {
+    // 0 as a group target means the caller's own process group, and a value
+    // above i32::MAX reaches `kill` as a negative number. Neither can be a
+    // server this crate started.
+    if pid == 0 || pid > i32::MAX as u32 {
+        return;
+    }
     let pid_str = pid.to_string();
     let pgid_str = format!("-{pid}");
 
@@ -66,7 +72,12 @@ pub fn force_kill(pid: u32) {
     // Step 3: If still alive, escalate to SIGKILL on process group.
     if pid_alive(pid) {
         // Kill the whole process group to catch wrapper script children.
-        let _ = Command::new("kill").args(["-9", &pgid_str]).output();
+        //
+        // The `--` is required. Without it, procps-ng 4.0.4's `kill` (Ubuntu
+        // 24.04) does not read `-9 -<pid>` as a process group: it signals
+        // every process the user can reach, which on a CI runner includes
+        // the runner itself.
+        let _ = Command::new("kill").args(["-9", "--", &pgid_str]).output();
         // Also kill the individual PID as fallback.
         let _ = Command::new("kill").args(["-9", &pid_str]).output();
     }
@@ -227,6 +238,86 @@ mod tests {
         );
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    /// Spawn `args` as the leader of a new process group.
+    fn spawn_in_own_group(args: &[&str]) -> std::process::Child {
+        use std::os::unix::process::CommandExt;
+        Command::new(args[0])
+            .args(&args[1..])
+            .process_group(0)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn should succeed")
+    }
+
+    /// Whether `pid` is a running process. A zombie counts as gone: it has
+    /// exited and only waits for a parent to reap it.
+    fn running(pid: u32) -> bool {
+        Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .map(|o| {
+                let stat = String::from_utf8_lossy(&o.stdout);
+                let stat = stat.trim();
+                !stat.is_empty() && !stat.starts_with('Z')
+            })
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn force_kill_signals_the_whole_target_group_and_nothing_else() {
+        // The target ignores SIGTERM, so force_kill has to escalate, and it
+        // has a child in its process group that only the group SIGKILL
+        // reaches. A bystander in another group must survive.
+        //
+        // Without `--`, procps-ng 4.0.4 fails this either way: `-<pgid>`
+        // starting with 1 reads as `-1` and kills every process the user
+        // owns, including this test; any other leading digit signals
+        // nothing, and the child survives.
+        let mut target =
+            spawn_in_own_group(&["sh", "-c", "trap '' TERM; sleep 30 & echo $!; wait"]);
+        let mut bystander = spawn_in_own_group(&["sleep", "30"]);
+
+        let mut line = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(target.stdout.take().expect("stdout")),
+            &mut line,
+        )
+        .expect("child pid should be printed");
+        let child: u32 = line.trim().parse().expect("child pid");
+        assert!(running(child));
+
+        force_kill(target.id());
+        let _ = target.wait();
+        thread::sleep(Duration::from_millis(200));
+
+        let child_survived = running(child);
+        let bystander_survived = bystander.try_wait().expect("try_wait").is_none();
+        if child_survived {
+            let _ = Command::new("kill")
+                .args(["-9", &child.to_string()])
+                .output();
+        }
+        let _ = bystander.kill();
+        let _ = bystander.wait();
+
+        assert!(
+            !child_survived,
+            "the group kill must reach the target's child"
+        );
+        assert!(
+            bystander_survived,
+            "a process outside the target's group must not be signalled"
+        );
+    }
+
+    #[test]
+    fn force_kill_refuses_pids_that_are_not_a_single_process() {
+        // Returns without signalling. Were pid 0 passed through, the group
+        // kill would target this test's own process group.
+        force_kill(0);
+        force_kill(u32::MAX);
     }
 
     #[test]
