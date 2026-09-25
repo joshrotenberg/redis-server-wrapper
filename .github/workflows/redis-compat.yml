@@ -153,4 +153,5 @@ jobs:
           # fixture would look like a pass. Fail instead.
           test -n "${REDIS_TEST_MODULE:-}"
           test -f "${REDIS_TEST_MODULE}"
-          cargo test --all-features --verbose
+          # Isolated in its own session and instrumented; see the script.
+          TEST_BUDGET=9m .github/scripts/run-tests.sh --all-features --verbose

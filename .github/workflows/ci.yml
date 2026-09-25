@@ -217,7 +217,8 @@ jobs:
             test -n "${REDIS_TEST_MODULE:-}"
             test -f "${REDIS_TEST_MODULE}"
           fi
-          cargo test --all-features --verbose
+          # Isolated in its own session and instrumented; see the script.
+          TEST_BUDGET=12m .github/scripts/run-tests.sh --all-features --verbose
 
       # Cheap, and the one time this workflow produced any evidence about a
       # hang it came from a step that failed rather than a job that was
@@ -324,4 +325,4 @@ jobs:
 
       - name: Test MSRV compatibility
         timeout-minutes: 12
-        run: cargo test --verbose
+        run: TEST_BUDGET=9m .github/scripts/run-tests.sh --verbose
