@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.5.0...v0.5.1) - 2026-09-25
+
+### Fixed
+
+- stop force_kill's group signal from reaching every process on Linux ([#177](https://github.com/joshrotenberg/redis-server-wrapper/pull/177))
+
 ## [0.5.0](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.4.3...v0.5.0) - 2026-08-06
 
 ### Breaking
