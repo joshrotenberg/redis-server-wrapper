@@ -306,3 +306,62 @@ async fn start_failure_surfaces_log_tail_in_error() {
         "expected the log tail in the error message, got: {message}"
     );
 }
+
+/// The `v=` field from `<bin> --version`, the version the binary reports
+/// before it starts.
+fn binary_version(bin: &str) -> String {
+    let out = std::process::Command::new(bin)
+        .arg("--version")
+        .output()
+        .expect("redis-server --version should run");
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.split_whitespace()
+        .find_map(|field| field.strip_prefix("v="))
+        .unwrap_or_else(|| panic!("no v= field in {text:?}"))
+        .to_string()
+}
+
+#[tokio::test]
+async fn default_runs_redis_server_from_path_without_stack_modules() {
+    let server = RedisServer::new()
+        .port(17980)
+        .start()
+        .await
+        .expect("failed to start redis-server");
+
+    let info = server.info(Some("server")).await.unwrap();
+    assert_eq!(info["redis_version"], binary_version("redis-server"));
+
+    let modules = server.modules().await.unwrap();
+    assert!(
+        modules
+            .iter()
+            .all(|m| !m.path.contains("redis-stack-server")),
+        "no Redis Stack module should load by default: {modules:?}"
+    );
+}
+
+#[tokio::test]
+async fn stack_runs_the_stack_binary_with_its_modules() {
+    let Some(bin) = redis_server_wrapper::stack::find_stack_server_bin() else {
+        eprintln!("skipping: no Redis Stack install found");
+        return;
+    };
+
+    let server = RedisServer::stack()
+        .port(17981)
+        .start()
+        .await
+        .expect("failed to start Redis Stack");
+
+    let info = server.info(Some("server")).await.unwrap();
+    assert_eq!(info["redis_version"], binary_version(&bin));
+
+    let modules = server.modules().await.unwrap();
+    assert!(
+        modules
+            .iter()
+            .any(|m| m.path.contains("redis-stack-server")),
+        "Redis Stack modules should load: {modules:?}"
+    );
+}

@@ -462,14 +462,16 @@ pub struct RedisServerConfig {
     pub extra: HashMap<String, String>,
 
     // -- binary paths --
-    /// Path to the `redis-server` binary (default: auto-detected).
+    /// Path to the `redis-server` binary (default: `"redis-server"`,
+    /// resolved from `PATH`).
     pub redis_server_bin: String,
     /// Path to the `redis-cli` binary (default: `"redis-cli"`).
     pub redis_cli_bin: String,
 
     // -- stack --
-    /// When `true`, skip automatic Redis Stack module detection and loading.
-    pub no_stack_modules: bool,
+    /// When `true`, load the Redis Stack modules found in a `lib/` directory
+    /// beside [`redis_server_bin`](Self::redis_server_bin) (default: `false`).
+    pub stack_modules: bool,
 }
 
 /// AOF fsync policy.
@@ -747,9 +749,9 @@ impl Default for RedisServerConfig {
             propagation_error_behavior: None,
             tracking_table_max_keys: None,
             extra: HashMap::new(),
-            redis_server_bin: crate::stack::detect_server_bin(),
+            redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),
-            no_stack_modules: false,
+            stack_modules: false,
         }
     }
 }
@@ -770,10 +772,29 @@ pub struct RedisServer {
 
 impl RedisServer {
     /// Create a new builder with default settings.
+    ///
+    /// The server runs `redis-server` from `PATH` with no modules loaded,
+    /// even when Redis Stack is installed. Use [`stack`](Self::stack) for a
+    /// Redis Stack server.
     pub fn new() -> Self {
         Self {
             config: RedisServerConfig::default(),
         }
+    }
+
+    /// Create a builder for a Redis Stack server.
+    ///
+    /// Uses the `redis-server` binary from a Redis Stack Homebrew cask when
+    /// one is installed (see [`crate::stack::find_stack_server_bin`]) and
+    /// loads the Stack modules found beside it, as
+    /// [`with_stack_modules`](Self::with_stack_modules) does. Without a
+    /// Redis Stack install this is equivalent to [`new`](Self::new).
+    pub fn stack() -> Self {
+        let mut server = Self::new().with_stack_modules();
+        if let Some(bin) = crate::stack::find_stack_server_bin() {
+            server.config.redis_server_bin = bin;
+        }
+        server
     }
 
     // -- network --
@@ -2024,13 +2045,29 @@ impl RedisServer {
         self
     }
 
-    /// Disable automatic Redis Stack module detection and loading.
+    /// Load the Redis Stack modules bundled with the server binary.
     ///
-    /// By default, if the server binary is part of a redis-stack installation,
-    /// modules like RedisJSON, RediSearch, etc. are loaded automatically.
-    /// Call this to suppress that behavior.
+    /// When the binary set by [`redis_server_bin`](Self::redis_server_bin)
+    /// has a sibling `lib/` directory, the RedisJSON, RediSearch,
+    /// TimeSeries, Bloom, and compatibility modules found there are passed
+    /// as `--loadmodule` arguments (see
+    /// [`crate::stack::detect_stack_modules`]). Off by default.
+    pub fn with_stack_modules(mut self) -> Self {
+        self.config.stack_modules = true;
+        self
+    }
+
+    /// Disable Redis Stack module loading.
+    ///
+    /// Module loading is off by default, so this only undoes
+    /// [`with_stack_modules`](Self::with_stack_modules) or
+    /// [`stack`](Self::stack).
+    #[deprecated(
+        since = "0.6.0",
+        note = "Stack modules are no longer loaded by default; drop this call"
+    )]
     pub fn no_stack_modules(mut self) -> Self {
-        self.config.no_stack_modules = true;
+        self.config.stack_modules = false;
         self
     }
 
@@ -2988,10 +3025,10 @@ async fn launch_server(
         "config_written"
     );
 
-    let module_args = if config.no_stack_modules {
-        Vec::new()
-    } else {
+    let module_args = if config.stack_modules {
         crate::stack::detect_stack_modules(&config.redis_server_bin)
+    } else {
+        Vec::new()
     };
     // `.output()` (not `.status()` with the streams nulled) so that a
     // config-parse error -- which redis-server prints to its own
@@ -3473,6 +3510,31 @@ mod tests {
         assert_eq!(s.config.port, 6379);
         assert_eq!(s.config.bind, "127.0.0.1");
         assert!(matches!(s.config.save, SavePolicy::Disabled));
+        assert_eq!(s.config.redis_server_bin, "redis-server");
+        assert!(!s.config.stack_modules);
+    }
+
+    #[test]
+    fn with_stack_modules_keeps_the_binary() {
+        let s = RedisServer::new().with_stack_modules();
+        assert!(s.config.stack_modules);
+        assert_eq!(s.config.redis_server_bin, "redis-server");
+    }
+
+    #[test]
+    fn stack_uses_the_stack_binary_when_installed() {
+        let s = RedisServer::stack();
+        assert!(s.config.stack_modules);
+        let expected =
+            crate::stack::find_stack_server_bin().unwrap_or_else(|| "redis-server".to_string());
+        assert_eq!(s.config.redis_server_bin, expected);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn no_stack_modules_undoes_stack() {
+        let s = RedisServer::stack().no_stack_modules();
+        assert!(!s.config.stack_modules);
     }
 
     #[test]
