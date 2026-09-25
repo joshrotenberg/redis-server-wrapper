@@ -136,6 +136,126 @@ pub fn bus_port(client_port: u16) -> Option<u16> {
     client_port.checked_add(10000)
 }
 
+/// The gap Redis leaves between a client port and its bus port.
+const BUS_OFFSET: u16 = 10000;
+
+/// The lowest base port an automatic cluster range is drawn from.
+///
+/// Above the well-known range, and clear of the ports a person is likely to
+/// have picked by hand: 6379 for a standalone server and the 7000 block that
+/// every cluster tutorial uses.
+const AUTO_BASE_MIN: u16 = 10000;
+
+/// One past the highest port an automatic cluster range may touch.
+///
+/// A cluster needs two ranges, the client ports and the bus ports 10000
+/// above them, and neither may sit in the pool the OS hands out for outbound
+/// connections. Drawing from that pool would put the allocator in a race with
+/// every connection the machine makes, which is the race automatic allocation
+/// exists to avoid.
+///
+/// Linux's default pool starts at 32768 and macOS's at 49152, so keeping the
+/// whole bus range below 32768 stays clear on either without asking the OS
+/// what its pool is.
+const AUTO_CEILING: u16 = 32768;
+
+/// Candidate base ports for a cluster of `count` nodes, in random order.
+///
+/// A cluster cannot use the bind-to-zero trick a standalone server uses: it
+/// needs `count` consecutive client ports and the matching bus ports, and the
+/// OS will not hand out a contiguous run. So the range is chosen rather than
+/// requested, and the caller probes it.
+///
+/// Random rather than sequential so two processes starting at the same moment
+/// do not walk the same candidates in the same order and collide on every
+/// one. Each candidate is a base port whose client range
+/// `[base, base + count)` and bus range `[base + 10000, base + 10000 + count)`
+/// both fit under [`AUTO_CEILING`].
+///
+/// Yields nothing when `count` is too large to place: either the two ranges
+/// no longer fit under [`AUTO_CEILING`], or the run is long enough to overlap
+/// its own bus range at any base. [`crate::cluster::RedisClusterBuilder`]
+/// rejects both as topology errors before ever asking.
+pub fn candidate_base_ports(count: u16, attempts: usize) -> impl Iterator<Item = u16> {
+    // A run longer than the bus offset overlaps its own bus range wherever it
+    // is placed: the client ports reach past `base + 10000`, which is where
+    // the bus ports start. No base fixes that, so yield nothing.
+    let placeable = count <= BUS_OFFSET;
+
+    // The highest base whose bus range still ends below the ceiling.
+    let highest = AUTO_CEILING
+        .checked_sub(BUS_OFFSET)
+        .and_then(|p| p.checked_sub(count));
+
+    let span = if placeable {
+        highest
+            .and_then(|h| h.checked_sub(AUTO_BASE_MIN))
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    let mut seed = entropy();
+    (0..attempts).filter_map(move |_| {
+        if span == 0 {
+            return None;
+        }
+        // xorshift, so successive candidates are unrelated. The quality bar
+        // here is "does not repeat itself", not cryptographic.
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        Some(AUTO_BASE_MIN + (seed % span as u64) as u16)
+    })
+}
+
+/// A seed that differs between processes and between calls.
+///
+/// `RandomState` is seeded by the OS once per process and then perturbed per
+/// instance, which is enough to keep two concurrently starting test binaries
+/// from drawing the same sequence. Avoids a dependency on `rand` for a
+/// non-cryptographic use.
+fn entropy() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u32(std::process::id());
+    let seed = hasher.finish();
+    // A zero seed is a fixed point for xorshift and would yield one number
+    // forever.
+    if seed == 0 {
+        0x9e37_79b9_7f4a_7c15
+    } else {
+        seed
+    }
+}
+
+/// Whether every client port in `[base, base + count)` and its bus port is
+/// free on `host`.
+///
+/// The whole range is one allocation decision: a cluster that gets most of
+/// its ports is not partially started, it is rejected. Bus ports are skipped
+/// when `check_bus` is false, which is the case when `cluster-port` overrides
+/// the derived bus port.
+pub fn port_range_available(host: &str, base: u16, count: u16, check_bus: bool) -> bool {
+    for offset in 0..count {
+        let Some(port) = base.checked_add(offset) else {
+            return false;
+        };
+        if !port_available(host, port) {
+            return false;
+        }
+        if check_bus {
+            let Some(bus) = bus_port(port) else {
+                return false;
+            };
+            if !port_available(host, bus) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +335,133 @@ mod tests {
                  the kernel still holds socket remnants"
             );
         }
+    }
+
+    #[test]
+    fn candidates_keep_both_ranges_clear_of_the_ephemeral_pool() {
+        // The property that makes automatic allocation worth anything: if the
+        // bus range reached into the pool the OS draws outbound connections
+        // from, the allocator would be racing every connection on the machine.
+        for count in [3u16, 6, 30, 300] {
+            let mut yielded = 0;
+            for base in candidate_base_ports(count, 64) {
+                yielded += 1;
+                assert!(base >= AUTO_BASE_MIN, "base {base} below the floor");
+                let highest_client = base + count - 1;
+                let highest_bus = bus_port(highest_client)
+                    .unwrap_or_else(|| panic!("base {base} has no bus port"));
+                assert!(
+                    highest_bus < AUTO_CEILING,
+                    "count {count} at base {base} puts bus port {highest_bus} \
+                     in the ephemeral pool"
+                );
+            }
+            assert_eq!(yielded, 64, "every attempt should yield a candidate");
+        }
+    }
+
+    #[test]
+    fn candidates_do_not_repeat_in_order() {
+        // Sequential candidates would make two processes starting together
+        // walk the same numbers in the same order and collide on every one.
+        let candidates: Vec<u16> = candidate_base_ports(6, 32).collect();
+        let unique: std::collections::HashSet<u16> = candidates.iter().copied().collect();
+        assert!(
+            unique.len() > candidates.len() / 2,
+            "candidates should be spread out, got {candidates:?}"
+        );
+        assert!(
+            candidates.windows(2).any(|w| w[1] != w[0] + 1),
+            "candidates should not be a sequential walk"
+        );
+    }
+
+    #[test]
+    fn a_run_that_would_overlap_its_own_bus_range_yields_no_candidates() {
+        // Past the bus offset the client ports reach into where the bus ports
+        // start, and moving the base does not help.
+        assert_eq!(candidate_base_ports(BUS_OFFSET + 1, 8).count(), 0);
+    }
+
+    #[test]
+    fn every_candidate_range_is_disjoint_from_its_bus_range() {
+        for count in [1u16, 3, 500, BUS_OFFSET] {
+            for base in candidate_base_ports(count, 16) {
+                let last_client = base + count - 1;
+                let first_bus = base + BUS_OFFSET;
+                assert!(
+                    last_client < first_bus,
+                    "count {count} at base {base}: client range reaches {last_client}, \
+                     bus range starts at {first_bus}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_cluster_too_large_to_place_yields_no_candidates() {
+        // Larger than the window between the floor and the ceiling. Better to
+        // yield nothing than to hand back a range that runs into the
+        // ephemeral pool.
+        let count = AUTO_CEILING - BUS_OFFSET - AUTO_BASE_MIN + 1;
+        assert_eq!(candidate_base_ports(count, 8).count(), 0);
+    }
+
+    #[test]
+    fn an_occupied_port_anywhere_in_the_range_rejects_the_whole_range() {
+        // One allocation decision, not a partial start: a cluster that can
+        // only get some of its ports has not got its ports.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let occupied = listener.local_addr().unwrap().port();
+
+        // The occupied port sits in the middle of the requested range.
+        let base = occupied - 2;
+        assert!(
+            !port_range_available("127.0.0.1", base, 5, false),
+            "a live listener at {occupied} must reject the range from {base}"
+        );
+        drop(listener);
+    }
+
+    #[test]
+    fn an_occupied_bus_port_rejects_the_range_too() {
+        // The failure that a client-only check would miss. The client ports
+        // are all free; the bus port one of them derives is not.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let occupied_bus = listener.local_addr().unwrap().port();
+
+        let Some(base) = occupied_bus.checked_sub(BUS_OFFSET) else {
+            // No client port derives this bus port, so there is nothing to
+            // assert. Ephemeral ports are well above the offset in practice.
+            drop(listener);
+            return;
+        };
+
+        assert!(
+            !port_range_available("127.0.0.1", base, 1, true),
+            "a live listener on bus port {occupied_bus} must reject base {base}"
+        );
+
+        // The same range is fine when bus ports are not derived, which is what
+        // an explicit cluster-port means. Conditional because `base` is
+        // wherever the OS put the listener minus 10000, and this makes no
+        // claim about what else on the machine might be sitting there.
+        if port_available("127.0.0.1", base) {
+            assert!(
+                port_range_available("127.0.0.1", base, 1, false),
+                "with bus ports out of the picture, the free client port \
+                 {base} should read as available"
+            );
+        }
+        drop(listener);
+    }
+
+    #[test]
+    fn a_free_range_reads_as_available() {
+        with_free_port(
+            |port| port_range_available("127.0.0.1", port, 1, false),
+            "a range of one free port must read as available",
+        );
     }
 
     #[test]
