@@ -3,9 +3,10 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Output;
+use std::process::{Output, Stdio};
 use std::time::Duration;
 
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tracing::Instrument;
 
@@ -828,8 +829,15 @@ impl RedisServer {
     /// With daemonizing on, `redis-server` forks and its parent exits 0 before
     /// the child has attempted to bind, so a failure to bind the port is not
     /// visible in the exit status of the process the wrapper spawned. Setting
-    /// this to `false` keeps the server in the foreground, which makes bind
-    /// failures surface synchronously from [`start`](Self::start).
+    /// this to `false` keeps `redis-server` as a child of the calling process,
+    /// in its own process group, which makes bind failures surface
+    /// synchronously from [`start`](Self::start): [`start`](Self::start)
+    /// still waits for readiness and returns a handle the same way either
+    /// mode, but a foreground process that exits before becoming ready is
+    /// caught directly rather than inferred from a daemonizing parent's exit
+    /// code, and the returned [`Error::ServerStart`] carries its captured
+    /// stdout/stderr. The handle reaps the child when it stops, so the
+    /// foreground process never outlives it as a zombie.
     pub fn daemonize(mut self, daemonize: bool) -> Self {
         self.config.daemonize = daemonize;
         self
@@ -2238,13 +2246,14 @@ impl RedisServer {
                 [(self.config.port, crate::preflight::PortRole::Server)],
             )?;
 
-            let (cli, pid) =
+            let (cli, pid, child) =
                 launch_server(&self.config, &node_dir, Duration::from_secs(10)).await?;
 
             Ok(RedisServerHandle {
                 config: self.config,
                 cli,
                 pid,
+                child: std::sync::Mutex::new(child),
                 detached: false,
                 stopped: std::sync::atomic::AtomicBool::new(false),
                 lock: std::sync::Mutex::new(Some(lock)),
@@ -2988,7 +2997,10 @@ fn attach_log_tail(err: Error, log_path: &std::path::Path) -> Error {
 
 /// Write `config`'s conf file into `node_dir`, launch `redis-server` against
 /// it, wait for it to answer `PING`, and return a [`RedisCli`] wired up for
-/// it plus the pid it wrote to `redis.pid`.
+/// it, the pid, and -- for a foreground (`daemonize(false)`) launch -- the
+/// [`tokio::process::Child`] the wrapper owns. The daemonized path returns
+/// `None` for the child: the process the wrapper spawned there is the
+/// forking parent, already exited by the time this returns, not the server.
 ///
 /// Shared by [`RedisServer::start`] and [`RedisServerHandle::restart`] so a
 /// restart relaunches through the exact same path a fresh start does instead
@@ -2997,7 +3009,7 @@ async fn launch_server(
     config: &RedisServerConfig,
     node_dir: &std::path::Path,
     ready_timeout: Duration,
-) -> Result<(RedisCli, u32)> {
+) -> Result<(RedisCli, u32, Option<tokio::process::Child>)> {
     let log_path = resolve_log_path(config, node_dir);
     let start = std::time::Instant::now();
 
@@ -3017,37 +3029,15 @@ async fn launch_server(
     } else {
         crate::stack::detect_stack_modules(&config.redis_server_bin)
     };
-    // `.output()` (not `.status()` with the streams nulled) so that a
-    // config-parse error -- which redis-server prints to its own
-    // stdout/stderr and exits on *before* it daemonizes and opens the
-    // logfile -- is captured here rather than lost. Once redis-server
-    // successfully daemonizes, this call still returns promptly: the parent
-    // process exits as soon as the child detaches.
-    let output = Command::new(&config.redis_server_bin)
-        .arg(&conf_path)
-        .args(&module_args)
-        .output()
-        .await?;
-    tracing::debug!(elapsed_ms = start.elapsed().as_millis() as u64, "spawned");
-
-    if !output.status.success() {
-        let detail = spawn_failure_detail(&log_path, Some(&output));
-        tracing::error!(
-            port = config.port,
-            log_path = %log_path.display(),
-            log_tail = detail.as_deref().unwrap_or(""),
-            "server_start_failed"
-        );
-        return Err(Error::ServerStart {
-            port: config.port,
-            detail,
-        });
-    }
 
     // The plain `port` always speaks unencrypted Redis protocol; `tls-port`
     // is the only listener that speaks TLS. When the plain port is
     // disabled (0), the server is only reachable over `tls-port`, so the
     // admin CLI must connect there with TLS enabled instead.
+    //
+    // Built once, ahead of the daemonize/foreground split below, so both
+    // paths hand back the exact same `cli` -- the foreground path also needs
+    // it in hand before it can race readiness against the child exiting.
     let tls_only = config.port == 0;
     let admin_port = if tls_only {
         config.tls_port.unwrap_or(config.port)
@@ -3076,43 +3066,181 @@ async fn launch_server(
         }
     }
 
-    cli.wait_for_ready(ready_timeout).await.map_err(|e| {
-        tracing::error!(port = config.port, log_path = %log_path.display(), "server_ready_wait_failed");
-        attach_log_tail(e, &log_path)
-    })?;
-    tracing::debug!(elapsed_ms = start.elapsed().as_millis() as u64, "ready");
+    let (pid, child) = if config.daemonize {
+        // `.output()` (not `.status()` with the streams nulled) so that a
+        // config-parse error -- which redis-server prints to its own
+        // stdout/stderr and exits on *before* it daemonizes and opens the
+        // logfile -- is captured here rather than lost. Once redis-server
+        // successfully daemonizes, this call still returns promptly: the
+        // parent process exits as soon as the child detaches.
+        let output = Command::new(&config.redis_server_bin)
+            .arg(&conf_path)
+            .args(&module_args)
+            .output()
+            .await?;
+        tracing::debug!(elapsed_ms = start.elapsed().as_millis() as u64, "spawned");
 
-    let pid_path = node_dir.join("redis.pid");
-    let pid: u32 = {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        loop {
-            if let Ok(s) = fs::read_to_string(&pid_path)
-                && let Ok(p) = s.trim().parse::<u32>()
-            {
-                break p;
+        if !output.status.success() {
+            let detail = spawn_failure_detail(&log_path, Some(&output));
+            tracing::error!(
+                port = config.port,
+                log_path = %log_path.display(),
+                log_tail = detail.as_deref().unwrap_or(""),
+                "server_start_failed"
+            );
+            return Err(Error::ServerStart {
+                port: config.port,
+                detail,
+            });
+        }
+
+        cli.wait_for_ready(ready_timeout).await.map_err(|e| {
+            tracing::error!(port = config.port, log_path = %log_path.display(), "server_ready_wait_failed");
+            attach_log_tail(e, &log_path)
+        })?;
+        tracing::debug!(elapsed_ms = start.elapsed().as_millis() as u64, "ready");
+
+        let pid_path = node_dir.join("redis.pid");
+        let pid: u32 = {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            loop {
+                if let Ok(s) = fs::read_to_string(&pid_path)
+                    && let Ok(p) = s.trim().parse::<u32>()
+                {
+                    break p;
+                }
+                if std::time::Instant::now() >= deadline {
+                    let detail = spawn_failure_detail(&log_path, None);
+                    tracing::error!(
+                        port = config.port,
+                        log_path = %log_path.display(),
+                        log_tail = detail.as_deref().unwrap_or(""),
+                        "server_pidfile_wait_failed"
+                    );
+                    return Err(Error::ServerStart {
+                        port: config.port,
+                        detail,
+                    });
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-            if std::time::Instant::now() >= deadline {
-                let detail = spawn_failure_detail(&log_path, None);
+        };
+        tracing::debug!(
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "pidfile_read"
+        );
+
+        (pid, None)
+    } else {
+        // Foreground: the process this spawns is the server itself rather
+        // than a forking parent, so `.output()` would wait for it to exit,
+        // which never happens while it is healthy (#181). `spawn()` it
+        // instead and race its own early exit against readiness.
+        //
+        // `process_group(0)` makes it the leader of its own process group,
+        // the position a daemonized server ends up in too (via `setsid`
+        // inside redis-server). Without it, this process would share the
+        // caller's group, receive signals meant for the caller, and sit
+        // outside what [`crate::process::force_kill`]'s process-group
+        // escalation expects to reach.
+        //
+        // stdout/stderr are piped, not inherited, so a config-parse error --
+        // printed before the logfile opens, same as the daemonizing path --
+        // is captured for [`spawn_failure_detail`] instead of leaking into
+        // the caller's own output. stdin is nulled since nothing here ever
+        // writes to it.
+        let mut child = Command::new(&config.redis_server_bin)
+            .arg(&conf_path)
+            .args(&module_args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()?;
+        tracing::debug!(elapsed_ms = start.elapsed().as_millis() as u64, "spawned");
+
+        let pid = tokio::select! {
+            status = child.wait() => {
+                // Exited before answering PING. Collect what it printed and
+                // report it the same way a daemonizing parent's non-zero
+                // exit does.
+                let status = status?;
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                if let Some(mut out) = child.stdout.take() {
+                    let _ = out.read_to_end(&mut stdout).await;
+                }
+                if let Some(mut err) = child.stderr.take() {
+                    let _ = err.read_to_end(&mut stderr).await;
+                }
+                let output = Output { status, stdout, stderr };
+                let detail = spawn_failure_detail(&log_path, Some(&output));
                 tracing::error!(
                     port = config.port,
                     log_path = %log_path.display(),
                     log_tail = detail.as_deref().unwrap_or(""),
-                    "server_pidfile_wait_failed"
+                    "server_start_failed"
                 );
                 return Err(Error::ServerStart {
                     port: config.port,
                     detail,
                 });
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-    };
-    tracing::debug!(
-        elapsed_ms = start.elapsed().as_millis() as u64,
-        "pidfile_read"
-    );
+            result = cli.wait_for_ready(ready_timeout) => {
+                match result {
+                    Ok(()) => {
+                        tracing::debug!(elapsed_ms = start.elapsed().as_millis() as u64, "ready");
+                        match child.id() {
+                            Some(pid) => pid,
+                            None => {
+                                // Reaped by something else between becoming
+                                // ready and this read; nothing else here
+                                // calls wait() on it, so this should not
+                                // happen in practice.
+                                let detail = spawn_failure_detail(&log_path, None);
+                                return Err(Error::ServerStart {
+                                    port: config.port,
+                                    detail,
+                                });
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(port = config.port, log_path = %log_path.display(), "server_ready_wait_failed");
+                        // Reap it before returning: an exited-but-unreaped
+                        // child is a zombie, and pid_alive (kill -0) reports
+                        // a zombie as alive, which would send a stop down
+                        // this path for a process no longer running.
+                        let _ = child.start_kill();
+                        let _ = child.wait().await;
+                        return Err(attach_log_tail(e, &log_path));
+                    }
+                }
+            }
+        };
 
-    Ok((cli, pid))
+        // Readiness is confirmed and the pid is in hand; nothing here reads
+        // stdout/stderr again, so let them fill without a reader and the
+        // server would eventually block writing to a full pipe. Draining
+        // them to nothing in the background keeps that from ever mattering,
+        // rather than relying on redis ignoring SIGPIPE from a dropped pipe.
+        if let Some(mut out) = child.stdout.take() {
+            tokio::spawn(async move {
+                let mut discard = Vec::new();
+                let _ = out.read_to_end(&mut discard).await;
+            });
+        }
+        if let Some(mut err) = child.stderr.take() {
+            tokio::spawn(async move {
+                let mut discard = Vec::new();
+                let _ = err.read_to_end(&mut discard).await;
+            });
+        }
+
+        (pid, Some(child))
+    };
+
+    Ok((cli, pid, child))
 }
 
 /// Handle to a running Redis server. Stops the server on Drop.
@@ -3120,6 +3248,20 @@ pub struct RedisServerHandle {
     config: RedisServerConfig,
     cli: RedisCli,
     pid: u32,
+    /// The child process, for a foreground (`daemonize(false)`) server.
+    ///
+    /// `None` for the default daemonizing path, where the process the
+    /// wrapper spawned is the forking parent, not the server, and has
+    /// already exited by the time [`launch_server`] returns.
+    ///
+    /// Held rather than discarded so [`Self::stop`] can reap it with
+    /// `try_wait`: an exited-but-unreaped child is a zombie, and
+    /// [`crate::process::pid_alive`] (`kill -0`) reports a zombie as alive,
+    /// which would wrongly escalate a clean exit into
+    /// [`crate::process::force_kill`] and [`crate::process::kill_by_port`].
+    /// A `Mutex` for the same reason `lock` below is one: `stop` takes
+    /// `&self`, since [`Drop`] can only call through a shared reference.
+    child: std::sync::Mutex<Option<tokio::process::Child>>,
     detached: bool,
     /// Whether this handle has already stopped its process.
     ///
@@ -3381,13 +3523,21 @@ impl RedisServerHandle {
     ///
     /// 1. Sends `SHUTDOWN NOSAVE` via `redis-cli` for a graceful shutdown.
     /// 2. Waits 500ms for the process to exit.
-    /// 3. If still alive, calls [`crate::process::force_kill`] (SIGTERM then SIGKILL).
-    /// 4. Attempts to release the port via [`crate::process::kill_by_port`] as a final safety net.
-    /// 5. Releases the owner lock, now that the process is confirmed gone: the
+    /// 3. Reaps this handle's [`tokio::process::Child`], for a foreground
+    ///    (`daemonize(false)`) server -- a no-op for the daemonizing default,
+    ///    which never held one. A child that already exited settles the
+    ///    liveness check below directly rather than going through
+    ///    [`crate::process::pid_alive`], which cannot tell an unreaped
+    ///    zombie from a live process.
+    /// 4. If still alive, calls [`crate::process::force_kill`] (SIGTERM then
+    ///    SIGKILL), then reaps the child again so none survives this handle
+    ///    as a zombie.
+    /// 5. Attempts to release the port via [`crate::process::kill_by_port`] as a final safety net.
+    /// 6. Releases the owner lock, now that the process is confirmed gone: the
     ///    file is emptied (marking a clean release) and then unlocked, never
     ///    removed, so a later start on the same port and `dir` opens the same
     ///    file rather than racing to create a new one.
-    /// 6. For an `auto_port` handle, removes the `auto-<pid>-<n>` directory
+    /// 7. For an `auto_port` handle, removes the `auto-<pid>-<n>` directory
     ///    [`RedisServer::auto_port`] created for it, but only if the pid is
     ///    now confirmed dead -- if it is still alive, the directory is kept
     ///    rather than removed out from under a process that may still be
@@ -3416,15 +3566,51 @@ impl RedisServerHandle {
         // Step 2: grace period.
         std::thread::sleep(std::time::Duration::from_millis(500));
 
+        // Reap the child now, for a foreground (`daemonize(false)`) server.
+        // Taken out of the `Mutex` for good -- this handle is stopping for
+        // good too, past the swap-guard above, so there is no later point
+        // that still needs it back. `None` here (the daemonizing default,
+        // and the unit-test helper) leaves `child` empty and this a no-op.
+        let mut child = self.child.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let reaped_already = child
+            .as_mut()
+            .and_then(|c| c.try_wait().ok().flatten())
+            .is_some();
+
         // Whether the graceful path worked decides everything below. A server
         // that exited on request took its listener with it; one that did not
         // may have left children holding the port.
-        let shutdown_failed = crate::process::pid_alive(self.pid);
+        //
+        // A child already reaped above settles this directly: `pid_alive`
+        // (`kill -0`) cannot tell an exited-but-unreaped zombie from a live
+        // process, and once reaped there is no pid left for it to see either
+        // way, so asking it would only be a slower way to reach the same
+        // answer at best -- and a wrong one if the pid has already been
+        // recycled by the OS for something else.
+        let shutdown_failed = if reaped_already {
+            false
+        } else {
+            crate::process::pid_alive(self.pid)
+        };
 
         // Step 3: force kill if still alive.
         if shutdown_failed {
             tracing::warn!(pid = self.pid, "force_kill_escalation");
             crate::process::force_kill(self.pid);
+
+            // Reap it before this handle finishes stopping, so no zombie
+            // outlives it: this runs from Drop, so there is no later point
+            // to try again. A short bounded poll rather than a blocking
+            // `wait` -- `force_kill` already ran its own grace period, so
+            // the process is normally already gone by the time this runs.
+            if let Some(mut c) = child.take() {
+                for _ in 0..20 {
+                    if c.try_wait().ok().flatten().is_some() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
         }
 
         // Step 4: port cleanup, but only after a shutdown that did not work.
@@ -3509,9 +3695,22 @@ impl RedisServerHandle {
             let node_dir = self.config.dir.join(format!("node-{}", self.config.port));
             let _ = fs::remove_file(node_dir.join("redis.pid"));
 
-            let (cli, pid) = launch_server(&self.config, &node_dir, timeout).await?;
+            // Best-effort reap of whatever this handle held before: a
+            // foreground child killed out-of-band (e.g. chaos::kill_node's
+            // SIGKILL, sent by pid rather than through this Child) has
+            // already exited by the time restart runs, and try_wait picks
+            // that up without blocking. Replacing the field below without
+            // this would still drop the old Child, but a dropped Child does
+            // not reap on its own -- it would sit as a zombie until this
+            // process exits.
+            if let Some(mut old) = self.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let _ = old.try_wait();
+            }
+
+            let (cli, pid, child) = launch_server(&self.config, &node_dir, timeout).await?;
             self.cli = cli;
             self.pid = pid;
+            *self.child.lock().unwrap_or_else(|e| e.into_inner()) = child;
             Ok(())
         }
         .instrument(span)
@@ -4093,6 +4292,8 @@ mod tests {
             config,
             cli: RedisCli::new(),
             pid: 0,
+            // Never a real process; nothing for stop to reap.
+            child: std::sync::Mutex::new(None),
             // Never a real process; avoid Drop trying to stop it.
             detached: true,
             stopped: std::sync::atomic::AtomicBool::new(false),
