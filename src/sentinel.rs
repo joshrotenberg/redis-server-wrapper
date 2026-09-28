@@ -84,6 +84,110 @@ struct MonitoredMaster {
     expected_replicas: u16,
 }
 
+/// Tracks sentinels spawned so far during [`RedisSentinelBuilder::start_inner`].
+///
+/// `start_inner` used to collect started sentinels as plain `(port, pid,
+/// cli)` tuples in a `Vec`. Those tuples had no [`Drop`], so a later sentinel
+/// failing -- a dir or conf write error, a non-zero spawn exit, a readiness
+/// timeout, or a pidfile wait timeout -- made `start` return early and just
+/// dropped the `Vec`, leaving every sentinel already started running as an
+/// orphaned daemon. This guard is pushed into immediately after each
+/// sentinel is spawned, and its [`Drop`] stops everything still in it: only
+/// a successful topology calls [`Self::disarm`] to empty it first.
+struct StartedSentinels {
+    entries: Vec<StartedSentinel>,
+}
+
+/// One sentinel spawned during `start_inner`, tracked by [`StartedSentinels`]
+/// until the topology either finishes starting or fails.
+struct StartedSentinel {
+    port: u16,
+    /// The `sentinel-<port>` directory this sentinel owns, removed on
+    /// teardown once its process is confirmed gone.
+    dir: PathBuf,
+    pidfile: PathBuf,
+    cli: RedisCli,
+    /// Known once the pidfile has been read; `None` for a sentinel whose
+    /// readiness or pidfile wait never completed.
+    pid: Option<u32>,
+}
+
+impl StartedSentinels {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, entry: StartedSentinel) {
+        self.entries.push(entry);
+    }
+
+    /// Record the pid for the most recently pushed sentinel, once its
+    /// pidfile has been read.
+    fn record_pid(&mut self, pid: u32) {
+        if let Some(last) = self.entries.last_mut() {
+            last.pid = Some(pid);
+        }
+    }
+
+    /// Hand the entries to a successful start, emptying `self` so `Drop`
+    /// finds nothing left to tear down.
+    fn disarm(mut self) -> Vec<StartedSentinel> {
+        std::mem::take(&mut self.entries)
+    }
+}
+
+impl Drop for StartedSentinels {
+    fn drop(&mut self) {
+        if self.entries.is_empty() {
+            return;
+        }
+        tracing::warn!(
+            count = self.entries.len(),
+            "sentinel_start_failed_stopping_started_sentinels"
+        );
+        // Graceful shutdown first, same escalation order as
+        // RedisSentinelHandle::stop: ask nicely, then reclaim.
+        for entry in &self.entries {
+            entry.cli.shutdown();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        // reclaim_from_pidfile only signals a live Redis process named by
+        // our own pidfile, so this can't reach anything we didn't start.
+        for entry in &self.entries {
+            if let Some(pid) = crate::process::reclaim_from_pidfile(&entry.pidfile) {
+                tracing::debug!(
+                    pid,
+                    port = entry.port,
+                    "reclaimed_partially_started_sentinel"
+                );
+            }
+        }
+        // Only remove a sentinel's directory once its process is confirmed
+        // gone (or was never known and left no pidfile behind), so a
+        // still-running sentinel never loses the pidfile and conf it needs.
+        for entry in &self.entries {
+            let pid = entry
+                .pid
+                .or_else(|| crate::process::read_pidfile(&entry.pidfile));
+            let safe_to_remove = match pid {
+                Some(pid) => !crate::process::pid_alive(pid),
+                None => !entry.pidfile.exists(),
+            };
+            if safe_to_remove {
+                let _ = std::fs::remove_dir_all(&entry.dir);
+            } else {
+                tracing::warn!(
+                    port = entry.port,
+                    dir = %entry.dir.display(),
+                    "not_removing_sentinel_dir_process_may_still_be_alive"
+                );
+            }
+        }
+    }
+}
+
 impl RedisSentinelBuilder {
     /// Set the name of the monitored master (default: `"mymaster"`).
     pub fn master_name(mut self, name: impl Into<String>) -> Self {
@@ -852,7 +956,13 @@ impl RedisSentinelBuilder {
         );
 
         // 3. Start sentinels.
-        let mut sentinel_handles = Vec::new();
+        //
+        // Each sentinel is pushed into `started_sentinels` right after it is
+        // spawned, before its readiness or pidfile wait, so an early return
+        // from any step below -- this sentinel's own wait timing out, or a
+        // later sentinel's dir/conf write failing -- drops the guard and
+        // stops everything spawned so far. See `StartedSentinels`.
+        let mut started_sentinels = StartedSentinels::new();
         for port in self.sentinel_ports() {
             let dir = base_dir.join(format!("sentinel-{port}"));
             crate::secure_file::create_dir_all(&dir)?;
@@ -865,6 +975,13 @@ impl RedisSentinelBuilder {
             let conf = self.sentinel_conf(port, &dir, &logfile, &monitored_masters);
             crate::secure_file::write(&conf_path, conf)?;
 
+            let cli = self.apply_tls_to_cli(
+                RedisCli::new()
+                    .bin(&self.redis_cli_bin)
+                    .host(&self.bind)
+                    .port(port),
+            );
+
             let status = Command::new(&self.redis_server_bin)
                 .arg(&conf_path)
                 .arg("--sentinel")
@@ -873,24 +990,29 @@ impl RedisSentinelBuilder {
                 .status()
                 .await?;
 
+            // Pushed even on a non-zero exit: a daemonizing redis-server
+            // forks before its parent's exit status is known, so the child
+            // can be up and running regardless of what the parent reported.
+            let pidfile = dir.join("sentinel.pid");
+            started_sentinels.push(StartedSentinel {
+                port,
+                dir: dir.clone(),
+                pidfile: pidfile.clone(),
+                cli: cli.clone(),
+                pid: None,
+            });
+
             if !status.success() {
                 tracing::error!(port, "sentinel_start_failed");
                 return Err(Error::SentinelStart { port });
             }
 
-            let cli = self.apply_tls_to_cli(
-                RedisCli::new()
-                    .bin(&self.redis_cli_bin)
-                    .host(&self.bind)
-                    .port(port),
-            );
             cli.wait_for_ready(Duration::from_secs(10)).await?;
 
-            let pid_path = dir.join("sentinel.pid");
             let pid: u32 = {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
                 loop {
-                    if let Ok(s) = fs::read_to_string(&pid_path)
+                    if let Ok(s) = fs::read_to_string(&pidfile)
                         && let Ok(p) = s.trim().parse::<u32>()
                     {
                         break p;
@@ -902,20 +1024,26 @@ impl RedisSentinelBuilder {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
             };
-
-            sentinel_handles.push((port, pid, cli));
+            started_sentinels.record_pid(pid);
         }
         tracing::debug!(
             elapsed_ms = start_time.elapsed().as_millis() as u64,
-            sentinels = sentinel_handles.len(),
+            sentinels = started_sentinels.entries.len(),
             "sentinels_started"
         );
+
+        // Every sentinel is up: disarm the guard so its Drop no longer tears
+        // anything down, and fold its entries into the handle.
+        let started_sentinels = started_sentinels.disarm();
 
         let handle = RedisSentinelHandle {
             master,
             replicas,
-            sentinel_ports: sentinel_handles.iter().map(|(p, _, _)| *p).collect(),
-            sentinel_pids: sentinel_handles.iter().map(|(_, pid, _)| *pid).collect(),
+            sentinel_ports: started_sentinels.iter().map(|e| e.port).collect(),
+            sentinel_pids: started_sentinels
+                .iter()
+                .map(|e| e.pid.expect("pid recorded before a sentinel is disarmed"))
+                .collect(),
             master_name: self.master_name,
             bind: self.bind,
             redis_cli_bin: self.redis_cli_bin,
