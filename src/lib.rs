@@ -233,6 +233,8 @@ pub mod error;
 #[cfg(feature = "tokio")]
 pub mod fault_proxy;
 pub mod modules;
+#[cfg(feature = "tokio")]
+mod owner_lock;
 pub mod preflight;
 pub mod process;
 mod secure_file;
