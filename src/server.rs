@@ -2195,27 +2195,34 @@ impl RedisServer {
 
             let node_dir = self.config.dir.join(format!("node-{}", self.config.port));
 
-            // Clean up any stale process from a previous run before (re)creating
-            // the node directory. This handles test crashes that leave orphaned
-            // redis-server processes behind.
-            let stale_pidfile = node_dir.join("redis.pid");
-            if let Some(stale_pid) = crate::process::read_pidfile(&stale_pidfile)
-                && crate::process::pid_alive(stale_pid)
-            {
-                tracing::debug!(pid = stale_pid, "stale_pid_kill");
-                crate::process::force_kill(stale_pid);
-            }
+            // Claim the node directory before anything else touches it. The
+            // default `dir` is shared by every process on the machine, so
+            // without this a live server on the same port could have its
+            // pidfile read and force-killed by a second start that has no
+            // way to tell "another process's live server" from "a crashed
+            // run's leftover". The lock is an advisory flock held for the
+            // life of the handle rather than a file whose mere existence
+            // means "taken": the kernel drops it the instant a holder exits,
+            // crashed or clean, so a live owner (including another handle in
+            // this same process) is reported as `PortInUse` here, before the
+            // port preflight even runs, and a crashed owner's orphaned
+            // redis-server is reclaimed through `process::reclaim_from_pidfile`,
+            // which confirms the pid is actually Redis before signalling it.
+            let lock = crate::owner_lock::OwnerLock::acquire(
+                &node_dir,
+                &self.config.bind,
+                self.config.port,
+            )?;
 
-            // Anything still holding the port after that is not ours: the pidfile
-            // above is the only claim of ownership the wrapper has. Fail with the
-            // port named rather than letting redis-server fail to bind, which a
-            // daemonizing start would not even report.
+            // Anything still holding the port after that is not ours: the lock
+            // above is the only claim of ownership the wrapper has, and it
+            // already ruled out a live owner. Fail with the port named rather
+            // than letting redis-server fail to bind, which a daemonizing
+            // start would not even report.
             crate::preflight::ensure_ports_available(
                 &self.config.bind,
                 [(self.config.port, crate::preflight::PortRole::Server)],
             )?;
-
-            crate::secure_file::create_dir_all(&node_dir)?;
 
             let (cli, pid) =
                 launch_server(&self.config, &node_dir, Duration::from_secs(10)).await?;
@@ -2226,6 +2233,7 @@ impl RedisServer {
                 pid,
                 detached: false,
                 stopped: std::sync::atomic::AtomicBool::new(false),
+                lock: std::sync::Mutex::new(Some(lock)),
             })
         }
         .instrument(span)
@@ -3104,6 +3112,13 @@ pub struct RedisServerHandle {
     /// the result. Without it a handle stopped explicitly stops again on
     /// drop, and by then the port may belong to something else.
     stopped: std::sync::atomic::AtomicBool,
+    /// The node directory's owner lock, held for the handle's lifetime.
+    ///
+    /// `None` for handles that never took one (the unit-test helper below).
+    /// Wrapped in a `Mutex` so [`Self::stop`] -- which takes `&self`, since
+    /// [`Drop`] can only call through a shared reference -- can still take
+    /// the lock out and release it.
+    lock: std::sync::Mutex<Option<crate::owner_lock::OwnerLock>>,
 }
 
 impl RedisServerHandle {
@@ -3313,8 +3328,19 @@ impl RedisServerHandle {
     }
 
     /// Consume the handle without stopping the server.
+    ///
+    /// The owner lock's file is not removed: it is rewritten to record this
+    /// server's pid directly (a `detached <pid>` marker) and then unlocked,
+    /// so a later start on the same port and `dir` opens the same file,
+    /// takes the now-free flock, and reads that marker -- recognizing the
+    /// server as owned (by this now-unmanaged process, not by a wrapper
+    /// process) and refusing to touch it while it is still alive and still
+    /// Redis.
     pub fn detach(mut self) {
         self.detached = true;
+        if let Some(lock) = self.lock.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            lock.mark_detached(self.pid);
+        }
     }
 
     /// Stop the server via an escalating shutdown strategy.
@@ -3323,6 +3349,10 @@ impl RedisServerHandle {
     /// 2. Waits 500ms for the process to exit.
     /// 3. If still alive, calls [`crate::process::force_kill`] (SIGTERM then SIGKILL).
     /// 4. Attempts to release the port via [`crate::process::kill_by_port`] as a final safety net.
+    /// 5. Releases the owner lock, now that the process is confirmed gone: the
+    ///    file is emptied (marking a clean release) and then unlocked, never
+    ///    removed, so a later start on the same port and `dir` opens the same
+    ///    file rather than racing to create a new one.
     ///
     /// Synchronous and called from [`Drop`], so this enters its span with a
     /// guard rather than `.instrument()` -- there is no `.await` in this
@@ -3377,6 +3407,14 @@ impl RedisServerHandle {
         if shutdown_failed {
             tracing::debug!(port = self.config.port, "port_cleanup");
             crate::process::kill_by_port(self.config.port);
+        }
+
+        // Step 5: release the owner lock, if this handle still holds one.
+        // The lock lives behind a Mutex only so this `&self` method can take
+        // it out. `unwrap_or_else` rather than `unwrap`: a poisoned mutex
+        // must not panic here, since this runs from Drop.
+        if let Some(lock) = self.lock.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            lock.release();
         }
     }
 
@@ -4002,6 +4040,8 @@ mod tests {
             // Never a real process; avoid Drop trying to stop it.
             detached: true,
             stopped: std::sync::atomic::AtomicBool::new(false),
+            // Never took a lock; nothing for Drop to release.
+            lock: std::sync::Mutex::new(None),
         }
     }
 
