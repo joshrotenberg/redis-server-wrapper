@@ -861,6 +861,23 @@ impl RedisClusterBuilder {
 
         let cluster_base = self.base_dir();
 
+        // Claim the topology's base directory before reclaiming anything in
+        // it. Without this, a second concurrent start of the same shape
+        // cannot tell a crashed run's orphans from the nodes a live topology
+        // (another process, or another handle in this process) is using
+        // right now, and would force-kill them out from under it. A live
+        // owner is reported as `PortInUse` here, before reclaim or the port
+        // preflight even run. `acquire`'s crash path also tries to reclaim
+        // `cluster_base.join("redis.pid")`, which never exists for a
+        // topology's base dir (each node's pidfile is nested under its own
+        // `node-<port>` directory instead) -- harmless, just a no-op.
+        let lock = crate::owner_lock::OwnerLock::acquire(
+            &cluster_base,
+            &self.bind,
+            self.base_port,
+            crate::preflight::PortRole::ClusterNode,
+        )?;
+
         // Reclaim before the preflight, not after: a leftover node of our own
         // still holds its port, so the preflight would reject the topology on
         // the strength of a process we are entitled to stop.
@@ -1115,6 +1132,7 @@ impl RedisClusterBuilder {
                 ca_cert_file: self.tls_ca_cert_file,
             },
             cluster_base,
+            lock: std::sync::Mutex::new(Some(lock)),
         };
 
         // `CLUSTER CREATE` returns once the nodes have been told about each
@@ -1184,6 +1202,13 @@ pub struct RedisClusterHandle {
     tls: TlsConfig,
     /// Unique per-invocation base directory holding all node working directories.
     cluster_base: PathBuf,
+    /// Owner lock on `cluster_base`, held for the life of this handle so a
+    /// second start of the same topology sees a live owner rather than
+    /// reclaiming (and killing) this one's nodes. `None` only for handles
+    /// that never took a lock (there are none in normal use; the `Mutex`
+    /// mirrors [`crate::server::RedisServerHandle`]'s so it can be taken by
+    /// `&self` from [`Drop`]).
+    lock: std::sync::Mutex<Option<crate::owner_lock::OwnerLock>>,
 }
 
 /// Entry point for building a Redis Cluster topology.
@@ -1565,7 +1590,21 @@ impl RedisClusterHandle {
 
 impl Drop for RedisClusterHandle {
     fn drop(&mut self) {
-        // RedisServerHandle::drop() handles each node.
+        // Stop every node now, explicitly, rather than letting them drop as
+        // a side effect of this struct's own fields dropping after this
+        // function returns: the owner lock below must not release until
+        // every process this topology started is confirmed gone, and that
+        // ordering only holds if the nodes are stopped first, in this scope.
+        for node in &self.nodes {
+            node.stop();
+        }
+
+        // Release the topology's owner lock now that its nodes are stopped,
+        // so a later start of the same shape (by this or another process)
+        // sees the lock free rather than a live owner.
+        if let Some(lock) = self.lock.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            lock.release();
+        }
     }
 }
 
