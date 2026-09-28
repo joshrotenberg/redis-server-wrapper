@@ -3124,12 +3124,18 @@ pub struct RedisServerHandle {
 impl RedisServerHandle {
     /// The server's address as "host:port".
     pub fn addr(&self) -> String {
-        format!("{}:{}", self.config.bind, self.config.port)
+        format!("{}:{}", self.config.bind, self.port())
     }
 
-    /// The server's port.
+    /// The server's port: the plain listening port, or, when that is
+    /// disabled (`0`) in favor of a TLS-only listener, the `tls-port` the
+    /// server is actually reachable on.
     pub fn port(&self) -> u16 {
-        self.config.port
+        if self.config.port == 0 {
+            self.config.tls_port.unwrap_or(self.config.port)
+        } else {
+            self.config.port
+        }
     }
 
     /// Path to the node directory the wrapper generated for this server.
