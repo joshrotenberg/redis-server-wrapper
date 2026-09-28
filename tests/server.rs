@@ -1,4 +1,4 @@
-use redis_server_wrapper::{Error, LogLevel, RedisServer, chaos, server};
+use redis_server_wrapper::{Error, LogLevel, RedisServer, chaos, process, server};
 use std::fs;
 use std::time::Duration;
 
@@ -329,6 +329,97 @@ async fn start_failure_surfaces_log_tail_in_error() {
         message.contains("thisisnotarealdirective") || message.contains("Unresolved"),
         "expected the log tail in the error message, got: {message}"
     );
+}
+
+// -- daemonize(false) (#181) --
+
+/// `daemonize(false)` keeps `redis-server` as a foreground child instead of
+/// letting it fork, so `start` has to race its own readiness probe against
+/// the child exiting rather than reading a daemonizing parent's exit status.
+/// Wrapped in a bounded timeout: before this fix, a healthy foreground start
+/// never returned at all.
+#[tokio::test]
+async fn daemonize_false_starts_and_stops() {
+    let port: u16 = 17907;
+    tokio::time::timeout(Duration::from_secs(20), async move {
+        let server = RedisServer::new()
+            .port(port)
+            .daemonize(false)
+            .start()
+            .await
+            .expect("a healthy foreground start should return a working handle");
+
+        assert!(server.is_alive().await);
+        assert!(server.run(&["PING"]).await.unwrap().contains("PONG"));
+        let pid = server.pid();
+
+        server.stop();
+        assert!(server.is_stopped());
+        assert!(
+            !process::pid_alive(pid),
+            "the foreground process should be gone after stop"
+        );
+    })
+    .await
+    .expect("daemonize(false) start/stop should not hang");
+
+    std::net::TcpListener::bind(("127.0.0.1", port)).expect("the port should be free after stop");
+}
+
+/// A `daemonize(false)` start that redis rejects must fail promptly with the
+/// server's own output in the error, the foreground counterpart of
+/// `start_failure_surfaces_log_tail_in_error`, rather than hang the way it
+/// did before this fix.
+#[tokio::test]
+async fn daemonize_false_rejects_a_bad_directive_promptly() {
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        RedisServer::new()
+            .port(17908)
+            .daemonize(false)
+            .extra("maxmemory-policy", "not-a-policy")
+            .start(),
+    )
+    .await
+    .expect("a rejected config should fail promptly rather than hang");
+
+    let err = result
+        .err()
+        .expect("redis-server should have refused the invalid maxmemory-policy value");
+    match err {
+        Error::ServerStart {
+            detail: Some(detail),
+            ..
+        } => {
+            assert!(
+                detail.contains("maxmemory-policy") || detail.contains("not-a-policy"),
+                "expected the bad directive in the error detail, got: {detail}"
+            );
+        }
+        other => panic!("expected Error::ServerStart {{ detail: Some(_), .. }}, got: {other:?}"),
+    }
+}
+
+/// Dropping a foreground handle without an explicit `stop` must still stop
+/// the server: `Drop` is the only teardown most callers rely on.
+#[tokio::test]
+async fn dropping_a_foreground_handle_stops_the_server() {
+    let port: u16 = 17909;
+    tokio::time::timeout(Duration::from_secs(20), async move {
+        let server = RedisServer::new()
+            .port(port)
+            .daemonize(false)
+            .start()
+            .await
+            .expect("a healthy foreground start should return a working handle");
+        assert!(server.is_alive().await);
+        drop(server);
+    })
+    .await
+    .expect("dropping a foreground handle should not hang");
+
+    std::net::TcpListener::bind(("127.0.0.1", port))
+        .expect("the port should be free once the handle is dropped");
 }
 
 // -- stop idempotence (#165) --
