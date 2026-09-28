@@ -242,6 +242,47 @@ async fn sentinel_kill_master_triggers_promotion() {
 }
 
 #[tokio::test]
+async fn sentinel_password_with_space_quote_and_backslash_starts_and_fails_over() {
+    // A password `sentinel_conf` must encode as a single token: a space
+    // would split it into extra arguments, a quote would break the encoded
+    // token, and a backslash would need its own escape. Before #182 any one
+    // of these made the sentinel reject `sentinel.conf` and start() fail.
+    let sentinel = RedisSentinel::builder()
+        .master_port(18140)
+        .replicas(1)
+        .replica_base_port(18141)
+        .sentinels(3)
+        .sentinel_base_port(28140)
+        .password("p w\"q\\z")
+        .down_after_ms(2000)
+        .failover_timeout_ms(10000)
+        .start()
+        .await
+        .expect("failed to start sentinel topology");
+
+    sentinel
+        .wait_for_healthy(Duration::from_secs(30))
+        .await
+        .expect("sentinel topology did not become healthy");
+
+    assert!(sentinel.is_healthy().await);
+
+    let old_addr = sentinel.master_addr();
+
+    chaos::kill_node(sentinel.master()).expect("failed to send SIGKILL to the master");
+
+    let new_addr = sentinel
+        .wait_for_new_master(&old_addr, Duration::from_secs(30))
+        .await
+        .expect("sentinel did not promote a new master in time");
+
+    assert_ne!(
+        new_addr, old_addr,
+        "sentinel should have promoted a different node as master"
+    );
+}
+
+#[tokio::test]
 async fn sentinel_simulate_failure_crash_after_election() {
     let sentinel = RedisSentinel::builder()
         .master_port(18120)

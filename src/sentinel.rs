@@ -22,6 +22,7 @@ use tokio::process::Command;
 use tracing::Instrument;
 
 use crate::cli::RedisCli;
+use crate::config_token::directive;
 use crate::error::{Error, Result};
 use crate::server::{RedisServer, RedisServerHandle, SavePolicy};
 
@@ -436,32 +437,57 @@ impl RedisSentinelBuilder {
         logfile: &str,
         monitored_masters: &[MonitoredMaster],
     ) -> String {
+        let yn = |b: bool| if b { "yes" } else { "no" };
+
         // With TLS configured, the sentinel's plaintext listener is disabled
         // (`port 0`) and `port` becomes its `tls-port` instead, the same
         // pattern `apply_tls_to_server` uses for the master and replicas.
         let listen_port = if self.has_tls() { 0 } else { port };
-        let mut conf = format!(
-            "port {listen_port}\n\
-             bind {bind}\n\
-             daemonize yes\n\
-             pidfile \"{dir}/sentinel.pid\"\n\
-             logfile \"{logfile}\"\n\
-             dir \"{dir}\"\n",
-            bind = self.bind,
-            dir = dir.display(),
-        );
+        let mut conf = String::new();
+        conf.push_str(&directive("port", [listen_port.to_string()]));
+        conf.push_str(&directive("bind", [self.bind.clone()]));
+        conf.push_str(&directive("daemonize", ["yes"]));
+        conf.push_str(&directive(
+            "pidfile",
+            [format!("{}/sentinel.pid", dir.display())],
+        ));
+        conf.push_str(&directive("logfile", [logfile]));
+        conf.push_str(&directive("dir", [dir.display().to_string()]));
+
         for master in monitored_masters {
-            conf.push_str(&format!(
-                "sentinel monitor {name} {host} {master_port} {quorum}\n\
-                 sentinel down-after-milliseconds {name} {down_after}\n\
-                 sentinel failover-timeout {name} {failover_timeout}\n\
-                 sentinel parallel-syncs {name} 1\n",
-                name = master.name,
-                host = master.host,
-                master_port = master.port,
-                quorum = self.quorum,
-                down_after = self.down_after_ms,
-                failover_timeout = self.failover_timeout_ms,
+            conf.push_str(&directive(
+                "sentinel",
+                [
+                    "monitor".to_string(),
+                    master.name.clone(),
+                    master.host.clone(),
+                    master.port.to_string(),
+                    self.quorum.to_string(),
+                ],
+            ));
+            conf.push_str(&directive(
+                "sentinel",
+                [
+                    "down-after-milliseconds".to_string(),
+                    master.name.clone(),
+                    self.down_after_ms.to_string(),
+                ],
+            ));
+            conf.push_str(&directive(
+                "sentinel",
+                [
+                    "failover-timeout".to_string(),
+                    master.name.clone(),
+                    self.failover_timeout_ms.to_string(),
+                ],
+            ));
+            conf.push_str(&directive(
+                "sentinel",
+                [
+                    "parallel-syncs".to_string(),
+                    master.name.clone(),
+                    "1".to_string(),
+                ],
             ));
             // `sentinel auth-pass` must follow the `sentinel monitor` line
             // for the same master name; only the primary, builder-managed
@@ -469,33 +495,34 @@ impl RedisSentinelBuilder {
             if let Some(ref password) = self.password
                 && master.name == self.master_name
             {
-                conf.push_str(&format!(
-                    "sentinel auth-pass {name} {password}\n",
-                    name = master.name,
+                conf.push_str(&directive(
+                    "sentinel",
+                    [
+                        "auth-pass".to_string(),
+                        master.name.clone(),
+                        password.clone(),
+                    ],
                 ));
             }
         }
         // TLS directives for sentinels.
         if let Some(ref path) = self.tls_cert_file {
-            conf.push_str(&format!("tls-cert-file \"{}\"\n", path.display()));
+            conf.push_str(&directive("tls-cert-file", [path.display().to_string()]));
         }
         if let Some(ref path) = self.tls_key_file {
-            conf.push_str(&format!("tls-key-file \"{}\"\n", path.display()));
+            conf.push_str(&directive("tls-key-file", [path.display().to_string()]));
         }
         if let Some(ref path) = self.tls_ca_cert_file {
-            conf.push_str(&format!("tls-ca-cert-file \"{}\"\n", path.display()));
+            conf.push_str(&directive("tls-ca-cert-file", [path.display().to_string()]));
         }
         if let Some(ref path) = self.tls_ca_cert_dir {
-            conf.push_str(&format!("tls-ca-cert-dir \"{}\"\n", path.display()));
+            conf.push_str(&directive("tls-ca-cert-dir", [path.display().to_string()]));
         }
         if self.has_tls() {
-            conf.push_str(&format!("tls-port {port}\n"));
+            conf.push_str(&directive("tls-port", [port.to_string()]));
         }
         if let Some(v) = self.tls_auth_clients {
-            conf.push_str(&format!(
-                "tls-auth-clients {}\n",
-                if v { "yes" } else { "no" }
-            ));
+            conf.push_str(&directive("tls-auth-clients", [yn(v)]));
         }
         // Sentinels reach the data nodes over TLS once their own plaintext
         // listener is gone, the same default `apply_tls_to_server` uses.
@@ -505,13 +532,10 @@ impl RedisSentinelBuilder {
             self.tls_replication
         };
         if let Some(v) = tls_replication {
-            conf.push_str(&format!(
-                "tls-replication {}\n",
-                if v { "yes" } else { "no" }
-            ));
+            conf.push_str(&directive("tls-replication", [yn(v)]));
         }
         for (key, value) in &self.extra {
-            conf.push_str(&format!("{key} {value}\n"));
+            conf.push_str(&directive(key, [value]));
         }
         conf
     }
@@ -531,6 +555,18 @@ impl RedisSentinelBuilder {
     /// Reject a topology that cannot be started, before anything is created.
     fn validate_topology(&self) -> Result<()> {
         let invalid = |message: String| Err(Error::InvalidTopology { message });
+
+        // `extra` reaches both the data nodes, which reject the directives
+        // `config_token::is_reserved` names, and `sentinel.conf`, which also
+        // needs `sentinel` reserved: an `extra("sentinel", ...)` value would
+        // land ahead of the generated `sentinel monitor` lines and change
+        // which master every sentinel in the topology watches.
+        for key in self.extra.keys() {
+            if crate::config_token::is_reserved(key) || key.trim().eq_ignore_ascii_case("sentinel")
+            {
+                return Err(Error::ReservedDirective { key: key.clone() });
+            }
+        }
 
         if self.num_sentinels == 0 {
             return invalid("a Sentinel topology needs at least 1 sentinel, got 0".to_string());
@@ -1501,6 +1537,45 @@ mod tests {
         assert!(matches!(err, Error::InvalidTopology { .. }), "{err}");
     }
 
+    // -- extra validation (#182) --
+
+    #[test]
+    fn extra_sentinel_is_rejected() {
+        let err = sentinel()
+            .extra("sentinel", "monitor evil 127.0.0.1 1 1")
+            .validate_topology()
+            .expect_err("an extra sentinel directive must be rejected");
+        assert!(matches!(err, Error::ReservedDirective { .. }), "{err}");
+    }
+
+    #[test]
+    fn extra_sentinel_reserved_check_is_case_insensitive() {
+        let err = sentinel()
+            .extra("SENTINEL", "monitor evil 127.0.0.1 1 1")
+            .validate_topology()
+            .expect_err("an extra SENTINEL directive must be rejected");
+        assert!(matches!(err, Error::ReservedDirective { .. }), "{err}");
+    }
+
+    #[test]
+    fn extra_port_is_rejected() {
+        let err = sentinel()
+            .extra("port", "9999")
+            .validate_topology()
+            .expect_err("an extra port directive must be rejected");
+        assert!(matches!(err, Error::ReservedDirective { .. }), "{err}");
+    }
+
+    #[test]
+    fn extra_allows_unreserved_directive() {
+        assert!(
+            sentinel()
+                .extra("maxmemory", "100mb")
+                .validate_topology()
+                .is_ok()
+        );
+    }
+
     #[test]
     fn builder_modules() {
         let b = RedisSentinel::builder()
@@ -1570,18 +1645,11 @@ mod tests {
         );
         assert!(conf.contains("port 0\n"), "{conf}");
         assert!(conf.contains("tls-port 26379\n"), "{conf}");
-        assert!(
-            conf.contains("tls-cert-file \"/certs/server.crt\"\n"),
-            "{conf}"
-        );
-        assert!(
-            conf.contains("tls-key-file \"/certs/server.key\"\n"),
-            "{conf}"
-        );
-        assert!(
-            conf.contains("tls-ca-cert-file \"/certs/ca.crt\"\n"),
-            "{conf}"
-        );
+        // `/certs/server.crt` is made up entirely of characters `encode`
+        // treats as bare-safe, so it renders unquoted, same as `redis.conf`.
+        assert!(conf.contains("tls-cert-file /certs/server.crt\n"), "{conf}");
+        assert!(conf.contains("tls-key-file /certs/server.key\n"), "{conf}");
+        assert!(conf.contains("tls-ca-cert-file /certs/ca.crt\n"), "{conf}");
         assert!(conf.contains("tls-replication yes\n"), "{conf}");
     }
 
@@ -1599,5 +1667,104 @@ mod tests {
             &masters,
         );
         assert!(conf.contains("tls-replication no\n"), "{conf}");
+    }
+
+    // -- sentinel.conf value encoding (#182) --
+
+    #[test]
+    fn sentinel_conf_encodes_a_password_with_space_quote_and_backslash() {
+        let password = "p w\"q\\z";
+        let b = sentinel().password(password);
+        let masters = vec![monitored_master()];
+        let conf = b.sentinel_conf(
+            26379,
+            Path::new("/tmp/sentinel-26379"),
+            "/tmp/s.log",
+            &masters,
+        );
+        let expected = format!(
+            "sentinel auth-pass mymaster {}\n",
+            crate::config_token::encode(password)
+        );
+        assert!(conf.contains(&expected), "{conf}");
+    }
+
+    #[test]
+    fn sentinel_conf_password_with_newline_cannot_inject_a_directive() {
+        let masters = vec![monitored_master()];
+        let dir = Path::new("/tmp/sentinel-26379");
+
+        let plain = sentinel().password("secret");
+        let plain_conf = plain.sentinel_conf(26379, dir, "/tmp/s.log", &masters);
+
+        let injected = sentinel().password("secret\nrequirepass evil");
+        let injected_conf = injected.sentinel_conf(26379, dir, "/tmp/s.log", &masters);
+
+        // A newline in the password must not add a line: it stays inside the
+        // single encoded token on the `sentinel auth-pass` line.
+        assert_eq!(
+            plain_conf.lines().count(),
+            injected_conf.lines().count(),
+            "{injected_conf}"
+        );
+        assert!(
+            !injected_conf.lines().any(|l| l.starts_with("requirepass")),
+            "{injected_conf}"
+        );
+    }
+
+    #[test]
+    fn sentinel_conf_master_name_with_newline_cannot_inject_a_directive() {
+        let mut evil_master = monitored_master();
+        evil_master.name = "mymaster\nrequirepass evil".to_string();
+        let masters = vec![evil_master.clone()];
+        let b = sentinel();
+        let conf = b.sentinel_conf(
+            26379,
+            Path::new("/tmp/sentinel-26379"),
+            "/tmp/s.log",
+            &masters,
+        );
+        assert!(
+            !conf.lines().any(|l| l.starts_with("requirepass")),
+            "{conf}"
+        );
+        let expected_name = crate::config_token::encode(&evil_master.name);
+        assert!(
+            conf.contains(&format!("sentinel monitor {expected_name} ")),
+            "{conf}"
+        );
+    }
+
+    #[test]
+    fn sentinel_conf_encodes_paths_with_space_and_quote() {
+        let dir = Path::new("/tmp/sentinel dir\"quote");
+        let logfile = "/tmp/s log\"quote.log";
+        let b = sentinel();
+        let masters = vec![monitored_master()];
+        let conf = b.sentinel_conf(26379, dir, logfile, &masters);
+
+        let expected_dir = crate::config_token::encode(&dir.display().to_string());
+        assert!(conf.contains(&format!("dir {expected_dir}\n")), "{conf}");
+
+        let expected_logfile = crate::config_token::encode(logfile);
+        assert!(
+            conf.contains(&format!("logfile {expected_logfile}\n")),
+            "{conf}"
+        );
+    }
+
+    #[test]
+    fn sentinel_conf_encodes_an_extra_value_with_a_space() {
+        let b = sentinel().extra("maxmemory", "100 mb");
+        let masters = vec![monitored_master()];
+        let conf = b.sentinel_conf(
+            26379,
+            Path::new("/tmp/sentinel-26379"),
+            "/tmp/s.log",
+            &masters,
+        );
+        let expected = crate::config_token::encode("100 mb");
+        assert!(conf.contains(&format!("maxmemory {expected}\n")), "{conf}");
     }
 }
