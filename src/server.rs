@@ -2104,7 +2104,7 @@ impl RedisServer {
             let mut attempt = RedisServer {
                 config: self.config.clone(),
             };
-            let candidate = crate::preflight::reserve_ephemeral_port()?;
+            let candidate = crate::preflight::reserve_ephemeral_port_on(&attempt.config.bind)?;
             attempt.config.port = candidate;
 
             // Give every attempt its own directory.

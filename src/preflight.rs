@@ -120,8 +120,29 @@ pub fn ensure_ports_available(
 /// process that must bind it itself cannot be atomic. Callers are expected to
 /// treat the result as a candidate and retry on a lost race, which is what
 /// [`crate::server::RedisServer::auto_port`] does.
+///
+/// A thin wrapper over [`reserve_ephemeral_port_on`] with `"127.0.0.1"`; use
+/// that function directly when the server will bind somewhere else.
 pub fn reserve_ephemeral_port() -> Result<u16> {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(Error::Io)?;
+    reserve_ephemeral_port_on("127.0.0.1")
+}
+
+/// Ask the OS for a port that is free right now, on the address the server
+/// will actually bind.
+///
+/// A port free on loopback is not necessarily free on another address: the
+/// two are separate listener spaces, so a port [`reserve_ephemeral_port`]
+/// hands back as free on `127.0.0.1` can already be taken on the server's
+/// own `bind` address, and vice versa. Reserve where the server will bind
+/// rather than always on loopback.
+///
+/// `bind` may name more than one address, since Redis's own `bind` directive
+/// accepts a whitespace-separated list; only the first is used here, matching
+/// which address `redis-server` binds its client port to first. An empty or
+/// all-whitespace `bind` falls back to `"127.0.0.1"`.
+pub fn reserve_ephemeral_port_on(bind: &str) -> Result<u16> {
+    let addr = bind.split_whitespace().next().unwrap_or("127.0.0.1");
+    let listener = TcpListener::bind((addr, 0)).map_err(Error::Io)?;
     let port = listener.local_addr().map_err(Error::Io)?.port();
     drop(listener);
     Ok(port)
@@ -298,6 +319,41 @@ mod tests {
                 "a port with a live listener must not be offered as free"
             );
         }
+    }
+
+    #[test]
+    fn reserve_on_loopback_is_free_when_returned() {
+        // Same guarantee as `reserved_port_is_free_when_returned`, through
+        // the address-aware entry point.
+        for attempt in 0..8 {
+            let port =
+                reserve_ephemeral_port_on("127.0.0.1").expect("the OS should hand out a port");
+            assert_ne!(port, 0, "a reserved port must be concrete");
+
+            if port_available("127.0.0.1", port) && TcpListener::bind(("127.0.0.1", port)).is_ok() {
+                return;
+            }
+            assert!(attempt < 7, "the reservation must be released, not held");
+        }
+    }
+
+    #[test]
+    fn reserve_on_a_multi_address_bind_uses_the_first_token() {
+        // "127.0.0.1 ::1" names two addresses the way Redis's own `bind`
+        // directive would; only the first is reserved against.
+        let port = reserve_ephemeral_port_on("127.0.0.1 ::1")
+            .expect("the OS should hand out a port on the first address");
+        assert!(
+            TcpListener::bind(("127.0.0.1", port)).is_ok(),
+            "the reservation must have been made on 127.0.0.1, the first token"
+        );
+    }
+
+    #[test]
+    fn reserve_falls_back_to_loopback_on_blank_bind() {
+        let port =
+            reserve_ephemeral_port_on("   ").expect("a blank bind must fall back to loopback");
+        assert!(TcpListener::bind(("127.0.0.1", port)).is_ok());
     }
 
     #[test]
