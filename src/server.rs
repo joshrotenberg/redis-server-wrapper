@@ -2225,6 +2225,7 @@ impl RedisServer {
                 cli,
                 pid,
                 detached: false,
+                stopped: std::sync::atomic::AtomicBool::new(false),
             })
         }
         .instrument(span)
@@ -3097,6 +3098,12 @@ pub struct RedisServerHandle {
     cli: RedisCli,
     pid: u32,
     detached: bool,
+    /// Whether this handle has already stopped its process.
+    ///
+    /// Interior mutability because `stop` takes `&self` and `Drop` has to see
+    /// the result. Without it a handle stopped explicitly stops again on
+    /// drop, and by then the port may belong to something else.
+    stopped: std::sync::atomic::AtomicBool,
 }
 
 impl RedisServerHandle {
@@ -3321,6 +3328,17 @@ impl RedisServerHandle {
     /// guard rather than `.instrument()` -- there is no `.await` in this
     /// function for a guard to be held across.
     pub fn stop(&self) {
+        use std::sync::atomic::Ordering;
+
+        // Stopping twice is not just wasted work. Between the first stop and
+        // the second, the port can be taken by an unrelated server, and every
+        // step below addresses the process by port or escalates past the
+        // recorded pid. The second stop would target the newcomer.
+        if self.stopped.swap(true, Ordering::SeqCst) {
+            tracing::debug!(port = self.config.port, "stop_already_done");
+            return;
+        }
+
         let span = tracing::debug_span!("server_stop", port = self.config.port);
         let _guard = span.entered();
 
@@ -3328,18 +3346,46 @@ impl RedisServerHandle {
         self.cli.shutdown();
         // Step 2: grace period.
         std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Whether the graceful path worked decides everything below. A server
+        // that exited on request took its listener with it; one that did not
+        // may have left children holding the port.
+        let shutdown_failed = crate::process::pid_alive(self.pid);
+
         // Step 3: force kill if still alive.
-        if crate::process::pid_alive(self.pid) {
+        if shutdown_failed {
             tracing::warn!(pid = self.pid, "force_kill_escalation");
             crate::process::force_kill(self.pid);
         }
-        // Step 4: port cleanup as safety net. Demoted to DEBUG rather than
-        // WARN: kill_by_port runs unconditionally on every clean stop() as a
-        // safety net and its return type doesn't distinguish "found and
-        // killed a leftover listener" from "port was already free", so a
-        // WARN here would fire on the common case too.
-        tracing::debug!(port = self.config.port, "port_cleanup");
-        crate::process::kill_by_port(self.config.port);
+
+        // Step 4: port cleanup, but only after a shutdown that did not work.
+        //
+        // `kill_by_port` kills whatever is listening, which cannot be shown to
+        // be ours. Running it on every stop meant a clean shutdown followed by
+        // an unrelated server binding the freed port would kill the newcomer,
+        // which is the bug this change exists to fix.
+        //
+        // It is still needed when the graceful path failed: that is the case
+        // it was added for, a wrapper script whose child holds the listener
+        // and outlives the pid we recorded. Skipping it there leaves a wedged
+        // process holding both the port and any inherited stdio, which in a
+        // test binary is a run that never ends.
+        //
+        // Deciding on the pre-escalation state rather than the post keeps the
+        // window tiny: the port cannot have been handed to anyone else in the
+        // moments since, because our own process was still holding it.
+        if shutdown_failed {
+            tracing::debug!(port = self.config.port, "port_cleanup");
+            crate::process::kill_by_port(self.config.port);
+        }
+    }
+
+    /// Whether this handle has already stopped its process.
+    ///
+    /// A handle that was detached reports `false`: it never stopped anything
+    /// and never will.
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Wait until the server is ready (PING -> PONG).
@@ -3955,6 +4001,7 @@ mod tests {
             pid: 0,
             // Never a real process; avoid Drop trying to stop it.
             detached: true,
+            stopped: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
