@@ -2104,7 +2104,7 @@ impl RedisServer {
             let mut attempt = RedisServer {
                 config: self.config.clone(),
             };
-            let candidate = crate::preflight::reserve_ephemeral_port()?;
+            let candidate = crate::preflight::reserve_ephemeral_port_on(&attempt.config.bind)?;
             attempt.config.port = candidate;
 
             // Give every attempt its own directory.
@@ -2124,9 +2124,12 @@ impl RedisServer {
                 std::process::id(),
                 ATTEMPT.fetch_add(1, Ordering::Relaxed)
             ));
-            let expected_dir = attempt
-                .config
-                .dir
+            // Kept outside `attempt` so it survives the move into
+            // `start_on_the_configured_port` below: it is what a successful
+            // handle records as its `auto_dir`, and what a rejected attempt
+            // removes before retrying.
+            let attempt_dir = attempt.config.dir.clone();
+            let expected_dir = attempt_dir
                 .join(format!("node-{candidate}"))
                 .display()
                 .to_string();
@@ -2139,8 +2142,11 @@ impl RedisServer {
                 // the child binds, and the readiness probe connects to
                 // whatever is listening. Ask the server which directory it is
                 // running from, which is unique to this attempt.
-                Ok(handle) => match handle.run(&["CONFIG", "GET", "dir"]).await {
-                    Ok(reply) if reply.contains(&expected_dir) => return Ok(handle),
+                Ok(mut handle) => match handle.run(&["CONFIG", "GET", "dir"]).await {
+                    Ok(reply) if reply.contains(&expected_dir) => {
+                        handle.auto_dir = Some(attempt_dir);
+                        return Ok(handle);
+                    }
                     _ => {
                         tracing::debug!(port = candidate, "auto_port_lost_race");
                         // Dropping the handle here would stop the server that
@@ -2154,8 +2160,16 @@ impl RedisServer {
                     }
                 },
                 // Someone took the candidate between reserving it and binding
-                // it. Their process is left alone; take a different number.
-                Err(e @ (Error::PortInUse { .. } | Error::ServerStart { .. })) => {
+                // it. Nothing was ever launched from this attempt's
+                // directory, so it is safe to remove before trying again.
+                Err(e @ Error::PortInUse { .. }) => {
+                    tracing::debug!(port = candidate, "auto_port_retry");
+                    let _ = std::fs::remove_dir_all(&attempt_dir);
+                    last = Some(e);
+                }
+                // The process state here is uncertain, so the directory (and
+                // its log) is kept for debugging rather than removed.
+                Err(e @ Error::ServerStart { .. }) => {
                     tracing::debug!(port = candidate, "auto_port_retry");
                     last = Some(e);
                 }
@@ -2234,6 +2248,7 @@ impl RedisServer {
                 detached: false,
                 stopped: std::sync::atomic::AtomicBool::new(false),
                 lock: std::sync::Mutex::new(Some(lock)),
+                auto_dir: None,
             })
         }
         .instrument(span)
@@ -3119,6 +3134,13 @@ pub struct RedisServerHandle {
     /// [`Drop`] can only call through a shared reference -- can still take
     /// the lock out and release it.
     lock: std::sync::Mutex<Option<crate::owner_lock::OwnerLock>>,
+    /// The `auto-<pid>-<n>` directory [`RedisServer::auto_port`] created for
+    /// this attempt, if any.
+    ///
+    /// `None` for a handle started on a configured port, since `node-<port>`
+    /// there is reused by the next start rather than owned by this handle
+    /// alone. Removed by [`Self::stop`] once the process is confirmed gone.
+    auto_dir: Option<std::path::PathBuf>,
 }
 
 impl RedisServerHandle {
@@ -3141,7 +3163,9 @@ impl RedisServerHandle {
     /// Path to the node directory the wrapper generated for this server.
     ///
     /// Created with mode `0700`, since the config inside it may carry
-    /// credentials in plaintext.
+    /// credentials in plaintext. For an `auto_port` handle, this directory
+    /// is removed once the handle stops (see [`Self::stop`]); read it before
+    /// then if you need it afterward.
     pub fn node_dir(&self) -> PathBuf {
         self.config.dir.join(format!("node-{}", self.config.port))
     }
@@ -3342,6 +3366,10 @@ impl RedisServerHandle {
     /// server as owned (by this now-unmanaged process, not by a wrapper
     /// process) and refusing to touch it while it is still alive and still
     /// Redis.
+    ///
+    /// Never calls [`Self::stop`], so an `auto_port` handle's attempt
+    /// directory is kept rather than removed -- it belongs to the detached
+    /// process now, not to a handle that no longer manages it.
     pub fn detach(mut self) {
         self.detached = true;
         if let Some(lock) = self.lock.lock().unwrap_or_else(|e| e.into_inner()).take() {
@@ -3359,6 +3387,11 @@ impl RedisServerHandle {
     ///    file is emptied (marking a clean release) and then unlocked, never
     ///    removed, so a later start on the same port and `dir` opens the same
     ///    file rather than racing to create a new one.
+    /// 6. For an `auto_port` handle, removes the `auto-<pid>-<n>` directory
+    ///    [`RedisServer::auto_port`] created for it, but only if the pid is
+    ///    now confirmed dead -- if it is still alive, the directory is kept
+    ///    rather than removed out from under a process that may still be
+    ///    using it.
     ///
     /// Synchronous and called from [`Drop`], so this enters its span with a
     /// guard rather than `.instrument()` -- there is no `.await` in this
@@ -3421,6 +3454,23 @@ impl RedisServerHandle {
         // must not panic here, since this runs from Drop.
         if let Some(lock) = self.lock.lock().unwrap_or_else(|e| e.into_inner()).take() {
             lock.release();
+        }
+
+        // Step 6: remove the auto_port attempt directory, now that the
+        // process is confirmed gone. Only `auto_port` handles carry one; a
+        // configured-port handle's `node-<port>` is reused by the next
+        // start, so it is left alone here.
+        if let Some(dir) = &self.auto_dir {
+            if crate::process::pid_alive(self.pid) {
+                tracing::debug!(
+                    pid = self.pid,
+                    dir = %dir.display(),
+                    "auto_dir_kept_process_alive"
+                );
+            } else {
+                tracing::debug!(dir = %dir.display(), "auto_dir_removed");
+                let _ = std::fs::remove_dir_all(dir);
+            }
         }
     }
 
@@ -4048,6 +4098,7 @@ mod tests {
             stopped: std::sync::atomic::AtomicBool::new(false),
             // Never took a lock; nothing for Drop to release.
             lock: std::sync::Mutex::new(None),
+            auto_dir: None,
         }
     }
 

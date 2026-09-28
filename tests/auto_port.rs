@@ -201,3 +201,114 @@ async fn config_get_dir_identifies_the_server_behind_a_port() {
         "CONFIG GET dir returned {reply:?}, which does not contain {node_dir}"
     );
 }
+
+/// List the `auto-*` attempt directories directly under `dir`.
+fn auto_dirs(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(dir)
+        .expect("test dir should exist")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("auto-"))
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn dropping_every_handle_removes_its_directory() {
+    // #185: nothing ever removed the auto-* directory an automatic-port
+    // attempt created, so a test suite using auto_port grew the temp dir
+    // without bound. A dropped handle's directory, credentials and all, must
+    // be gone.
+    let dir = std::env::temp_dir().join(format!("rsw-auto-dir-{}-drop", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("failed to create test dir");
+
+    {
+        let mut servers = Vec::with_capacity(3);
+        for _ in 0..3 {
+            servers.push(
+                RedisServer::new()
+                    .auto_port()
+                    .dir(&dir)
+                    .password("secret")
+                    .start()
+                    .await
+                    .expect("server should start"),
+            );
+        }
+        // All three drop here, at the end of this scope.
+    }
+
+    let leftover = auto_dirs(&dir);
+    assert!(
+        leftover.is_empty(),
+        "dropping every auto_port handle must leave no auto-* directory behind, found {leftover:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn explicit_stop_removes_the_directory_and_a_later_drop_is_harmless() {
+    let dir = std::env::temp_dir().join(format!("rsw-auto-dir-{}-stop", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("failed to create test dir");
+
+    let server = RedisServer::new()
+        .auto_port()
+        .dir(&dir)
+        .password("secret")
+        .start()
+        .await
+        .expect("server should start");
+
+    server.stop();
+    assert!(
+        auto_dirs(&dir).is_empty(),
+        "an explicit stop() must remove the auto-* directory"
+    );
+
+    // Dropping an already-stopped handle must not error or try to remove the
+    // directory again.
+    drop(server);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_detached_handle_keeps_its_directory() {
+    let dir = std::env::temp_dir().join(format!("rsw-auto-dir-{}-detach", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("failed to create test dir");
+
+    let server = RedisServer::new()
+        .auto_port()
+        .dir(&dir)
+        .password("secret")
+        .start()
+        .await
+        .expect("server should start");
+
+    let node_dir = server.node_dir();
+    let cli = server.cli().clone();
+    server.detach();
+
+    let leftover = auto_dirs(&dir);
+    assert!(
+        !leftover.is_empty(),
+        "a detached handle must keep its auto-* directory"
+    );
+    assert!(
+        node_dir.exists(),
+        "the detached server's node directory must still be on disk"
+    );
+
+    // Shut the now-unmanaged process down ourselves, the way
+    // `detach_leaves_server_running` in tests/server.rs does, so the process
+    // does not outlive the test.
+    cli.shutdown();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(!cli.ping().await);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
