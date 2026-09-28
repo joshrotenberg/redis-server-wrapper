@@ -1,11 +1,11 @@
-//! Owner lock for a standalone server's node directory.
+//! Owner lock for a server's or topology's stable directory.
 //!
 //! The default `dir` is `std::env::temp_dir().join("redis-server-wrapper")`,
-//! shared by every process on the machine that starts a server without an
-//! explicit `dir()`. Two starts on the same port therefore land in the same
-//! `node-<port>` directory and, without something to tell them apart, the
-//! second one has no way to know whether the pidfile it finds there names a
-//! server it is free to reclaim or one another process is still using.
+//! shared by every process on the machine that starts a server or topology
+//! without an explicit `dir()`. Two starts of the same shape therefore land
+//! in the same directory and, without something to tell them apart, the
+//! second one has no way to know whether the pidfile(s) it finds there name
+//! a server it is free to reclaim or one another process is still using.
 //!
 //! This lock answers that question with an advisory `flock` on
 //! `<node_dir>/owner`, held for the lifetime of the handle rather than
@@ -70,13 +70,19 @@ impl OwnerLock {
     /// Take ownership of `node_dir`, reclaiming a stale lock left by a
     /// crashed run when doing so is safe.
     ///
-    /// Creates `node_dir` first. Returns [`Error::PortInUse`] naming `host`
-    /// and `port` with [`PortRole::Server`] when the flock is already held by
-    /// a live owner -- another process, or another handle in this same
-    /// process, since `flock` conflicts across separate open file
-    /// descriptions even within one process -- or when a detached lock names
-    /// a redis-server pid that is still alive and still Redis.
-    pub(crate) fn acquire(node_dir: &Path, host: &str, port: u16) -> Result<Self> {
+    /// `node_dir` is either a standalone server's node directory or a
+    /// topology's stable base directory; `host`, `port`, and `role` describe
+    /// whichever port best identifies the caller for the `PortInUse` error
+    /// below (a topology has no single port of its own, so it names one of
+    /// the ports it owns, e.g. the first node or the master).
+    ///
+    /// Creates `node_dir` first. Returns [`Error::PortInUse`] naming `host`,
+    /// `port`, and `role` when the flock is already held by a live owner --
+    /// another process, or another handle in this same process, since
+    /// `flock` conflicts across separate open file descriptions even within
+    /// one process -- or when a detached lock names a redis-server pid that
+    /// is still alive and still Redis.
+    pub(crate) fn acquire(node_dir: &Path, host: &str, port: u16, role: PortRole) -> Result<Self> {
         crate::secure_file::create_dir_all(node_dir)?;
         let path = node_dir.join("owner");
 
@@ -101,7 +107,7 @@ impl OwnerLock {
             return Err(Error::PortInUse {
                 host: host.to_string(),
                 port,
-                role: PortRole::Server.to_string(),
+                role: role.to_string(),
             });
         }
         // Wrap it at once so every early return below unlocks through Drop.
@@ -125,7 +131,7 @@ impl OwnerLock {
                 return Err(Error::PortInUse {
                     host: host.to_string(),
                     port,
-                    role: PortRole::Server.to_string(),
+                    role: role.to_string(),
                 });
             }
             // Dead, not Redis, or unparseable: the detached server is gone.
@@ -241,13 +247,14 @@ mod tests {
     /// `LOCK_UN`, so a fork on another test thread cannot hold a released
     /// lock open, and a failure here is a real bug.
     fn acquire_now(dir: &Path, host: &str, port: u16) -> OwnerLock {
-        OwnerLock::acquire(dir, host, port).expect("acquire should succeed")
+        OwnerLock::acquire(dir, host, port, PortRole::Server).expect("acquire should succeed")
     }
 
     #[test]
     fn acquire_creates_the_lock_with_our_pid() {
         let dir = scratch("acquire");
-        let lock = OwnerLock::acquire(&dir, "127.0.0.1", 1).expect("first acquire should win");
+        let lock = OwnerLock::acquire(&dir, "127.0.0.1", 1, PortRole::Server)
+            .expect("first acquire should win");
         let contents = std::fs::read_to_string(dir.join("owner")).unwrap();
         assert_eq!(contents, std::process::id().to_string());
         lock.release();
@@ -256,15 +263,17 @@ mod tests {
     #[test]
     fn a_second_acquire_while_the_first_is_live_fails_with_port_in_use() {
         let dir = scratch("live-conflict");
-        let _lock = OwnerLock::acquire(&dir, "127.0.0.1", 2).expect("first acquire should win");
-        let result = OwnerLock::acquire(&dir, "127.0.0.1", 2);
+        let _lock = OwnerLock::acquire(&dir, "127.0.0.1", 2, PortRole::Server)
+            .expect("first acquire should win");
+        let result = OwnerLock::acquire(&dir, "127.0.0.1", 2, PortRole::Server);
         assert!(matches!(result, Err(Error::PortInUse { port: 2, .. })));
     }
 
     #[test]
     fn release_leaves_an_empty_file_and_a_new_acquire_succeeds() {
         let dir = scratch("release-then-reacquire");
-        let lock = OwnerLock::acquire(&dir, "127.0.0.1", 3).expect("first acquire should win");
+        let lock = OwnerLock::acquire(&dir, "127.0.0.1", 3, PortRole::Server)
+            .expect("first acquire should win");
         lock.release();
 
         let owner_path = dir.join("owner");
@@ -307,7 +316,7 @@ mod tests {
     #[test]
     fn mark_detached_survives_drop_and_blocks_a_new_acquire_while_alive() {
         let dir = scratch("detached-alive");
-        let lock = OwnerLock::acquire(&dir, "127.0.0.1", 6).unwrap();
+        let lock = OwnerLock::acquire(&dir, "127.0.0.1", 6, PortRole::Server).unwrap();
         // Stand in for a redis-server pid with our own, very much alive, pid.
         lock.mark_detached(std::process::id());
 
@@ -325,7 +334,7 @@ mod tests {
     fn drop_without_release_or_detach_frees_the_lock() {
         let dir = scratch("drop-frees-lock");
         {
-            let _lock = OwnerLock::acquire(&dir, "127.0.0.1", 7).unwrap();
+            let _lock = OwnerLock::acquire(&dir, "127.0.0.1", 7, PortRole::Server).unwrap();
             assert!(dir.join("owner").exists());
         }
         let second = acquire_now(&dir, "127.0.0.1", 7);
@@ -347,7 +356,7 @@ mod tests {
                 let dir = Arc::clone(&dir);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    OwnerLock::acquire(&dir, "127.0.0.1", 8000 + i as u16)
+                    OwnerLock::acquire(&dir, "127.0.0.1", 8000 + i as u16, PortRole::Server)
                 })
             })
             .collect();

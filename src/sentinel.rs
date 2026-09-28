@@ -834,6 +834,23 @@ impl RedisSentinelBuilder {
 
         let base_dir = self.base_dir();
 
+        // Claim the topology's base directory before reclaiming anything in
+        // it. Without this, a second concurrent start of the same shape
+        // cannot tell a crashed run's orphans from the processes a live
+        // topology (another process, or another handle in this process) is
+        // using right now, and would force-kill them out from under it. A
+        // live owner is reported as `PortInUse` here, before reclaim or the
+        // port preflight even run. `acquire`'s crash path also tries to
+        // reclaim `base_dir.join("redis.pid")`, which never exists for a
+        // topology's base dir (each process's pidfile is nested under its
+        // own directory instead) -- harmless, just a no-op.
+        let lock = crate::owner_lock::OwnerLock::acquire(
+            &base_dir,
+            &self.bind,
+            self.master_port,
+            crate::preflight::PortRole::SentinelMaster,
+        )?;
+
         // Reclaim before the preflight: a leftover process of our own still
         // holds its port, and the preflight cannot tell it apart from an
         // unrelated server, so it would reject a topology we are entitled to
@@ -1054,6 +1071,7 @@ impl RedisSentinelBuilder {
                 key_file: self.tls_key_file,
                 ca_cert_file: self.tls_ca_cert_file,
             },
+            lock: std::sync::Mutex::new(Some(lock)),
         };
 
         // Sentinels learn about each other through the master they share, so a
@@ -1128,6 +1146,13 @@ pub struct RedisSentinelHandle {
     num_sentinels: u16,
     monitored_masters: Vec<MonitoredMaster>,
     tls: TlsConfig,
+    /// Owner lock on the topology's base directory, held for the life of
+    /// this handle so a second start of the same topology sees a live owner
+    /// rather than reclaiming (and killing) this one's processes. `None`
+    /// only for handles that never took a lock (there are none in normal
+    /// use; the `Mutex` mirrors [`crate::server::RedisServerHandle`]'s so it
+    /// can be taken by `&self` from [`Self::stop`] and [`Drop`]).
+    lock: std::sync::Mutex<Option<crate::owner_lock::OwnerLock>>,
 }
 
 /// Entry point for building a Redis Sentinel topology.
@@ -1449,9 +1474,16 @@ impl RedisSentinelHandle {
     /// 2. Waits 500ms for them to exit.
     /// 3. For each sentinel PID that is still alive, calls [`crate::process::force_kill`].
     /// 4. Calls [`crate::process::kill_by_port`] for each sentinel port as a safety net.
+    /// 5. Stops the master and every replica via their own handles'
+    ///    [`RedisServerHandle::stop`](crate::server::RedisServerHandle::stop),
+    ///    which uses the same escalating strategy.
+    /// 6. Releases the topology's owner lock, now that every process it
+    ///    started is confirmed stopped, so a later start of the same shape
+    ///    sees the lock free rather than a live owner.
     ///
-    /// Replicas and the master are stopped by their own handles' [`Drop`] impls,
-    /// which also use the escalating strategy.
+    /// Idempotent: a second call finds nothing left to stop (each node's own
+    /// `stopped` guard makes step 5 a no-op) and finds the lock already
+    /// taken by the first call, so step 6 is a no-op too.
     pub fn stop(&self) {
         let span = tracing::debug_span!("sentinel_stop", master_name = %self.master_name);
         let _guard = span.entered();
@@ -1484,7 +1516,18 @@ impl RedisSentinelHandle {
             tracing::debug!(port, "port_cleanup");
             crate::process::kill_by_port(*port);
         }
-        // Replicas and master stopped by their handles' Drop.
+        // Step 5: stop the master and replicas now, explicitly, rather than
+        // waiting for their own handles to drop as a side effect of this
+        // struct's fields dropping later -- the lock release below must not
+        // happen until they are confirmed gone.
+        self.master.stop();
+        for replica in &self.replicas {
+            replica.stop();
+        }
+        // Step 6: release the owner lock.
+        if let Some(lock) = self.lock.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            lock.release();
+        }
     }
 }
 

@@ -2234,6 +2234,7 @@ impl RedisServer {
                 &node_dir,
                 &self.config.bind,
                 self.config.port,
+                crate::preflight::PortRole::Server,
             )?;
 
             // Anything still holding the port after that is not ours: the lock
