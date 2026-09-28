@@ -614,12 +614,15 @@ impl RedisSentinelBuilder {
     /// Nothing outside those paths is touched.
     fn reclaim_owned_processes(&self, base: &Path) {
         // RedisServer nests a node-<port> directory under the dir it is given.
-        let data_node =
-            |dir: PathBuf, port: u16| dir.join(format!("node-{port}")).join("redis.pid");
+        // A TLS-only node has plain port 0, so its directory is node-0. Check
+        // both: the previous run may have been started with or without TLS.
+        let data_node = |dir: PathBuf, port: u16| {
+            [port, 0].map(|p| dir.join(format!("node-{p}")).join("redis.pid"))
+        };
 
-        let mut pidfiles = vec![data_node(base.join("master"), self.master_port)];
+        let mut pidfiles: Vec<PathBuf> = data_node(base.join("master"), self.master_port).into();
         for port in self.replica_ports() {
-            pidfiles.push(data_node(base.join(format!("replica-{port}")), port));
+            pidfiles.extend(data_node(base.join(format!("replica-{port}")), port));
         }
         for port in self.sentinel_ports() {
             pidfiles.push(base.join(format!("sentinel-{port}")).join("sentinel.pid"));
