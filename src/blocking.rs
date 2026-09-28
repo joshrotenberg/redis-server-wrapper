@@ -2555,8 +2555,23 @@ impl RedisSentinelBuilder {
     // -- TLS directives --
 
     /// Set the TLS listening port for all nodes.
+    ///
+    /// Deprecated: see
+    /// [`sentinel::RedisSentinelBuilder::tls_port`](crate::sentinel::RedisSentinelBuilder::tls_port).
+    /// The value passed here is ignored; with TLS configured, each process
+    /// serves TLS on its own already-assigned port instead.
+    #[deprecated(
+        note = "ignored: each process now serves TLS on its own port, derived from its \
+                already-configured port, instead of a single shared tls_port"
+    )]
     pub fn tls_port(mut self, port: u16) -> Self {
-        self.inner = self.inner.tls_port(port);
+        // The inner builder's setter is itself deprecated and ignores its
+        // argument; call it anyway so this wrapper stays a thin pass-through
+        // rather than duplicating that no-op behavior here.
+        #[allow(deprecated)]
+        {
+            self.inner = self.inner.tls_port(port);
+        }
         self
     }
 

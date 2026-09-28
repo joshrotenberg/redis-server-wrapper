@@ -1,4 +1,17 @@
 //! Redis Sentinel topology management built on `RedisServer`.
+//!
+//! # TLS
+//!
+//! When TLS is configured on the builder (see
+//! [`RedisSentinelBuilder::tls_cert_file`] and
+//! [`RedisSentinelBuilder::tls_key_file`]), every process in the
+//! topology -- the master, every replica, and every sentinel -- disables its
+//! plaintext listener and serves TLS on its own already-assigned port
+//! instead: the master's `master_port`, each replica's `replica_base_port`
+//! offset, and each sentinel's `sentinel_base_port` offset all become that
+//! process's `tls-port`. Replication and sentinel-to-data-node traffic move
+//! to TLS along with it, since the plaintext listener they would otherwise
+//! use no longer exists.
 
 use std::collections::HashMap;
 use std::fs;
@@ -47,7 +60,6 @@ pub struct RedisSentinelBuilder {
     appendonly: Option<bool>,
     down_after_ms: u64,
     failover_timeout_ms: u64,
-    tls_port: Option<u16>,
     tls_cert_file: Option<PathBuf>,
     tls_key_file: Option<PathBuf>,
     tls_ca_cert_file: Option<PathBuf>,
@@ -203,8 +215,25 @@ impl RedisSentinelBuilder {
     // -- TLS directives --
 
     /// Set the TLS listening port for the master and replica nodes.
-    pub fn tls_port(mut self, port: u16) -> Self {
-        self.tls_port = Some(port);
+    ///
+    /// Deprecated: this could never produce a working topology. The same
+    /// port number was written into the master, every replica, and every
+    /// sentinel's config, but only one process on the host can actually
+    /// bind a given port, so every topology with TLS configured and more
+    /// than one process (there is always at least one sentinel) failed to
+    /// start. The value passed here is ignored.
+    ///
+    /// When TLS is configured (see [`Self::tls_cert_file`] and
+    /// [`Self::tls_key_file`]), each process in the topology now serves TLS
+    /// on its own port instead: the master, every replica, and every
+    /// sentinel disable their plaintext listener and reuse their
+    /// already-configured port (`master_port`, a `replica_base_port`
+    /// offset, or a `sentinel_base_port` offset) as their `tls-port`.
+    #[deprecated(
+        note = "ignored: each process now serves TLS on its own port, derived from its \
+                already-configured port, instead of a single shared tls_port"
+    )]
+    pub fn tls_port(self, _port: u16) -> Self {
         self
     }
 
@@ -239,6 +268,12 @@ impl RedisSentinelBuilder {
     }
 
     /// Use TLS for replication traffic between nodes.
+    ///
+    /// When TLS is configured (cert and key set), the master and every
+    /// replica disable their plaintext listener entirely, so replication
+    /// between them can only happen over TLS; this defaults to `true` in
+    /// that case and only needs setting to opt out. Without TLS configured,
+    /// this has no effect.
     pub fn tls_replication(mut self, enable: bool) -> Self {
         self.tls_replication = Some(enable);
         self
@@ -351,10 +386,24 @@ impl RedisSentinelBuilder {
         cli
     }
 
-    /// Apply TLS config to a server builder.
-    fn apply_tls_to_server(&self, mut server: RedisServer) -> RedisServer {
-        if let Some(port) = self.tls_port {
-            server = server.tls_port(port);
+    /// Apply TLS config to a server builder for a data node listening on
+    /// `port`.
+    ///
+    /// Without TLS configured, `port` is just the plain listening port.
+    /// With TLS configured, the plaintext listener is disabled (`port(0)`)
+    /// and `port` becomes the node's `tls-port` instead, so the master and
+    /// every replica each serve TLS on their own already-assigned port
+    /// rather than sharing one. `tls-replication` defaults to enabled in
+    /// that case, since the plaintext listener that replication would
+    /// otherwise use is gone.
+    fn apply_tls_to_server(&self, mut server: RedisServer, port: u16) -> RedisServer {
+        if self.has_tls() {
+            server = server
+                .port(0)
+                .tls_port(port)
+                .tls_replication(self.tls_replication.unwrap_or(true));
+        } else {
+            server = server.port(port);
         }
         if let Some(ref path) = self.tls_cert_file {
             server = server.tls_cert_file(path);
@@ -371,10 +420,100 @@ impl RedisSentinelBuilder {
         if let Some(v) = self.tls_auth_clients {
             server = server.tls_auth_clients(v);
         }
-        if let Some(v) = self.tls_replication {
-            server = server.tls_replication(v);
-        }
         server
+    }
+
+    /// Build the `sentinel.conf` contents for the sentinel process listening
+    /// on `port`, writing its pidfile, logfile, and working directory as
+    /// `dir` and `logfile`.
+    ///
+    /// Extracted from the start path so the generated config can be
+    /// unit-tested without starting any processes.
+    fn sentinel_conf(
+        &self,
+        port: u16,
+        dir: &Path,
+        logfile: &str,
+        monitored_masters: &[MonitoredMaster],
+    ) -> String {
+        // With TLS configured, the sentinel's plaintext listener is disabled
+        // (`port 0`) and `port` becomes its `tls-port` instead, the same
+        // pattern `apply_tls_to_server` uses for the master and replicas.
+        let listen_port = if self.has_tls() { 0 } else { port };
+        let mut conf = format!(
+            "port {listen_port}\n\
+             bind {bind}\n\
+             daemonize yes\n\
+             pidfile \"{dir}/sentinel.pid\"\n\
+             logfile \"{logfile}\"\n\
+             dir \"{dir}\"\n",
+            bind = self.bind,
+            dir = dir.display(),
+        );
+        for master in monitored_masters {
+            conf.push_str(&format!(
+                "sentinel monitor {name} {host} {master_port} {quorum}\n\
+                 sentinel down-after-milliseconds {name} {down_after}\n\
+                 sentinel failover-timeout {name} {failover_timeout}\n\
+                 sentinel parallel-syncs {name} 1\n",
+                name = master.name,
+                host = master.host,
+                master_port = master.port,
+                quorum = self.quorum,
+                down_after = self.down_after_ms,
+                failover_timeout = self.failover_timeout_ms,
+            ));
+            // `sentinel auth-pass` must follow the `sentinel monitor` line
+            // for the same master name; only the primary, builder-managed
+            // master is password-protected here.
+            if let Some(ref password) = self.password
+                && master.name == self.master_name
+            {
+                conf.push_str(&format!(
+                    "sentinel auth-pass {name} {password}\n",
+                    name = master.name,
+                ));
+            }
+        }
+        // TLS directives for sentinels.
+        if let Some(ref path) = self.tls_cert_file {
+            conf.push_str(&format!("tls-cert-file \"{}\"\n", path.display()));
+        }
+        if let Some(ref path) = self.tls_key_file {
+            conf.push_str(&format!("tls-key-file \"{}\"\n", path.display()));
+        }
+        if let Some(ref path) = self.tls_ca_cert_file {
+            conf.push_str(&format!("tls-ca-cert-file \"{}\"\n", path.display()));
+        }
+        if let Some(ref path) = self.tls_ca_cert_dir {
+            conf.push_str(&format!("tls-ca-cert-dir \"{}\"\n", path.display()));
+        }
+        if self.has_tls() {
+            conf.push_str(&format!("tls-port {port}\n"));
+        }
+        if let Some(v) = self.tls_auth_clients {
+            conf.push_str(&format!(
+                "tls-auth-clients {}\n",
+                if v { "yes" } else { "no" }
+            ));
+        }
+        // Sentinels reach the data nodes over TLS once their own plaintext
+        // listener is gone, the same default `apply_tls_to_server` uses.
+        let tls_replication = if self.has_tls() {
+            Some(self.tls_replication.unwrap_or(true))
+        } else {
+            self.tls_replication
+        };
+        if let Some(v) = tls_replication {
+            conf.push_str(&format!(
+                "tls-replication {}\n",
+                if v { "yes" } else { "no" }
+            ));
+        }
+        for (key, value) in &self.extra {
+            conf.push_str(&format!("{key} {value}\n"));
+        }
+        conf
     }
 
     fn replica_ports(&self) -> impl Iterator<Item = u16> {
@@ -475,12 +614,15 @@ impl RedisSentinelBuilder {
     /// Nothing outside those paths is touched.
     fn reclaim_owned_processes(&self, base: &Path) {
         // RedisServer nests a node-<port> directory under the dir it is given.
-        let data_node =
-            |dir: PathBuf, port: u16| dir.join(format!("node-{port}")).join("redis.pid");
+        // A TLS-only node has plain port 0, so its directory is node-0. Check
+        // both: the previous run may have been started with or without TLS.
+        let data_node = |dir: PathBuf, port: u16| {
+            [port, 0].map(|p| dir.join(format!("node-{p}")).join("redis.pid"))
+        };
 
-        let mut pidfiles = vec![data_node(base.join("master"), self.master_port)];
+        let mut pidfiles: Vec<PathBuf> = data_node(base.join("master"), self.master_port).into();
         for port in self.replica_ports() {
-            pidfiles.push(data_node(base.join(format!("replica-{port}")), port));
+            pidfiles.extend(data_node(base.join(format!("replica-{port}")), port));
         }
         for port in self.sentinel_ports() {
             pidfiles.push(base.join(format!("sentinel-{port}")).join("sentinel.pid"));
@@ -563,14 +705,13 @@ impl RedisSentinelBuilder {
 
         // 1. Start master.
         let appendonly = self.appendonly.unwrap_or(true);
-        let mut master = RedisServer::new()
-            .port(self.master_port)
+        let master = RedisServer::new()
             .bind(&self.bind)
             .dir(base_dir.join("master"))
             .appendonly(appendonly)
             .redis_server_bin(&self.redis_server_bin)
             .redis_cli_bin(&self.redis_cli_bin);
-        master = self.apply_tls_to_server(master);
+        let mut master = self.apply_tls_to_server(master, self.master_port);
         if let Some(ref logfile) = self.logfile {
             master = master.logfile(logfile.clone());
         }
@@ -605,15 +746,14 @@ impl RedisSentinelBuilder {
         // 2. Start replicas.
         let mut replicas = Vec::new();
         for port in self.replica_ports() {
-            let mut replica = RedisServer::new()
-                .port(port)
+            let replica = RedisServer::new()
                 .bind(&self.bind)
                 .dir(base_dir.join(format!("replica-{port}")))
                 .appendonly(appendonly)
                 .replicaof(self.bind.clone(), self.master_port)
                 .redis_server_bin(&self.redis_server_bin)
                 .redis_cli_bin(&self.redis_cli_bin);
-            replica = self.apply_tls_to_server(replica);
+            let mut replica = self.apply_tls_to_server(replica, port);
             if let Some(ref logfile) = self.logfile {
                 replica = replica.logfile(logfile.clone());
             }
@@ -686,74 +826,7 @@ impl RedisSentinelBuilder {
                 .as_deref()
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("{}/sentinel.log", dir.display()));
-            let mut conf = format!(
-                "port {port}\n\
-                 bind {bind}\n\
-                 daemonize yes\n\
-                 pidfile \"{dir}/sentinel.pid\"\n\
-                 logfile \"{logfile}\"\n\
-                 dir \"{dir}\"\n",
-                port = port,
-                bind = self.bind,
-                dir = dir.display(),
-                logfile = logfile,
-            );
-            for master in &monitored_masters {
-                conf.push_str(&format!(
-                    "sentinel monitor {name} {host} {master_port} {quorum}\n\
-                     sentinel down-after-milliseconds {name} {down_after}\n\
-                     sentinel failover-timeout {name} {failover_timeout}\n\
-                     sentinel parallel-syncs {name} 1\n",
-                    name = master.name,
-                    host = master.host,
-                    master_port = master.port,
-                    quorum = self.quorum,
-                    down_after = self.down_after_ms,
-                    failover_timeout = self.failover_timeout_ms,
-                ));
-                // `sentinel auth-pass` must follow the `sentinel monitor`
-                // line for the same master name; only the primary,
-                // builder-managed master is password-protected here.
-                if let Some(ref password) = self.password
-                    && master.name == self.master_name
-                {
-                    conf.push_str(&format!(
-                        "sentinel auth-pass {name} {password}\n",
-                        name = master.name,
-                    ));
-                }
-            }
-            // TLS directives for sentinels.
-            if let Some(ref path) = self.tls_cert_file {
-                conf.push_str(&format!("tls-cert-file \"{}\"\n", path.display()));
-            }
-            if let Some(ref path) = self.tls_key_file {
-                conf.push_str(&format!("tls-key-file \"{}\"\n", path.display()));
-            }
-            if let Some(ref path) = self.tls_ca_cert_file {
-                conf.push_str(&format!("tls-ca-cert-file \"{}\"\n", path.display()));
-            }
-            if let Some(ref path) = self.tls_ca_cert_dir {
-                conf.push_str(&format!("tls-ca-cert-dir \"{}\"\n", path.display()));
-            }
-            if let Some(tls_port) = self.tls_port {
-                conf.push_str(&format!("tls-port {tls_port}\n"));
-            }
-            if let Some(v) = self.tls_auth_clients {
-                conf.push_str(&format!(
-                    "tls-auth-clients {}\n",
-                    if v { "yes" } else { "no" }
-                ));
-            }
-            if let Some(v) = self.tls_replication {
-                conf.push_str(&format!(
-                    "tls-replication {}\n",
-                    if v { "yes" } else { "no" }
-                ));
-            }
-            for (key, value) in &self.extra {
-                conf.push_str(&format!("{key} {value}\n"));
-            }
+            let conf = self.sentinel_conf(port, &dir, &logfile, &monitored_masters);
             crate::secure_file::write(&conf_path, conf)?;
 
             let status = Command::new(&self.redis_server_bin)
@@ -917,7 +990,6 @@ impl RedisSentinel {
             appendonly: None,
             down_after_ms: 5000,
             failover_timeout_ms: 10000,
-            tls_port: None,
             tls_cert_file: None,
             tls_key_file: None,
             tls_ca_cert_file: None,
@@ -1455,5 +1527,77 @@ mod tests {
         assert_eq!(map.get("name").unwrap(), "mymaster");
         assert_eq!(map.get("ip").unwrap(), "127.0.0.1");
         assert_eq!(map.get("port").unwrap(), "6380");
+    }
+
+    // -- sentinel.conf generation (#183) --
+
+    fn monitored_master() -> MonitoredMaster {
+        MonitoredMaster {
+            name: "mymaster".into(),
+            host: "127.0.0.1".into(),
+            port: 6390,
+            expected_replicas: 1,
+        }
+    }
+
+    #[test]
+    fn sentinel_conf_without_tls_uses_the_real_port() {
+        let b = sentinel();
+        let masters = vec![monitored_master()];
+        let conf = b.sentinel_conf(
+            26379,
+            Path::new("/tmp/sentinel-26379"),
+            "/tmp/s.log",
+            &masters,
+        );
+        assert!(conf.contains("port 26379\n"), "{conf}");
+        assert!(!conf.contains("tls-port"), "{conf}");
+        assert!(!conf.contains("tls-replication"), "{conf}");
+    }
+
+    #[test]
+    fn sentinel_conf_with_tls_disables_plaintext_and_sets_its_own_tls_port() {
+        let b = sentinel()
+            .tls_cert_file("/certs/server.crt")
+            .tls_key_file("/certs/server.key")
+            .tls_ca_cert_file("/certs/ca.crt");
+        let masters = vec![monitored_master()];
+        let conf = b.sentinel_conf(
+            26379,
+            Path::new("/tmp/sentinel-26379"),
+            "/tmp/s.log",
+            &masters,
+        );
+        assert!(conf.contains("port 0\n"), "{conf}");
+        assert!(conf.contains("tls-port 26379\n"), "{conf}");
+        assert!(
+            conf.contains("tls-cert-file \"/certs/server.crt\"\n"),
+            "{conf}"
+        );
+        assert!(
+            conf.contains("tls-key-file \"/certs/server.key\"\n"),
+            "{conf}"
+        );
+        assert!(
+            conf.contains("tls-ca-cert-file \"/certs/ca.crt\"\n"),
+            "{conf}"
+        );
+        assert!(conf.contains("tls-replication yes\n"), "{conf}");
+    }
+
+    #[test]
+    fn sentinel_conf_with_tls_respects_an_explicit_tls_replication_override() {
+        let b = sentinel()
+            .tls_cert_file("/certs/server.crt")
+            .tls_key_file("/certs/server.key")
+            .tls_replication(false);
+        let masters = vec![monitored_master()];
+        let conf = b.sentinel_conf(
+            26379,
+            Path::new("/tmp/sentinel-26379"),
+            "/tmp/s.log",
+            &masters,
+        );
+        assert!(conf.contains("tls-replication no\n"), "{conf}");
     }
 }
