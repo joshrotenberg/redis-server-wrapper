@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.5.1...v0.5.2) - 2026-11-16
+
+### Fixed
+
+- reject extra() keys that are not plain directive names ([#198](https://github.com/joshrotenberg/redis-server-wrapper/pull/198))
+- stop a Sentinel topology without killing a sentinel port's next occupant ([#199](https://github.com/joshrotenberg/redis-server-wrapper/pull/199))
+- name a TLS-only server's node directory after its TLS port ([#200](https://github.com/joshrotenberg/redis-server-wrapper/pull/200))
+
 ## [0.5.1](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.5.0...v0.5.1) - 2026-09-28
 
 ### Fixed
