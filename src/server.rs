@@ -798,6 +798,12 @@ impl RedisServer {
         server
     }
 
+    /// The builder's config, for unit tests in the topology modules.
+    #[cfg(test)]
+    pub(crate) fn test_config(&self) -> &RedisServerConfig {
+        &self.config
+    }
+
     // -- network --
 
     /// Set the listening port (default: 6379).

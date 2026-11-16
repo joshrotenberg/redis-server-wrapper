@@ -1892,6 +1892,15 @@ impl RedisCluster {
             inner: cluster::RedisCluster::builder(),
         }
     }
+
+    /// Create a cluster builder for Redis Stack nodes.
+    ///
+    /// See [`cluster::RedisCluster::stack`].
+    pub fn stack() -> RedisClusterBuilder {
+        RedisClusterBuilder {
+            inner: cluster::RedisCluster::stack(),
+        }
+    }
 }
 
 /// Synchronous builder for a Redis Cluster.
@@ -2357,6 +2366,15 @@ impl RedisClusterBuilder {
         self
     }
 
+    /// Load the Redis Stack modules bundled with the server binary on every
+    /// node.
+    ///
+    /// See [`cluster::RedisClusterBuilder::with_stack_modules`].
+    pub fn with_stack_modules(mut self) -> Self {
+        self.inner = self.inner.with_stack_modules();
+        self
+    }
+
     /// Start all nodes and form the cluster. Blocks until the cluster is ready.
     pub fn start(self) -> Result<RedisClusterHandle> {
         let rt = Runtime::new()?;
@@ -2458,6 +2476,16 @@ impl RedisSentinel {
     pub fn builder() -> RedisSentinelBuilder {
         RedisSentinelBuilder {
             inner: sentinel::RedisSentinel::builder(),
+        }
+    }
+
+    /// Create a sentinel builder whose master and replicas are Redis Stack
+    /// servers.
+    ///
+    /// See [`sentinel::RedisSentinel::stack`].
+    pub fn stack() -> RedisSentinelBuilder {
+        RedisSentinelBuilder {
+            inner: sentinel::RedisSentinel::stack(),
         }
     }
 }
@@ -2677,6 +2705,15 @@ impl RedisSentinelBuilder {
     /// Set a custom `redis-cli` binary path.
     pub fn redis_cli_bin(mut self, bin: impl Into<String>) -> Self {
         self.inner = self.inner.redis_cli_bin(bin);
+        self
+    }
+
+    /// Load the Redis Stack modules bundled with the server binary on the
+    /// master and every replica.
+    ///
+    /// See [`sentinel::RedisSentinelBuilder::with_stack_modules`].
+    pub fn with_stack_modules(mut self) -> Self {
+        self.inner = self.inner.with_stack_modules();
         self
     }
 

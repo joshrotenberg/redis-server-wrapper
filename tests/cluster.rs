@@ -305,3 +305,52 @@ async fn wait_for_all_healthy_and_cluster_info() {
         );
     }
 }
+
+#[tokio::test]
+async fn default_cluster_loads_no_stack_modules() {
+    let cluster = RedisCluster::builder()
+        .masters(3)
+        .replicas_per_master(0)
+        .base_port(17080)
+        .start()
+        .await
+        .expect("failed to start cluster");
+
+    for node in cluster.nodes() {
+        let modules = node.modules().await.unwrap();
+        assert!(
+            modules
+                .iter()
+                .all(|m| !m.path.contains("redis-stack-server")),
+            "no Redis Stack module should load by default on {}: {modules:?}",
+            node.addr()
+        );
+    }
+}
+
+#[tokio::test]
+async fn stack_cluster_loads_stack_modules_on_every_node() {
+    if redis_server_wrapper::stack::find_stack_server_bin().is_none() {
+        eprintln!("skipping: no Redis Stack install found");
+        return;
+    }
+
+    let cluster = RedisCluster::stack()
+        .masters(3)
+        .replicas_per_master(0)
+        .base_port(17070)
+        .start()
+        .await
+        .expect("failed to start a Redis Stack cluster");
+
+    for node in cluster.nodes() {
+        let modules = node.modules().await.unwrap();
+        assert!(
+            modules
+                .iter()
+                .any(|m| m.path.contains("redis-stack-server")),
+            "Redis Stack modules should load on {}: {modules:?}",
+            node.addr()
+        );
+    }
+}
