@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.5.0...v0.5.1) - 2026-09-28
+
+### Fixed
+
+- stop a topology start from killing a live copy of the same topology ([#197](https://github.com/joshrotenberg/redis-server-wrapper/pull/197))
+- make daemonize(false) start return a handle instead of hanging ([#191](https://github.com/joshrotenberg/redis-server-wrapper/pull/191))
+- stop already-started sentinels when a Sentinel start fails ([#190](https://github.com/joshrotenberg/redis-server-wrapper/pull/190))
+- encode every sentinel.conf value like redis.conf ([#189](https://github.com/joshrotenberg/redis-server-wrapper/pull/189))
+- remove an auto_port server's directory when its handle stops ([#188](https://github.com/joshrotenberg/redis-server-wrapper/pull/188))
+- give each Sentinel topology process its own TLS port ([#187](https://github.com/joshrotenberg/redis-server-wrapper/pull/187))
+- stop standalone start from killing processes it does not own ([#186](https://github.com/joshrotenberg/redis-server-wrapper/pull/186))
+- make stopping a server handle idempotent and ownership-aware ([#168](https://github.com/joshrotenberg/redis-server-wrapper/pull/168))
+- stop force_kill's group signal from reaching every process on Linux ([#177](https://github.com/joshrotenberg/redis-server-wrapper/pull/177))
+
+### Other
+
+- stop the reserve_ephemeral_port_on tests racing for the reserved port ([#192](https://github.com/joshrotenberg/redis-server-wrapper/pull/192))
+- correct the password_auth comment and assert an authenticated command ([#173](https://github.com/joshrotenberg/redis-server-wrapper/pull/173))
+
 ## [0.5.0](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.4.3...v0.5.0) - 2026-08-06
 
 ### Breaking
