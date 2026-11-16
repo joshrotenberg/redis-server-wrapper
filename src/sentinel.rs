@@ -418,6 +418,11 @@ impl RedisSentinelBuilder {
     }
 
     /// Set an arbitrary config directive for all processes in the topology.
+    ///
+    /// The key must be a plain directive name (`^[a-z][a-z0-9._-]*$`,
+    /// case-insensitive). [`start`](Self::start) returns
+    /// [`Error::InvalidDirectiveName`] for any other key and
+    /// [`Error::ReservedDirective`] for a wrapper-generated one.
     pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.extra.insert(key.into(), value.into());
         self
@@ -666,6 +671,9 @@ impl RedisSentinelBuilder {
         // land ahead of the generated `sentinel monitor` lines and change
         // which master every sentinel in the topology watches.
         for key in self.extra.keys() {
+            if !crate::config_token::is_directive_name(key) {
+                return Err(Error::InvalidDirectiveName { key: key.clone() });
+            }
             if crate::config_token::is_reserved(key) || key.trim().eq_ignore_ascii_case("sentinel")
             {
                 return Err(Error::ReservedDirective { key: key.clone() });
@@ -1766,6 +1774,35 @@ mod tests {
             .validate_topology()
             .expect_err("an extra port directive must be rejected");
         assert!(matches!(err, Error::ReservedDirective { .. }), "{err}");
+    }
+
+    #[test]
+    fn extra_rejects_unsafe_keys() {
+        for key in [
+            "maxmemory 10mb",
+            "maxmemory\nrequirepass",
+            "maxmemory#x",
+            "max\"memory",
+        ] {
+            let err = sentinel()
+                .extra(key, "x")
+                .validate_topology()
+                .expect_err("unsafe key must be rejected");
+            assert!(
+                matches!(err, Error::InvalidDirectiveName { key: ref k } if k == key),
+                "unexpected error for {key:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn extra_allows_maxmemory_policy() {
+        assert!(
+            sentinel()
+                .extra("maxmemory-policy", "allkeys-lru")
+                .validate_topology()
+                .is_ok()
+        );
     }
 
     #[test]

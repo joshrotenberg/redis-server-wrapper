@@ -6,7 +6,7 @@
 //! the encoder wrote, which is the part a hand-rolled quoting scheme gets
 //! wrong.
 
-use redis_server_wrapper::{Error, RedisServer};
+use redis_server_wrapper::{Error, RedisCluster, RedisSentinel, RedisServer};
 
 /// Passwords containing every character class that `sdssplitargs` treats
 /// specially. Each must round-trip: the server must require it, and it must
@@ -145,4 +145,84 @@ async fn generated_config_is_not_world_readable() {
             "config carrying requirepass is readable beyond its owner"
         );
     }
+}
+
+/// The key behind each `extra()` injection the builders must refuse: a
+/// newline that would start a second directive, a space, a `#`, and a quote.
+const UNSAFE_EXTRA_KEYS: &[&str] = &[
+    "maxmemory 10mb\nrequirepass",
+    "maxmemory 10mb",
+    "maxmemory#x",
+    "max\"memory",
+];
+
+fn assert_invalid_key(err: Error, key: &str) {
+    assert!(
+        matches!(err, Error::InvalidDirectiveName { key: ref k } if k == key),
+        "unexpected error for {key:?}: {err}"
+    );
+}
+
+#[tokio::test]
+async fn server_start_rejects_an_unsafe_extra_key() {
+    for key in UNSAFE_EXTRA_KEYS {
+        let err = RedisServer::new()
+            .port(16911)
+            .extra(*key, "x")
+            .start()
+            .await
+            .err()
+            .expect("an unsafe extra key must be rejected before launching");
+        assert_invalid_key(err, key);
+    }
+    assert!(
+        !redis_server_wrapper::RedisCli::new()
+            .port(16911)
+            .ping()
+            .await
+    );
+}
+
+#[tokio::test]
+async fn cluster_start_rejects_an_unsafe_extra_key() {
+    for key in UNSAFE_EXTRA_KEYS {
+        let err = RedisCluster::builder()
+            .masters(3)
+            .replicas_per_master(0)
+            .base_port(16912)
+            .extra(*key, "x")
+            .start()
+            .await
+            .err()
+            .expect("an unsafe extra key must be rejected before launching");
+        assert_invalid_key(err, key);
+    }
+    assert!(
+        !redis_server_wrapper::RedisCli::new()
+            .port(16912)
+            .ping()
+            .await
+    );
+}
+
+#[tokio::test]
+async fn sentinel_start_rejects_an_unsafe_extra_key() {
+    for key in UNSAFE_EXTRA_KEYS {
+        let err = RedisSentinel::builder()
+            .master_port(16915)
+            .replica_base_port(16916)
+            .sentinel_base_port(16917)
+            .extra(*key, "x")
+            .start()
+            .await
+            .err()
+            .expect("an unsafe extra key must be rejected before launching");
+        assert_invalid_key(err, key);
+    }
+    assert!(
+        !redis_server_wrapper::RedisCli::new()
+            .port(16915)
+            .ping()
+            .await
+    );
 }

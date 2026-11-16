@@ -64,9 +64,11 @@ pub fn encode(value: &str) -> String {
 /// Encode a directive and its arguments as a complete config line, including
 /// the trailing newline.
 ///
-/// The key is emitted verbatim: keys come from the crate, never from caller
-/// input, and quoting them would break Redis parsing. Every argument is passed
-/// through [`encode`].
+/// The key is emitted verbatim, because quoting it would break Redis parsing.
+/// Callers must pass a plain directive name: the crate's own keys are
+/// constants, and caller-supplied `extra()` keys are checked with
+/// [`is_directive_name`] before any config is written. Every argument is
+/// passed through [`encode`].
 ///
 /// # Example
 ///
@@ -87,6 +89,37 @@ where
     }
     line.push('\n');
     line
+}
+
+/// Whether `key` is a plain directive name: an ASCII letter followed by ASCII
+/// letters, digits, `.`, `_`, or `-` (`^[a-z][a-z0-9._-]*$`,
+/// case-insensitive).
+///
+/// `.` and `_` are allowed because configs registered through the module API
+/// are named `<module>.<config>` (for example `mymodule.max-items`) and are
+/// set in `redis.conf` under that name.
+///
+/// [`directive`] writes the key verbatim, so a key containing whitespace, a
+/// newline, `#`, or a quote would change the meaning of the line or add
+/// another directive. `extra()` keys that fail this check are rejected with
+/// [`Error::InvalidDirectiveName`](crate::Error::InvalidDirectiveName).
+///
+/// # Example
+///
+/// ```
+/// use redis_server_wrapper::config_token::is_directive_name;
+///
+/// assert!(is_directive_name("maxmemory-policy"));
+/// assert!(is_directive_name("MaxMemory"));
+/// assert!(is_directive_name("mymodule.max-items"));
+/// assert!(!is_directive_name("maxmemory 10mb\nrequirepass"));
+/// assert!(!is_directive_name("1maxmemory"));
+/// assert!(!is_directive_name(""));
+/// ```
+pub fn is_directive_name(key: &str) -> bool {
+    let mut chars = key.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 /// Config directives the wrapper generates and depends on.
@@ -223,6 +256,46 @@ mod tests {
     #[test]
     fn non_ascii_is_quoted() {
         assert_eq!(encode("café"), "\"café\"");
+    }
+
+    #[test]
+    fn directive_name_accepts_plain_names() {
+        for key in [
+            "maxmemory",
+            "maxmemory-policy",
+            "MAXMEMORY",
+            "save",
+            "hz",
+            "a1-b2",
+            "max_memory",
+            "max.memory",
+            "mymodule.max-items",
+        ] {
+            assert!(is_directive_name(key), "{key:?} should be accepted");
+        }
+    }
+
+    #[test]
+    fn directive_name_rejects_unsafe_keys() {
+        for key in [
+            "",
+            "maxmemory 10mb",
+            " maxmemory",
+            "maxmemory\t",
+            "maxmemory\nrequirepass",
+            "maxmemory\r",
+            "maxmemory#x",
+            "#maxmemory",
+            "max\"memory",
+            "max'memory",
+            "1maxmemory",
+            "-maxmemory",
+            ".maxmemory",
+            "_maxmemory",
+            "maxm\u{e9}moire",
+        ] {
+            assert!(!is_directive_name(key), "{key:?} should be rejected");
+        }
     }
 
     #[test]

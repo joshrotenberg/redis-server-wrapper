@@ -187,6 +187,21 @@ pub enum Error {
         key: String,
     },
 
+    /// An `extra()` key is not a plain directive name.
+    ///
+    /// Keys are written to the config file verbatim, so only names matching
+    /// `^[a-z][a-z0-9._-]*$` (case-insensitive) are accepted. `.` and `_`
+    /// cover module configs such as `mymodule.max-items`. A key with
+    /// whitespace, a newline, `#`, or a quote could add or alter directives.
+    #[error(
+        "extra() key {key:?} is not a valid directive name; \
+         expected an ASCII letter followed by letters, digits, '.', '_', or '-'"
+    )]
+    InvalidDirectiveName {
+        /// The key that was rejected.
+        key: String,
+    },
+
     /// A TLS certificate generation error.
     #[error("TLS error: {0}")]
     Tls(String),
