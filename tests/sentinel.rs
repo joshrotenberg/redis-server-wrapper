@@ -320,3 +320,50 @@ async fn sentinel_simulate_failure_crash_after_election() {
     .await
     .expect("armed sentinel should stop responding after crashing");
 }
+
+#[tokio::test]
+async fn a_stopped_sentinel_handle_does_not_kill_a_sentinel_ports_next_occupant() {
+    // stop() then Drop used to run the whole stop sequence twice, and
+    // kill_by_port ran on every sentinel port each time. A process that took
+    // a sentinel port between the two was killed.
+    let topo = RedisSentinel::builder()
+        .master_port(18800)
+        .replicas(1)
+        .replica_base_port(18801)
+        .sentinels(3)
+        .sentinel_base_port(28800)
+        .start()
+        .await
+        .expect("failed to start sentinel topology");
+    let sentinel_port: u16 = topo.sentinel_addrs()[0]
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .expect("sentinel address has a port");
+    topo.stop();
+    assert!(topo.is_stopped());
+
+    // A separate process, since kill_by_port skips the test's own pid.
+    let bystander = RedisServer::new()
+        .port(sentinel_port)
+        .dir(std::env::temp_dir().join("rsw-sentinel-stop-idempotence"))
+        .start()
+        .await
+        .expect("a server should be able to take the freed sentinel port");
+    bystander
+        .run(&["SET", "survivor", "yes"])
+        .await
+        .expect("seed failed");
+
+    drop(topo);
+
+    assert!(
+        bystander.is_alive().await,
+        "dropping a stopped sentinel handle killed the sentinel port's new occupant"
+    );
+    let value = bystander
+        .run(&["GET", "survivor"])
+        .await
+        .expect("the bystander should still answer");
+    assert_eq!(value.trim(), "yes");
+}
