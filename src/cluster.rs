@@ -137,6 +137,7 @@ pub struct RedisClusterBuilder {
     extra: HashMap<String, String>,
     redis_server_bin: String,
     redis_cli_bin: String,
+    stack_modules: bool,
     dir: Option<PathBuf>,
     node_config_fn: Option<Box<dyn FnMut(NodeContext) -> RedisServer + Send>>,
 }
@@ -677,6 +678,28 @@ impl RedisClusterBuilder {
         self
     }
 
+    /// Load the Redis Stack modules bundled with the server binary on every
+    /// node.
+    ///
+    /// See [`RedisServer::with_stack_modules`]. Off by default.
+    pub fn with_stack_modules(mut self) -> Self {
+        self.stack_modules = true;
+        self
+    }
+
+    /// A node builder with the topology-wide binaries and Stack module
+    /// setting applied. Every node starts from this.
+    fn new_node(&self) -> RedisServer {
+        let server = RedisServer::new()
+            .redis_server_bin(&self.redis_server_bin)
+            .redis_cli_bin(&self.redis_cli_bin);
+        if self.stack_modules {
+            server.with_stack_modules()
+        } else {
+            server
+        }
+    }
+
     fn total_nodes(&self) -> u16 {
         self.masters * (1 + self.replicas_per_master)
     }
@@ -906,14 +929,13 @@ impl RedisClusterBuilder {
         let mut nodes = Vec::new();
         for (index, port) in ports.into_iter().enumerate() {
             let node_dir = cluster_base.join(format!("node-{port}"));
-            let mut server = RedisServer::new()
+            let mut server = self
+                .new_node()
                 .port(port)
                 .bind(&self.bind)
                 .dir(node_dir)
                 .cluster_enabled(true)
-                .cluster_node_timeout(self.cluster_node_timeout.unwrap_or(5000))
-                .redis_server_bin(&self.redis_server_bin)
-                .redis_cli_bin(&self.redis_cli_bin);
+                .cluster_node_timeout(self.cluster_node_timeout.unwrap_or(5000));
             if let Some(v) = self.cluster_require_full_coverage {
                 server = server.cluster_require_full_coverage(v);
             }
@@ -1303,9 +1325,24 @@ impl RedisCluster {
             extra: HashMap::new(),
             redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),
+            stack_modules: false,
             dir: None,
             node_config_fn: None,
         }
+    }
+
+    /// Create a cluster builder for Redis Stack nodes.
+    ///
+    /// Uses the `redis-server` binary from a Redis Stack Homebrew cask when
+    /// one is installed (see [`crate::stack::find_stack_server_bin`]) and
+    /// loads the Stack modules beside it on every node. Without a Redis Stack
+    /// install this is equivalent to [`builder`](Self::builder).
+    pub fn stack() -> RedisClusterBuilder {
+        let mut builder = Self::builder().with_stack_modules();
+        if let Some(bin) = crate::stack::find_stack_server_bin() {
+            builder.redis_server_bin = bin;
+        }
+        builder
     }
 }
 
@@ -1646,6 +1683,40 @@ mod tests {
         assert!(b.cluster_migration_barrier.is_none());
         assert!(b.cluster_announce_hostname.is_none());
         assert!(b.cluster_preferred_endpoint_type.is_none());
+    }
+
+    #[test]
+    fn nodes_do_not_load_stack_modules_by_default() {
+        let b = RedisCluster::builder().redis_server_bin("/opt/stack/bin/redis-server");
+        let node = b.new_node();
+        assert!(!node.test_config().stack_modules);
+        assert_eq!(
+            node.test_config().redis_server_bin,
+            "/opt/stack/bin/redis-server"
+        );
+    }
+
+    #[test]
+    fn with_stack_modules_reaches_every_node() {
+        let b = RedisCluster::builder()
+            .redis_server_bin("/opt/stack/bin/redis-server")
+            .with_stack_modules();
+        let node = b.new_node();
+        assert!(node.test_config().stack_modules);
+        assert_eq!(
+            node.test_config().redis_server_bin,
+            "/opt/stack/bin/redis-server"
+        );
+    }
+
+    #[test]
+    fn stack_uses_the_stack_binary_when_installed() {
+        let b = RedisCluster::stack();
+        assert!(b.stack_modules);
+        let expected =
+            crate::stack::find_stack_server_bin().unwrap_or_else(|| "redis-server".to_string());
+        assert_eq!(b.redis_server_bin, expected);
+        assert!(b.new_node().test_config().stack_modules);
     }
 
     #[test]

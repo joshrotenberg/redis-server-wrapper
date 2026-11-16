@@ -209,6 +209,27 @@ async fn test_module_is_loaded() {
 Clusters and Sentinel topologies propagate modules to every node, so they have
 `require_module_on_all_nodes` and `require_module_on_data_nodes` respectively.
 
+### Redis Stack
+
+`RedisServer::new()` runs `redis-server` from PATH with no modules, even when a
+Redis Stack Homebrew cask is installed. Ask for Stack explicitly:
+
+```rust
+use redis_server_wrapper::RedisServer;
+
+async fn test_with_stack() {
+    // Uses the cask's redis-server and loads the RediSearch, JSON,
+    // TimeSeries, and Bloom modules beside it. Without a Stack install it
+    // falls back to redis-server on PATH with no modules.
+    let server = RedisServer::stack().port(6400).start().await.unwrap();
+    server.require_module("search").await.unwrap();
+}
+```
+
+For a Stack install somewhere else, combine `.redis_server_bin()` with
+`.with_stack_modules()`, which loads the modules found in a `lib/` directory
+beside the binary.
+
 ### Ports and Cleanup
 
 Startup never stops a Redis process it did not start. If a port a topology needs

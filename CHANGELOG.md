@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- `RedisServer::new()` runs `redis-server` from `PATH` and loads no Redis
+  Stack modules. It previously preferred a `redis-stack-server` Homebrew cask
+  binary when one was installed and loaded the modules beside it. Use
+  `RedisServer::stack()` for the old behavior, or `.redis_server_bin(..)` with
+  `.with_stack_modules()` for a Stack install elsewhere. The
+  `RedisServerConfig::no_stack_modules` field is replaced by `stack_modules`,
+  which defaults to `false`. `no_stack_modules()` and
+  `stack::detect_server_bin()` are deprecated
+  ([#174](https://github.com/joshrotenberg/redis-server-wrapper/issues/174))
+- `RedisCluster` and `RedisSentinel` data nodes no longer load Redis Stack
+  modules when given a Stack binary through `.redis_server_bin(..)`. Use
+  `RedisCluster::stack()` / `RedisSentinel::stack()`, or
+  `.with_stack_modules()` on either builder (blocking builders included).
+  Sentinel processes never load modules
+  ([#174](https://github.com/joshrotenberg/redis-server-wrapper/issues/174))
+- A `dump.rdb` written by a Stack server with module data cannot be loaded
+  by a server without those modules. A default data directory under the
+  system temp dir that an earlier version filled from a Stack install makes
+  the plain `redis-server` start fail with "The RDB file contains AUX module
+  data I can't load". Delete that directory, set `.dir(..)`, or start with
+  Stack modules
+
 ## [0.5.1](https://github.com/joshrotenberg/redis-server-wrapper/compare/v0.5.0...v0.5.1) - 2026-09-28
 
 ### Fixed

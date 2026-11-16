@@ -72,6 +72,7 @@ pub struct RedisSentinelBuilder {
     extra: HashMap<String, String>,
     redis_server_bin: String,
     redis_cli_bin: String,
+    stack_modules: bool,
     dir: Option<PathBuf>,
     monitored_masters: Vec<MonitoredMaster>,
 }
@@ -438,6 +439,29 @@ impl RedisSentinelBuilder {
     pub fn redis_cli_bin(mut self, bin: impl Into<String>) -> Self {
         self.redis_cli_bin = bin.into();
         self
+    }
+
+    /// Load the Redis Stack modules bundled with the server binary on the
+    /// master and every replica.
+    ///
+    /// Sentinel processes never load modules. See
+    /// [`RedisServer::with_stack_modules`]. Off by default.
+    pub fn with_stack_modules(mut self) -> Self {
+        self.stack_modules = true;
+        self
+    }
+
+    /// A data-node builder with the topology-wide binaries and Stack module
+    /// setting applied. The master and every replica start from this.
+    fn new_data_node(&self) -> RedisServer {
+        let server = RedisServer::new()
+            .redis_server_bin(&self.redis_server_bin)
+            .redis_cli_bin(&self.redis_cli_bin);
+        if self.stack_modules {
+            server.with_stack_modules()
+        } else {
+            server
+        }
     }
 
     /// Add an additional master for the sentinels to monitor.
@@ -869,12 +893,11 @@ impl RedisSentinelBuilder {
 
         // 1. Start master.
         let appendonly = self.appendonly.unwrap_or(true);
-        let master = RedisServer::new()
+        let master = self
+            .new_data_node()
             .bind(&self.bind)
             .dir(base_dir.join("master"))
-            .appendonly(appendonly)
-            .redis_server_bin(&self.redis_server_bin)
-            .redis_cli_bin(&self.redis_cli_bin);
+            .appendonly(appendonly);
         let mut master = self.apply_tls_to_server(master, self.master_port);
         if let Some(ref logfile) = self.logfile {
             master = master.logfile(logfile.clone());
@@ -910,13 +933,12 @@ impl RedisSentinelBuilder {
         // 2. Start replicas.
         let mut replicas = Vec::new();
         for port in self.replica_ports() {
-            let replica = RedisServer::new()
+            let replica = self
+                .new_data_node()
                 .bind(&self.bind)
                 .dir(base_dir.join(format!("replica-{port}")))
                 .appendonly(appendonly)
-                .replicaof(self.bind.clone(), self.master_port)
-                .redis_server_bin(&self.redis_server_bin)
-                .redis_cli_bin(&self.redis_cli_bin);
+                .replicaof(self.bind.clone(), self.master_port);
             let mut replica = self.apply_tls_to_server(replica, port);
             if let Some(ref logfile) = self.logfile {
                 replica = replica.logfile(logfile.clone());
@@ -1204,9 +1226,26 @@ impl RedisSentinel {
             extra: HashMap::new(),
             redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),
+            stack_modules: false,
             dir: None,
             monitored_masters: Vec::new(),
         }
+    }
+
+    /// Create a sentinel builder whose master and replicas are Redis Stack
+    /// servers.
+    ///
+    /// Uses the `redis-server` binary from a Redis Stack Homebrew cask when
+    /// one is installed (see [`crate::stack::find_stack_server_bin`]) and
+    /// loads the Stack modules beside it on the master and replicas. The
+    /// sentinels run the same binary without modules. Without a Redis Stack
+    /// install this is equivalent to [`builder`](Self::builder).
+    pub fn stack() -> RedisSentinelBuilder {
+        let mut builder = Self::builder().with_stack_modules();
+        if let Some(bin) = crate::stack::find_stack_server_bin() {
+            builder.redis_server_bin = bin;
+        }
+        builder
     }
 }
 
@@ -1605,6 +1644,40 @@ mod tests {
         assert!(b.enable_module_command.is_none());
         assert!(b.extra.is_empty());
         assert!(b.monitored_masters.is_empty());
+    }
+
+    #[test]
+    fn data_nodes_do_not_load_stack_modules_by_default() {
+        let b = RedisSentinel::builder().redis_server_bin("/opt/stack/bin/redis-server");
+        let node = b.new_data_node();
+        assert!(!node.test_config().stack_modules);
+        assert_eq!(
+            node.test_config().redis_server_bin,
+            "/opt/stack/bin/redis-server"
+        );
+    }
+
+    #[test]
+    fn with_stack_modules_reaches_every_data_node() {
+        let b = RedisSentinel::builder()
+            .redis_server_bin("/opt/stack/bin/redis-server")
+            .with_stack_modules();
+        let node = b.new_data_node();
+        assert!(node.test_config().stack_modules);
+        assert_eq!(
+            node.test_config().redis_server_bin,
+            "/opt/stack/bin/redis-server"
+        );
+    }
+
+    #[test]
+    fn stack_uses_the_stack_binary_when_installed() {
+        let b = RedisSentinel::stack();
+        assert!(b.stack_modules);
+        let expected =
+            crate::stack::find_stack_server_bin().unwrap_or_else(|| "redis-server".to_string());
+        assert_eq!(b.redis_server_bin, expected);
+        assert!(b.new_data_node().test_config().stack_modules);
     }
 
     #[test]
