@@ -557,6 +557,27 @@ impl std::fmt::Display for LogLevel {
     }
 }
 
+impl RedisServerConfig {
+    /// The port the server is reachable on: the plain port, or the
+    /// `tls-port` when the plain listener is disabled (`0`).
+    ///
+    /// Names the node directory, so two TLS-only servers on different TLS
+    /// ports in the same `dir` do not share one.
+    pub(crate) fn effective_port(&self) -> u16 {
+        if self.port == 0 {
+            self.tls_port.unwrap_or(self.port)
+        } else {
+            self.port
+        }
+    }
+
+    /// The `node-<port>` directory under `dir`, named by
+    /// [`Self::effective_port`].
+    pub(crate) fn node_dir(&self) -> PathBuf {
+        self.dir.join(format!("node-{}", self.effective_port()))
+    }
+}
+
 impl Default for RedisServerConfig {
     fn default() -> Self {
         Self {
@@ -2198,7 +2219,7 @@ impl RedisServer {
     async fn start_on_the_configured_port(self) -> Result<RedisServerHandle> {
         let span = tracing::debug_span!(
             "server_start",
-            port = self.config.port,
+            port = self.config.effective_port(),
             bind = %self.config.bind
         );
         async move {
@@ -2215,7 +2236,8 @@ impl RedisServer {
                 });
             }
 
-            let node_dir = self.config.dir.join(format!("node-{}", self.config.port));
+            let node_dir = self.config.node_dir();
+            let port = self.config.effective_port();
 
             // Claim the node directory before anything else touches it. The
             // default `dir` is shared by every process on the machine, so
@@ -2233,7 +2255,7 @@ impl RedisServer {
             let lock = crate::owner_lock::OwnerLock::acquire(
                 &node_dir,
                 &self.config.bind,
-                self.config.port,
+                port,
                 crate::preflight::PortRole::Server,
             )?;
 
@@ -2244,7 +2266,7 @@ impl RedisServer {
             // start would not even report.
             crate::preflight::ensure_ports_available(
                 &self.config.bind,
-                [(self.config.port, crate::preflight::PortRole::Server)],
+                [(port, crate::preflight::PortRole::Server)],
             )?;
 
             let (cli, pid, child) =
@@ -3040,11 +3062,7 @@ async fn launch_server(
     // paths hand back the exact same `cli` -- the foreground path also needs
     // it in hand before it can race readiness against the child exiting.
     let tls_only = config.port == 0;
-    let admin_port = if tls_only {
-        config.tls_port.unwrap_or(config.port)
-    } else {
-        config.port
-    };
+    let admin_port = config.effective_port();
     let mut cli = RedisCli::new()
         .bin(&config.redis_cli_bin)
         .host(&config.bind)
@@ -3296,11 +3314,7 @@ impl RedisServerHandle {
     /// disabled (`0`) in favor of a TLS-only listener, the `tls-port` the
     /// server is actually reachable on.
     pub fn port(&self) -> u16 {
-        if self.config.port == 0 {
-            self.config.tls_port.unwrap_or(self.config.port)
-        } else {
-            self.config.port
-        }
+        self.config.effective_port()
     }
 
     /// Path to the node directory the wrapper generated for this server.
@@ -3310,7 +3324,7 @@ impl RedisServerHandle {
     /// is removed once the handle stops (see [`Self::stop`]); read it before
     /// then if you need it afterward.
     pub fn node_dir(&self) -> PathBuf {
-        self.config.dir.join(format!("node-{}", self.config.port))
+        self.config.node_dir()
     }
 
     /// Path to the generated `redis.conf` for this server.
@@ -3355,7 +3369,7 @@ impl RedisServerHandle {
         }
         Err(Error::ModuleNotLoaded {
             name: name.to_string(),
-            port: self.config.port,
+            port: self.port(),
             loaded: loaded.into_iter().map(|m| m.name).collect(),
         })
     }
@@ -3442,7 +3456,7 @@ impl RedisServerHandle {
     /// default `{node_dir}/redis.log` the generated config pins when no
     /// `logfile` is configured.
     pub fn log_path(&self) -> PathBuf {
-        let node_dir = self.config.dir.join(format!("node-{}", self.config.port));
+        let node_dir = self.config.node_dir();
         resolve_log_path(&self.config, &node_dir)
     }
 
@@ -3555,11 +3569,11 @@ impl RedisServerHandle {
         // step below addresses the process by port or escalates past the
         // recorded pid. The second stop would target the newcomer.
         if self.stopped.swap(true, Ordering::SeqCst) {
-            tracing::debug!(port = self.config.port, "stop_already_done");
+            tracing::debug!(port = self.port(), "stop_already_done");
             return;
         }
 
-        let span = tracing::debug_span!("server_stop", port = self.config.port);
+        let span = tracing::debug_span!("server_stop", port = self.port());
         let _guard = span.entered();
 
         // Step 1: graceful shutdown.
@@ -3631,8 +3645,8 @@ impl RedisServerHandle {
         // window tiny: the port cannot have been handed to anyone else in the
         // moments since, because our own process was still holding it.
         if shutdown_failed {
-            tracing::debug!(port = self.config.port, "port_cleanup");
-            crate::process::kill_by_port(self.config.port);
+            tracing::debug!(port = self.port(), "port_cleanup");
+            crate::process::kill_by_port(self.port());
         }
 
         // Step 5: release the owner lock, if this handle still holds one.
@@ -3691,9 +3705,9 @@ impl RedisServerHandle {
     /// modules are passed on the command line rather than baked into the
     /// config file.
     pub(crate) async fn restart(&mut self, timeout: Duration) -> Result<()> {
-        let span = tracing::debug_span!("server_restart", port = self.config.port);
+        let span = tracing::debug_span!("server_restart", port = self.port());
         async move {
-            let node_dir = self.config.dir.join(format!("node-{}", self.config.port));
+            let node_dir = self.config.node_dir();
             let _ = fs::remove_file(node_dir.join("redis.pid"));
 
             // Best-effort reap of whatever this handle held before: a
@@ -4343,5 +4357,34 @@ mod tests {
             handle.log_path(),
             PathBuf::from("/tmp/rsw-test/node-6400/custom.log")
         );
+    }
+
+    #[test]
+    fn tls_only_node_dir_is_named_by_the_tls_port() {
+        let config = RedisServerConfig {
+            port: 0,
+            tls_port: Some(6401),
+            dir: PathBuf::from("/tmp/rsw-test"),
+            ..RedisServerConfig::default()
+        };
+        let handle = handle_with_config(config);
+        assert_eq!(handle.port(), 6401);
+        assert_eq!(handle.node_dir(), PathBuf::from("/tmp/rsw-test/node-6401"));
+        assert_eq!(
+            handle.log_path(),
+            PathBuf::from("/tmp/rsw-test/node-6401/redis.log")
+        );
+    }
+
+    #[test]
+    fn plain_port_names_the_node_dir_when_tls_is_also_on() {
+        let config = RedisServerConfig {
+            port: 6400,
+            tls_port: Some(6401),
+            dir: PathBuf::from("/tmp/rsw-test"),
+            ..RedisServerConfig::default()
+        };
+        let handle = handle_with_config(config);
+        assert_eq!(handle.node_dir(), PathBuf::from("/tmp/rsw-test/node-6400"));
     }
 }
