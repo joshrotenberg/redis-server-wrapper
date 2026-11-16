@@ -1072,6 +1072,7 @@ impl RedisSentinelBuilder {
                 ca_cert_file: self.tls_ca_cert_file,
             },
             lock: std::sync::Mutex::new(Some(lock)),
+            stopped: std::sync::atomic::AtomicBool::new(false),
         };
 
         // Sentinels learn about each other through the master they share, so a
@@ -1153,6 +1154,12 @@ pub struct RedisSentinelHandle {
     /// use; the `Mutex` mirrors [`crate::server::RedisServerHandle`]'s so it
     /// can be taken by `&self` from [`Self::stop`] and [`Drop`]).
     lock: std::sync::Mutex<Option<crate::owner_lock::OwnerLock>>,
+    /// Whether this handle has already stopped its topology.
+    ///
+    /// Interior mutability because `stop` takes `&self` and `Drop` has to see
+    /// the result. Without it a handle stopped explicitly stops again on
+    /// drop, and by then a sentinel port may belong to something else.
+    stopped: std::sync::atomic::AtomicBool,
 }
 
 /// Entry point for building a Redis Sentinel topology.
@@ -1473,7 +1480,9 @@ impl RedisSentinelHandle {
     /// 1. Sends `SHUTDOWN NOSAVE` to each sentinel process.
     /// 2. Waits 500ms for them to exit.
     /// 3. For each sentinel PID that is still alive, calls [`crate::process::force_kill`].
-    /// 4. Calls [`crate::process::kill_by_port`] for each sentinel port as a safety net.
+    /// 4. For each sentinel whose PID was still alive after step 2, calls
+    ///    [`crate::process::kill_by_port`] on its port. A sentinel that exited
+    ///    on request took its listener with it, so its port is left alone.
     /// 5. Stops the master and every replica via their own handles'
     ///    [`RedisServerHandle::stop`](crate::server::RedisServerHandle::stop),
     ///    which uses the same escalating strategy.
@@ -1481,10 +1490,19 @@ impl RedisSentinelHandle {
     ///    started is confirmed stopped, so a later start of the same shape
     ///    sees the lock free rather than a live owner.
     ///
-    /// Idempotent: a second call finds nothing left to stop (each node's own
-    /// `stopped` guard makes step 5 a no-op) and finds the lock already
-    /// taken by the first call, so step 6 is a no-op too.
+    /// Idempotent: a second call returns immediately, so `Drop` after an
+    /// explicit stop does nothing. By then a sentinel port may belong to an
+    /// unrelated process.
     pub fn stop(&self) {
+        use std::sync::atomic::Ordering;
+
+        // Between the first stop and a second, a sentinel port can be taken
+        // by an unrelated process, and step 4 addresses processes by port.
+        if self.stopped.swap(true, Ordering::SeqCst) {
+            tracing::debug!(master_name = %self.master_name, "stop_already_done");
+            return;
+        }
+
         let span = tracing::debug_span!("sentinel_stop", master_name = %self.master_name);
         let _guard = span.entered();
 
@@ -1501,20 +1519,29 @@ impl RedisSentinelHandle {
         }
         // Step 2: grace period.
         std::thread::sleep(std::time::Duration::from_millis(500));
+        // Decide per sentinel, before escalating, whether the graceful path
+        // failed. Only those sentinels get the port cleanup below; the port
+        // of one that exited on request may already belong to someone else.
+        let shutdown_failed: Vec<bool> = self
+            .sentinel_pids
+            .iter()
+            .map(|pid| crate::process::pid_alive(*pid))
+            .collect();
         // Step 3: force kill any sentinels still alive.
-        for pid in &self.sentinel_pids {
-            if crate::process::pid_alive(*pid) {
+        for (pid, failed) in self.sentinel_pids.iter().zip(&shutdown_failed) {
+            if *failed {
                 tracing::warn!(pid, "force_kill_escalation");
                 crate::process::force_kill(*pid);
             }
         }
-        // Step 4: port cleanup as safety net (see server.rs's stop() for why
-        // this is DEBUG rather than WARN: it runs unconditionally as a
-        // last-resort net, not only when it actually finds something to
-        // clean up).
-        for port in &self.sentinel_ports {
-            tracing::debug!(port, "port_cleanup");
-            crate::process::kill_by_port(*port);
+        // Step 4: port cleanup, only for a sentinel whose graceful shutdown
+        // failed (see RedisServerHandle::stop). `sentinel_ports` and
+        // `sentinel_pids` are built from the same entries, in the same order.
+        for (port, failed) in self.sentinel_ports.iter().zip(&shutdown_failed) {
+            if *failed {
+                tracing::debug!(port, "port_cleanup");
+                crate::process::kill_by_port(*port);
+            }
         }
         // Step 5: stop the master and replicas now, explicitly, rather than
         // waiting for their own handles to drop as a side effect of this
@@ -1528,6 +1555,11 @@ impl RedisSentinelHandle {
         if let Some(lock) = self.lock.lock().unwrap_or_else(|e| e.into_inner()).take() {
             lock.release();
         }
+    }
+
+    /// Whether this handle has already stopped its topology.
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 

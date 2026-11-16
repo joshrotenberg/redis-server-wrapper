@@ -2760,6 +2760,11 @@ impl RedisSentinelHandle {
     pub fn stop(&self) {
         self.inner.stop();
     }
+
+    /// Whether this handle has already stopped its topology.
+    pub fn is_stopped(&self) -> bool {
+        self.inner.is_stopped()
+    }
 }
 
 // ── chaos ─────────────────────────────────────────────────────────────────────
