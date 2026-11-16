@@ -689,6 +689,17 @@ impl RedisClusterBuilder {
     fn validate_topology(&self) -> Result<()> {
         let invalid = |message: String| Err(Error::InvalidTopology { message });
 
+        // Every node receives `extra`. Checking here rejects a bad key before
+        // any node starts, with the same errors `RedisServer` returns.
+        for key in self.extra.keys() {
+            if !crate::config_token::is_directive_name(key) {
+                return Err(Error::InvalidDirectiveName { key: key.clone() });
+            }
+            if crate::config_token::is_reserved(key) {
+                return Err(Error::ReservedDirective { key: key.clone() });
+            }
+        }
+
         if self.masters == 0 {
             return invalid("a cluster needs at least 1 master, got 0".to_string());
         }
@@ -1772,6 +1783,45 @@ mod tests {
             .validate_topology()
             .expect_err("a range past u16::MAX must be rejected");
         assert!(matches!(err, Error::InvalidTopology { .. }), "{err}");
+    }
+
+    #[test]
+    fn extra_rejects_unsafe_keys() {
+        for key in [
+            "maxmemory 10mb",
+            "maxmemory\nrequirepass",
+            "maxmemory#x",
+            "max\"memory",
+        ] {
+            let err = cluster(3, 0, 7000)
+                .extra(key, "x")
+                .validate_topology()
+                .expect_err("unsafe key must be rejected");
+            assert!(
+                matches!(err, Error::InvalidDirectiveName { key: ref k } if k == key),
+                "unexpected error for {key:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn extra_rejects_reserved_directive() {
+        let err = cluster(3, 0, 7000)
+            .extra("port", "6380")
+            .validate_topology()
+            .expect_err("reserved directive must be rejected");
+        assert!(matches!(err, Error::ReservedDirective { .. }), "{err}");
+    }
+
+    #[test]
+    fn extra_allows_maxmemory_keys() {
+        assert!(
+            cluster(3, 0, 7000)
+                .extra("maxmemory", "10mb")
+                .extra("maxmemory-policy", "allkeys-lru")
+                .validate_topology()
+                .is_ok()
+        );
     }
 
     #[test]

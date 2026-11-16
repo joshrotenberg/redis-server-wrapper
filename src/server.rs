@@ -2053,14 +2053,22 @@ impl RedisServer {
     /// that does not exist. [`start`](Self::start) returns
     /// [`Error::ReservedDirective`] for those keys. Use the dedicated builder
     /// method instead.
+    ///
+    /// The key is written verbatim, so it must be a plain directive name
+    /// (`^[a-z][a-z0-9-]*$`, case-insensitive). [`start`](Self::start) returns
+    /// [`Error::InvalidDirectiveName`] for any other key.
     pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.config.extra.insert(key.into(), value.into());
         self
     }
 
-    /// Reject `extra()` keys that collide with wrapper-generated directives.
+    /// Reject `extra()` keys that are not plain directive names or that
+    /// collide with wrapper-generated directives.
     fn validate_extras(&self) -> Result<()> {
         for key in self.config.extra.keys() {
+            if !crate::config_token::is_directive_name(key) {
+                return Err(Error::InvalidDirectiveName { key: key.clone() });
+            }
             if crate::config_token::is_reserved(key) {
                 return Err(Error::ReservedDirective { key: key.clone() });
             }
@@ -4243,6 +4251,33 @@ mod tests {
     #[test]
     fn extra_allows_unreserved_directive() {
         let s = RedisServer::new().extra("maxmemory-samples", "7");
+        assert!(s.validate_extras().is_ok());
+    }
+
+    #[test]
+    fn extra_rejects_unsafe_keys() {
+        for key in [
+            "maxmemory 10mb",
+            "maxmemory\nrequirepass",
+            "maxmemory#x",
+            "max\"memory",
+        ] {
+            let err = RedisServer::new()
+                .extra(key, "x")
+                .validate_extras()
+                .expect_err("unsafe key must be rejected");
+            assert!(
+                matches!(err, Error::InvalidDirectiveName { key: ref k } if k == key),
+                "unexpected error for {key:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn extra_allows_maxmemory_keys() {
+        let s = RedisServer::new()
+            .extra("maxmemory", "10mb")
+            .extra("maxmemory-policy", "allkeys-lru");
         assert!(s.validate_extras().is_ok());
     }
 
