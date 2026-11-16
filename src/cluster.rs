@@ -2160,6 +2160,29 @@ mod tests {
     }
 
     #[test]
+    fn automatic_attempts_never_sit_in_a_fixed_range_directory() {
+        // A fixed-range start locks and reclaims inside base_dir(). An
+        // automatic attempt nested there would leave a stable directory
+        // behind for every random base it drew, and put its nodes inside a
+        // directory another mode reclaims from.
+        let a = cluster(3, 0, 7000).auto_port();
+        let b = cluster(3, 0, 12000).auto_port();
+        let parent_a = a.automatic_base_dir().parent().unwrap().to_path_buf();
+        let parent_b = b.automatic_base_dir().parent().unwrap().to_path_buf();
+        assert_eq!(
+            parent_a, parent_b,
+            "the parent must not depend on base_port"
+        );
+        assert_ne!(parent_a, a.base_dir());
+        assert!(!a.automatic_base_dir().starts_with(a.base_dir()));
+
+        // A caller-supplied dir is the parent, as for a standalone server.
+        let custom = std::env::temp_dir().join("rsw-custom-cluster-dir");
+        let c = cluster(3, 0, 7000).auto_port().dir(&custom);
+        assert_eq!(c.automatic_base_dir().parent().unwrap(), custom);
+    }
+
+    #[test]
     fn base_port_running_past_the_port_space_is_rejected() {
         let err = cluster(3, 1, 65530)
             .validate_topology()

@@ -488,3 +488,61 @@ async fn an_automatic_range_works_with_a_password() {
     assert!(cluster.base_port() >= AUTO_BASE_MIN);
     assert!(cluster.is_healthy().await);
 }
+
+#[tokio::test]
+async fn dropping_an_automatic_cluster_removes_its_directory() {
+    // The cluster counterpart of #185. Every attempt gets a fresh auto-*
+    // directory holding each node's redis.conf, password included, so a
+    // dropped handle must not leave it behind.
+    let dir = std::env::temp_dir().join(format!("rsw-cluster-auto-dir-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("failed to create test dir");
+
+    let base = {
+        let cluster = RedisCluster::builder()
+            .masters(3)
+            .password("secret")
+            .dir(&dir)
+            .auto_port()
+            .start()
+            .await
+            .expect("cluster should start");
+        let base = cluster.cluster_base().to_path_buf();
+        assert!(
+            base.starts_with(&dir),
+            "the attempt directory {base:?} should sit under the caller's dir"
+        );
+        assert!(base.exists());
+        base
+    };
+
+    assert!(
+        !base.exists(),
+        "dropping the cluster must remove its attempt directory {base:?}"
+    );
+    let leftover = auto_dirs(&dir);
+    assert!(
+        leftover.is_empty(),
+        "no auto-* directory should remain, found {leftover:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_fixed_range_cluster_keeps_its_stable_directory() {
+    // Only automatic attempt directories are removed. A fixed range's
+    // directory is the stable one #157 reclaims from, so it must survive.
+    let cluster = RedisCluster::builder()
+        .masters(3)
+        .base_port(19850)
+        .start()
+        .await
+        .expect("cluster should start");
+    let base = cluster.cluster_base().to_path_buf();
+    drop(cluster);
+
+    assert!(
+        base.exists(),
+        "a fixed-range cluster's stable directory {base:?} must be kept"
+    );
+}

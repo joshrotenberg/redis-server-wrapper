@@ -191,10 +191,10 @@ const AUTO_CEILING: u16 = 32768;
 /// do not walk the same candidates in the same order and collide on every
 /// one. Each candidate is a base port whose client range
 /// `[base, base + count)` and bus range `[base + 10000, base + 10000 + count)`
-/// both fit under [`AUTO_CEILING`].
+/// both fit under port 32768.
 ///
 /// Yields nothing when `count` is too large to place: either the two ranges
-/// no longer fit under [`AUTO_CEILING`], or the run is long enough to overlap
+/// no longer fit under port 32768, or the run is long enough to overlap
 /// its own bus range at any base. [`crate::cluster::RedisClusterBuilder`]
 /// rejects both as topology errors before ever asking.
 pub fn candidate_base_ports(count: u16, attempts: usize) -> impl Iterator<Item = u16> {
