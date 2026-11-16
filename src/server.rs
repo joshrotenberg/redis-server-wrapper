@@ -2055,7 +2055,8 @@ impl RedisServer {
     /// method instead.
     ///
     /// The key is written verbatim, so it must be a plain directive name
-    /// (`^[a-z][a-z0-9-]*$`, case-insensitive). [`start`](Self::start) returns
+    /// (`^[a-z][a-z0-9._-]*$`, case-insensitive), which includes module
+    /// configs such as `mymodule.max-items`. [`start`](Self::start) returns
     /// [`Error::InvalidDirectiveName`] for any other key.
     pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.config.extra.insert(key.into(), value.into());

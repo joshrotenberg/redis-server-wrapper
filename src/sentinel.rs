@@ -418,6 +418,11 @@ impl RedisSentinelBuilder {
     }
 
     /// Set an arbitrary config directive for all processes in the topology.
+    ///
+    /// The key must be a plain directive name (`^[a-z][a-z0-9._-]*$`,
+    /// case-insensitive). [`start`](Self::start) returns
+    /// [`Error::InvalidDirectiveName`] for any other key and
+    /// [`Error::ReservedDirective`] for a wrapper-generated one.
     pub fn extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.extra.insert(key.into(), value.into());
         self

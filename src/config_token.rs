@@ -92,7 +92,12 @@ where
 }
 
 /// Whether `key` is a plain directive name: an ASCII letter followed by ASCII
-/// letters, digits, or `-` (`^[a-z][a-z0-9-]*$`, case-insensitive).
+/// letters, digits, `.`, `_`, or `-` (`^[a-z][a-z0-9._-]*$`,
+/// case-insensitive).
+///
+/// `.` and `_` are allowed because configs registered through the module API
+/// are named `<module>.<config>` (for example `mymodule.max-items`) and are
+/// set in `redis.conf` under that name.
 ///
 /// [`directive`] writes the key verbatim, so a key containing whitespace, a
 /// newline, `#`, or a quote would change the meaning of the line or add
@@ -106,6 +111,7 @@ where
 ///
 /// assert!(is_directive_name("maxmemory-policy"));
 /// assert!(is_directive_name("MaxMemory"));
+/// assert!(is_directive_name("mymodule.max-items"));
 /// assert!(!is_directive_name("maxmemory 10mb\nrequirepass"));
 /// assert!(!is_directive_name("1maxmemory"));
 /// assert!(!is_directive_name(""));
@@ -113,7 +119,7 @@ where
 pub fn is_directive_name(key: &str) -> bool {
     let mut chars = key.chars();
     chars.next().is_some_and(|c| c.is_ascii_alphabetic())
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 /// Config directives the wrapper generates and depends on.
@@ -261,6 +267,9 @@ mod tests {
             "save",
             "hz",
             "a1-b2",
+            "max_memory",
+            "max.memory",
+            "mymodule.max-items",
         ] {
             assert!(is_directive_name(key), "{key:?} should be accepted");
         }
@@ -281,8 +290,8 @@ mod tests {
             "max'memory",
             "1maxmemory",
             "-maxmemory",
-            "max_memory",
-            "max.memory",
+            ".maxmemory",
+            "_maxmemory",
             "maxm\u{e9}moire",
         ] {
             assert!(!is_directive_name(key), "{key:?} should be rejected");
