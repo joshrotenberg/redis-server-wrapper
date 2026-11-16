@@ -78,3 +78,42 @@ async fn tls_auth_clients_rejects_missing_client_cert() {
         "expected PING without a client cert to fail under tls_auth_clients(true)"
     );
 }
+
+#[tokio::test]
+async fn tls_only_servers_in_the_same_dir_start_concurrently() {
+    let dir = std::env::temp_dir().join("rsw-tls-only-shared-dir");
+    let certs = generate_test_certs(&dir).expect("cert generation failed");
+
+    let tls_only = |tls_port: u16| {
+        RedisServer::new()
+            .port(0)
+            .tls_port(tls_port)
+            .dir(&dir)
+            .tls_cert_file(&certs.cert_file)
+            .tls_key_file(&certs.key_file)
+            .tls_ca_cert_file(&certs.ca_cert_file)
+            .tls_auth_clients(false)
+            .start()
+    };
+
+    // With the plain port disabled, both used to land in node-0 and the
+    // second start failed on the first one's owner lock.
+    let (a, b) = tokio::join!(tls_only(16804), tls_only(16805));
+    let a = a.expect("failed to start first TLS-only server");
+    let b = b.expect("failed to start second TLS-only server");
+
+    assert!(a.node_dir().ends_with("node-16804"), "{:?}", a.node_dir());
+    assert!(b.node_dir().ends_with("node-16805"), "{:?}", b.node_dir());
+
+    for port in [16804, 16805] {
+        let reply = RedisCli::new()
+            .host("127.0.0.1")
+            .port(port)
+            .tls(true)
+            .cacert(&certs.ca_cert_file)
+            .run(&["PING"])
+            .await
+            .expect("PING over TLS failed");
+        assert_eq!(reply.trim(), "PONG", "port {port}");
+    }
+}
