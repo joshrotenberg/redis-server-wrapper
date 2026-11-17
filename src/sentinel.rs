@@ -1006,13 +1006,18 @@ impl RedisSentinelBuilder {
                     .port(port),
             );
 
-            let status = Command::new(&self.redis_server_bin)
-                .arg(&conf_path)
+            let mut cmd = Command::new(&self.redis_server_bin);
+            cmd.arg(&conf_path)
                 .arg("--sentinel")
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .await?;
+                .stderr(std::process::Stdio::null());
+            // Keeps the daemon from holding a pipe another thread was
+            // creating at the moment of the fork (#202).
+            // SAFETY: the hook only calls fcntl, which is async-signal-safe.
+            unsafe {
+                cmd.pre_exec(crate::process::cloexec_inherited_fds());
+            }
+            let status = cmd.status().await?;
 
             // Pushed even on a non-zero exit: a daemonizing redis-server
             // forks before its parent's exit status is known, so the child
