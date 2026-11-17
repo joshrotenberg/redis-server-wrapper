@@ -625,11 +625,12 @@ impl RedisCli {
         cli_args.extend(args.iter().map(|s| s.to_string()));
 
         let str_args: Vec<&str> = cli_args.iter().map(|s| s.as_str()).collect();
-        let output = TokioCommand::new(&self.bin)
-            .args(&str_args)
-            .envs(self.auth_env())
-            .output()
-            .await?;
+        let output = output_until_exit(
+            TokioCommand::new(&self.bin)
+                .args(&str_args)
+                .envs(self.auth_env()),
+        )
+        .await?;
 
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -778,11 +779,12 @@ impl RedisCli {
         args.push("--cluster-yes".into());
 
         let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let output = TokioCommand::new(&self.bin)
-            .args(&str_args)
-            .envs(self.auth_env())
-            .output()
-            .await?;
+        let output = output_until_exit(
+            TokioCommand::new(&self.bin)
+                .args(&str_args)
+                .envs(self.auth_env()),
+        )
+        .await?;
 
         if output.status.success() {
             Ok(())
@@ -1067,12 +1069,13 @@ impl RedisCli {
     }
 
     async fn raw_output(&self, args: &[&str]) -> std::io::Result<Output> {
-        TokioCommand::new(&self.bin)
-            .args(self.base_args())
-            .args(args)
-            .envs(self.auth_env())
-            .output()
-            .await
+        output_until_exit(
+            TokioCommand::new(&self.bin)
+                .args(self.base_args())
+                .args(args)
+                .envs(self.auth_env()),
+        )
+        .await
     }
 
     /// Like [`Self::run`], but bounds the child process with `timeout` and
@@ -1096,12 +1099,12 @@ impl RedisCli {
         args: &[&str],
         timeout: Duration,
     ) -> std::io::Result<Output> {
-        let fut = TokioCommand::new(&self.bin)
-            .args(self.base_args())
+        let mut cmd = TokioCommand::new(&self.bin);
+        cmd.args(self.base_args())
             .args(args)
             .envs(self.auth_env())
-            .kill_on_drop(true)
-            .output();
+            .kill_on_drop(true);
+        let fut = output_until_exit(&mut cmd);
         match tokio::time::timeout(timeout, fut).await {
             Ok(result) => result,
             Err(_) => Err(std::io::Error::new(
@@ -1173,9 +1176,118 @@ fn redact(args: &[&str]) -> String {
     out.join(" ")
 }
 
+/// How long [`output_until_exit`] keeps reading after the child exits with no
+/// new data arriving.
+const EOF_GRACE: Duration = Duration::from_secs(1);
+
+/// Like [`TokioCommand::output`], but stops waiting for EOF once the child
+/// has exited and its pipes have gone quiet for [`EOF_GRACE`].
+///
+/// `output()` returns only at EOF on both pipes, and EOF needs every holder
+/// of a write end to close it. A process that inherited one by accident (see
+/// [`crate::process::cloexec_inherited_fds`]) keeps that from happening for
+/// as long as it lives, even though the child itself has exited (#202).
+///
+/// Nothing the child wrote is lost: once it has exited, everything it wrote
+/// is already in the pipe and readable without waiting, and each read that
+/// returns data restarts the grace period.
+pub(crate) async fn output_until_exit(cmd: &mut TokioCommand) -> std::io::Result<Output> {
+    use tokio::io::AsyncReadExt;
+
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut out = child.stdout.take();
+    let mut err = child.stderr.take();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut out_buf = [0u8; 8192];
+    let mut err_buf = [0u8; 8192];
+    let mut status = None;
+    let mut deadline: Option<tokio::time::Instant> = None;
+
+    loop {
+        if status.is_some() && out.is_none() && err.is_none() {
+            break;
+        }
+        tokio::select! {
+            r = async { out.as_mut().expect("guarded").read(&mut out_buf).await }, if out.is_some() => {
+                match r? {
+                    0 => out = None,
+                    n => {
+                        stdout.extend_from_slice(&out_buf[..n]);
+                        deadline = deadline.map(|_| tokio::time::Instant::now() + EOF_GRACE);
+                    }
+                }
+            }
+            r = async { err.as_mut().expect("guarded").read(&mut err_buf).await }, if err.is_some() => {
+                match r? {
+                    0 => err = None,
+                    n => {
+                        stderr.extend_from_slice(&err_buf[..n]);
+                        deadline = deadline.map(|_| tokio::time::Instant::now() + EOF_GRACE);
+                    }
+                }
+            }
+            s = child.wait(), if status.is_none() => {
+                status = Some(s?);
+                deadline = Some(tokio::time::Instant::now() + EOF_GRACE);
+            }
+            _ = tokio::time::sleep_until(deadline.unwrap_or_else(tokio::time::Instant::now)), if deadline.is_some() => {
+                tracing::warn!(
+                    "child exited but its output pipe is still held open by another process; \
+                     returning the output read so far"
+                );
+                break;
+            }
+        }
+    }
+
+    Ok(Output {
+        status: status.expect("loop exits only after the child exits"),
+        stdout,
+        stderr,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn output_until_exit_returns_when_another_process_holds_the_pipe() {
+        // The backgrounded sleep inherits stdout and stderr and outlives the
+        // shell, which is the shape of #202: the child is gone but EOF is
+        // not coming. `output()` would wait out the sleep.
+        let start = std::time::Instant::now();
+        let output = output_until_exit(TokioCommand::new("sh").args(["-c", "echo hi; sleep 10 &"]))
+            .await
+            .expect("sh should run");
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hi");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "returned after {:?}; it waited on the held pipe",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn output_until_exit_keeps_output_larger_than_a_pipe_buffer() {
+        // More than a pipe holds, so the child blocks on writes until they
+        // are read; none of it may be dropped.
+        const LEN: usize = 1 << 20;
+        let output = output_until_exit(
+            TokioCommand::new("sh").args(["-c", &format!("head -c {LEN} /dev/zero; echo err >&2")]),
+        )
+        .await
+        .expect("sh should run");
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), LEN);
+        assert_eq!(String::from_utf8_lossy(&output.stderr).trim(), "err");
+    }
 
     #[test]
     fn default_config() {

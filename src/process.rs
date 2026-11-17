@@ -217,9 +217,155 @@ pub fn kill_by_port(port: u16) {
     }
 }
 
+#[cfg(feature = "tokio")]
+/// Upper bound on the descriptors [`cloexec_inherited_fds`] marks when the
+/// open descriptors cannot be listed.
+///
+/// `RLIMIT_NOFILE` can be very large or unlimited; descriptors above this
+/// bound are left as they are.
+const MAX_FD_SWEEP: libc::c_int = 65_536;
+
+#[cfg(feature = "tokio")]
+/// Descriptors past the highest one open at spawn time that
+/// [`cloexec_inherited_fds`] also marks.
+///
+/// Covers descriptors other threads open between the listing and the fork.
+/// A new descriptor takes the lowest free number, so it lands at or just
+/// above the highest one already open.
+const FD_SWEEP_MARGIN: libc::c_int = 256;
+
+#[cfg(feature = "tokio")]
+/// A `pre_exec` hook that marks every descriptor above stderr close-on-exec.
+///
+/// On macOS std creates a child's pipes with `pipe()` then
+/// `fcntl(FD_CLOEXEC)`, which is not atomic. A process forked by another
+/// thread in between inherits the write end, and a daemonized `redis-server`
+/// would hold it for its lifetime, so the thread reading that pipe never sees
+/// EOF (#202). Running this in the child after fork and before exec drops any
+/// such descriptor at exec.
+///
+/// The descriptors are marked close-on-exec rather than closed so std's own
+/// exec-error pipe stays open until exec and a failed exec is still reported
+/// as a spawn error. Stdio has already been set up by the time the hook runs.
+///
+/// The bound is computed here, in the parent: the highest descriptor listed
+/// in `/dev/fd` plus [`FD_SWEEP_MARGIN`], or the soft `RLIMIT_NOFILE` capped
+/// at [`MAX_FD_SWEEP`] when the listing fails. The sweep is kept short
+/// because between fork and exec the child holds a copy of every descriptor
+/// the parent has, so a socket the parent closes in that window stays
+/// connected until the child execs. The returned closure only calls `fcntl`,
+/// which is async-signal-safe, and does not allocate.
+pub(crate) fn cloexec_inherited_fds() -> impl FnMut() -> std::io::Result<()> + Send + Sync + 'static
+{
+    let max_fd = sweep_bound();
+    move || {
+        for fd in 3..max_fd {
+            // SAFETY: fcntl on an arbitrary integer is defined; a closed
+            // descriptor returns EBADF, which is ignored.
+            unsafe {
+                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "tokio")]
+/// One past the last descriptor [`cloexec_inherited_fds`] marks.
+fn sweep_bound() -> libc::c_int {
+    let limit = open_file_limit();
+    match highest_open_fd() {
+        Some(fd) => fd.saturating_add(1 + FD_SWEEP_MARGIN).min(limit),
+        None => limit,
+    }
+}
+
+#[cfg(feature = "tokio")]
+/// The highest descriptor listed in `/dev/fd`, if it can be read.
+fn highest_open_fd() -> Option<libc::c_int> {
+    std::fs::read_dir("/dev/fd")
+        .ok()?
+        .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<libc::c_int>().ok())
+        .max()
+}
+
+#[cfg(feature = "tokio")]
+/// `RLIMIT_NOFILE`'s soft limit, capped at [`MAX_FD_SWEEP`].
+fn open_file_limit() -> libc::c_int {
+    let mut rl = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `rl` is a valid, writable rlimit.
+    let ok = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) } == 0;
+    if !ok || rl.rlim_cur == libc::RLIM_INFINITY {
+        return MAX_FD_SWEEP;
+    }
+    rl.rlim_cur.min(MAX_FD_SWEEP as libc::rlim_t) as libc::c_int
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whether a child spawned with or without the hook can see `fd`.
+    #[cfg(feature = "tokio")]
+    fn child_sees_fd(fd: libc::c_int, hook: bool) -> bool {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", &format!("test -e /dev/fd/{fd}")]);
+        if hook {
+            // SAFETY: the hook only calls fcntl.
+            unsafe {
+                cmd.pre_exec(cloexec_inherited_fds());
+            }
+        }
+        cmd.status().expect("sh should run").success()
+    }
+
+    #[test]
+    #[cfg(feature = "tokio")]
+    fn cloexec_hook_keeps_a_leaked_descriptor_out_of_the_child() {
+        // A pipe created without close-on-exec stands in for one another
+        // thread was midway through creating when the fork happened.
+        let mut fds = [0 as libc::c_int; 2];
+        // SAFETY: `fds` is a valid two-element array.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let write_end = fds[1];
+
+        assert!(
+            child_sees_fd(write_end, false),
+            "without the hook the child should inherit the descriptor"
+        );
+        assert!(
+            !child_sees_fd(write_end, true),
+            "with the hook the child must not inherit the descriptor"
+        );
+
+        // SAFETY: both descriptors were opened above and are closed once.
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "tokio")]
+    fn cloexec_hook_still_reports_a_failed_exec() {
+        // The hook marks descriptors close-on-exec instead of closing them, so
+        // std's exec-error pipe survives and a missing binary is still an
+        // error from spawn rather than a child that exits non-zero.
+        use std::os::unix::process::CommandExt;
+        let mut cmd = Command::new("/nonexistent/redis-server-wrapper-test-bin");
+        // SAFETY: the hook only calls fcntl.
+        unsafe {
+            cmd.pre_exec(cloexec_inherited_fds());
+        }
+        let err = cmd
+            .spawn()
+            .expect_err("spawning a missing binary must fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
 
     #[test]
     fn our_own_pid_is_not_a_redis_process() {

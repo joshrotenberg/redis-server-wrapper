@@ -3074,11 +3074,18 @@ async fn launch_server(
         // logfile -- is captured here rather than lost. Once redis-server
         // successfully daemonizes, this call still returns promptly: the
         // parent process exits as soon as the child detaches.
-        let output = Command::new(&config.redis_server_bin)
-            .arg(&conf_path)
-            .args(&module_args)
-            .output()
-            .await?;
+        //
+        // `cloexec_inherited_fds` keeps the daemon from holding a pipe some
+        // other thread was creating at the moment of the fork (#202), and
+        // `output_until_exit` keeps this call from waiting on one of its own
+        // pipes that some other process inherited.
+        let mut cmd = Command::new(&config.redis_server_bin);
+        cmd.arg(&conf_path).args(&module_args);
+        // SAFETY: the hook only calls fcntl, which is async-signal-safe.
+        unsafe {
+            cmd.pre_exec(crate::process::cloexec_inherited_fds());
+        }
+        let output = crate::cli::output_until_exit(&mut cmd).await?;
         tracing::debug!(elapsed_ms = start.elapsed().as_millis() as u64, "spawned");
 
         if !output.status.success() {
@@ -3150,14 +3157,20 @@ async fn launch_server(
         // is captured for [`spawn_failure_detail`] instead of leaking into
         // the caller's own output. stdin is nulled since nothing here ever
         // writes to it.
-        let mut child = Command::new(&config.redis_server_bin)
-            .arg(&conf_path)
+        //
+        // `cloexec_inherited_fds`: see the daemonizing branch above.
+        let mut cmd = Command::new(&config.redis_server_bin);
+        cmd.arg(&conf_path)
             .args(&module_args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .process_group(0)
-            .spawn()?;
+            .process_group(0);
+        // SAFETY: the hook only calls fcntl, which is async-signal-safe.
+        unsafe {
+            cmd.pre_exec(crate::process::cloexec_inherited_fds());
+        }
+        let mut child = cmd.spawn()?;
         tracing::debug!(elapsed_ms = start.elapsed().as_millis() as u64, "spawned");
 
         let pid = tokio::select! {
@@ -3168,11 +3181,14 @@ async fn launch_server(
                 let status = status?;
                 let mut stdout = Vec::new();
                 let mut stderr = Vec::new();
+                // Bounded: another process that inherited a write end
+                // would otherwise hold EOF off indefinitely (#202).
+                let drain = Duration::from_secs(1);
                 if let Some(mut out) = child.stdout.take() {
-                    let _ = out.read_to_end(&mut stdout).await;
+                    let _ = tokio::time::timeout(drain, out.read_to_end(&mut stdout)).await;
                 }
                 if let Some(mut err) = child.stderr.take() {
-                    let _ = err.read_to_end(&mut stderr).await;
+                    let _ = tokio::time::timeout(drain, err.read_to_end(&mut stderr)).await;
                 }
                 let output = Output { status, stdout, stderr };
                 let detail = spawn_failure_detail(&log_path, Some(&output));
